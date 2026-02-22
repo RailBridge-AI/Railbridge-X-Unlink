@@ -57,6 +57,7 @@ const viemClient = createWalletClient({
 // Option 1: Custom selector function to prefer specific networks
 const preferredNetworks = [
   "eip155:84532", // Base Sepolia (preferred)
+  "eip155:421614", // Arbitrum Sepolia (second choice)
   "eip155:8453",  // Base Mainnet (second choice)
   "eip155:1",     // Ethereum Mainnet (third choice)
   "eip155:137",   // Polygon (last resort)
@@ -253,6 +254,21 @@ async function exampleSameChainPayment() {
           console.error("\n⚠️  FAILED TO PARSE ERROR RESPONSE");
           console.error("   Could not parse the error response from the server.");
           console.error("   Error:", parseError instanceof Error ? parseError.message : parseError);
+          const fallbackBody = errorBody && typeof errorBody === "object" ? errorBody : null;
+          const fallbackDetails =
+            fallbackBody && typeof fallbackBody.details === "string" ? fallbackBody.details : "";
+          if (fallbackBody) {
+            console.error("\n   Parsed fallback error body:", JSON.stringify(fallbackBody, null, 2));
+          }
+          if (fallbackDetails === "insufficient_funds") {
+            console.error("\n💡 Likely cause: facilitator relayer has insufficient native gas on selected network.");
+            console.error("   Check facilitator wallet gas balance on this chain, or switch source network.");
+          } else if (fallbackDetails === "invalid_payment") {
+            console.error("\n💡 Likely cause: on-chain authorization validation failed.");
+            console.error("   Check USDC domain params/name/version for this network.");
+          } else if (fallbackDetails === "transaction_failed") {
+            console.error("\n💡 Settlement transaction reverted. Check facilitator logs for the exact revert reason.");
+          }
           if (responseText) {
             console.error("\n   Raw response:", responseText.substring(0, 500));
           }
@@ -448,4 +464,3 @@ if (process.argv[1] && fileURLToPath(`file://${process.argv[1]}`) === currentFil
 }
 
 export { exampleSameChainPayment, exampleCrossChainPayment, exampleManualPaymentFlow };
-

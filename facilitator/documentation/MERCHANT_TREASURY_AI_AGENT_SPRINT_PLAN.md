@@ -1,8 +1,14 @@
 # RailBridge Merchant Treasury OS — AI-Agent Sprint Delivery Plan
 
+For hackathon demo-first delivery, use `MERCHANT_TREASURY_MVP_V1_DEMO_PLAN.md` with `MERCHANT_TREASURY_MVP_V1_DEMO_SPEC.md`.
+
 ## 1) Goal
 
 Convert the existing tech spec into an execution model where **AI agents** implement the platform iteratively with human review gates.
+
+This delivery plan preserves RailBridge as the x402 facilitator of merchant payment revenue and adds Merchant Treasury OS capabilities as the chain-abstracted management layer on top.
+
+Current implementation wave is USDC-only for settlement, policy, balance, consolidation, and payout paths.
 
 This plan assumes:
 - AI agents write code, tests, migrations, and docs.
@@ -54,56 +60,70 @@ A ticket is ready only if it has:
 - Docs updated
 - Replay/idempotency validated where applicable
 
+## 2.4 Single-agent execution rules
+
+One AI agent owns the full implementation path end-to-end and must keep cross-domain context in every ticket.
+
+1. Before starting a ticket, the agent must restate:
+   - what was completed in prior tickets
+   - what assumptions from prior phases are now dependencies
+   - what invariants must remain true (`idempotency`, `ledger correctness`, `auth isolation`)
+2. The same agent performs planner, builder, verifier, reviewer, and release responsibilities in sequence for each ticket.
+3. The agent must avoid local optimizations that break downstream phases (for example API shortcuts that reduce ledger traceability).
+4. The agent can start the next ticket only after DoD is satisfied for the current ticket.
+5. Any schema or custody-risk change still requires human approval per safety gates.
+
 ---
 
 ## 3) Sprint-by-Sprint Plan (AI Agent Execution)
 
-Each sprint below is designed as a chain of agent tasks. Keep sprint length 1 week.
+Each sprint is one week. One agent executes the full path in order.
 
-## Sprint 1 — Event Backbone + Outbox
+## 3.1 End-to-end context checklist (run before each sprint)
 
-### Outcome
-Reliable event emission from verify/settle lifecycle with idempotent consumption support.
+- Re-read current implementation state vs `MERCHANT_TREASURY_TECH_SPEC.md`.
+- Confirm architecture alignment with `ARCHITECTURE.md`.
+- Confirm production constraints with `PRODUCTION_CHECKLIST.md`.
+- Verify x402 facilitator path remains source of merchant revenue events.
+- Verify no change weakens tenancy isolation, auditability, or replay safety.
 
-### Agent tasks
-- Planner: define canonical event schema + versioning rules.
-- Builder: add outbox table + write path from verify/settle pipeline.
-- Builder: add outbox relay worker.
-- Verifier: run duplicate delivery simulation and ensure consumer idempotency.
-- Reviewer: validate no behavior regression in existing payment flow.
-
-### Deliverables
-- `event schema` module
-- outbox migration
-- relay worker
-- replay CLI (basic)
-
-### Exit criteria
-- Replayed event does not create duplicate state updates.
-- Event lag metrics visible.
-
----
+## 3.2 Sequential sprint board (single-agent)
 
 ## Sprint 0.5 — Merchant Identity + Custody Foundation
 
 ### Outcome
 Web2 auth and custodial account primitives exist before exposing treasury controls.
 
-### Agent tasks
-- Planner: finalize auth scope matrix (`admin`, `finance`, `readonly`) and account-tenancy rules.
-- Builder: implement merchant user/auth tables and account wallet registry migrations.
-- Builder: add secure signer adapter interface using key references (no private keys in DB).
-- Verifier: test cross-merchant isolation and role-based authorization failures.
-- Reviewer: validate MFA requirements for policy/consolidation/payout writes.
-
-### Deliverables
-- merchant user/account/wallet migrations
-- auth middleware with merchant/account scoped claims
-- signer provider interface contract
+### Execution steps
+1. Finalize auth scope matrix (`admin`, `finance`, `readonly`) and account-tenancy rules.
+2. Implement merchant user/account/wallet migrations.
+3. Implement auth middleware with merchant/account-scoped claims.
+4. Add secure signer adapter interface using key references (no private keys in DB).
+5. Verify cross-merchant isolation and role-based failure paths.
+6. Document migration and rollback notes.
 
 ### Exit criteria
 - unauthorized cross-merchant and cross-account access is blocked
 - write actions require correct role and pass audit logging requirements
+
+---
+
+## Sprint 1 — Event Backbone + Outbox
+
+### Outcome
+Reliable event emission from verify/settle lifecycle with idempotent consumption support.
+
+### Execution steps
+1. Define canonical event schema + versioning rules.
+2. Add outbox table + write path from verify/settle pipeline.
+3. Build outbox relay worker with retries.
+4. Build replay CLI (basic) for local/dev validation.
+5. Run duplicate/out-of-order/partial-failure simulations.
+6. Publish event contract changelog and relay runbook.
+
+### Exit criteria
+- replayed event does not create duplicate state updates
+- event lag metrics visible
 
 ---
 
@@ -112,21 +132,17 @@ Web2 auth and custodial account primitives exist before exposing treasury contro
 ### Outcome
 Double-entry ledger and derived balances available for merchant read APIs.
 
-### Agent tasks
-- Planner: define account code map and invariants.
-- Builder: implement journal writer + invariant checks.
-- Builder: implement balance projector/materializer.
-- Verifier: run ledger invariant tests on success/failure/duplicate events.
-- Reviewer: validate traceability from event_id -> tx_hash -> ledger rows.
-
-### Deliverables
-- ledger tables and repository
-- invariant validator
-- balance projection job
+### Execution steps
+1. Define ledger account code map and invariants.
+2. Implement ledger tables and journal writer.
+3. Implement invariant validator (`sum(debit) == sum(credit)`).
+4. Implement balance projector/materializer.
+5. Add replay determinism checks and reconciliation drift checks.
+6. Draft reconciliation and drift response runbook.
 
 ### Exit criteria
-- `sum(debit) == sum(credit)` per event group.
-- Balance query deterministic after replay.
+- `sum(debit) == sum(credit)` per event group
+- balance query deterministic after replay
 
 ---
 
@@ -135,21 +151,17 @@ Double-entry ledger and derived balances available for merchant read APIs.
 ### Outcome
 Merchant settlement behavior is controlled via policy (not hardcoded flow).
 
-### Agent tasks
-- Planner: define policy schema v1 and validation matrix.
-- Builder: create policy storage + get/update API.
-- Builder: implement decision engine for bridge/no-bridge and destination asset/network.
-- Verifier: test policy changes apply only to new settlements.
-- Reviewer: validate safe defaults + fallback behavior.
-
-### Deliverables
-- policy model + API
-- policy evaluation function
-- policy decision logs
+### Execution steps
+1. Define policy schema v1 and validation matrix.
+2. Implement policy storage and read/update API internals.
+3. Implement decision function (bridge/no-bridge, destination network/asset).
+4. Integrate balance availability checks into policy decision path.
+5. Verify policy changes only affect new settlements.
+6. Document policy versioning and fallback behavior.
 
 ### Exit criteria
-- Policy updates are versioned and auditable.
-- Unsupported network/asset rejected with clear errors.
+- policy updates are versioned and auditable
+- unsupported network/asset rejected with clear errors
 
 ---
 
@@ -158,23 +170,17 @@ Merchant settlement behavior is controlled via policy (not hardcoded flow).
 ### Outcome
 Merchant can access balances, settlements, and policy through stable APIs.
 
-### Agent tasks
-- Planner: finalize OpenAPI for balances/settlements/policy/payout trigger.
-- Builder: implement read APIs over derived data.
-- Builder: add cursor pagination and filtering.
-- Verifier: contract tests against OpenAPI examples.
-- Reviewer: enforce auth scope checks and PII-safe logging.
-
-### Deliverables
-- `/v1/merchant/{merchantId}/accounts/{accountId}/balances`
-- `/v1/merchant/{merchantId}/accounts/{accountId}/settlements`
-- `/v1/merchant/{merchantId}/accounts/{accountId}/policy`
-- `/v1/merchant/{merchantId}/accounts/{accountId}/consolidations` (manual trigger)
-- `/v1/merchant/{merchantId}/accounts/{accountId}/payouts` (manual trigger)
+### Execution steps
+1. Finalize OpenAPI for balances, settlements, policy, consolidations, payouts.
+2. Implement account-scoped read APIs over derived data.
+3. Add cursor pagination and filtering.
+4. Enforce auth scope and account tenancy checks on all endpoints.
+5. Run contract tests against OpenAPI examples + auth negative-path tests.
+6. Update API examples and release notes.
 
 ### Exit criteria
-- APIs return lifecycle + failure reasons consistently.
-- API examples and tests stay in sync.
+- APIs return lifecycle + failure reasons consistently
+- API examples and tests stay in sync
 
 ---
 
@@ -183,21 +189,23 @@ Merchant can access balances, settlements, and policy through stable APIs.
 ### Outcome
 Operational gas abstraction and fee attribution are available.
 
-### Agent tasks
-- Planner: define gas health model and refill thresholds.
-- Builder: implement gas balance monitors by network.
-- Builder: implement refill workflow hooks and gas fee attribution.
-- Verifier: simulate low-gas and route degradation scenarios.
-- Reviewer: validate alarms + runbook completeness.
-
-### Deliverables
-- gas accounts tracker
-- refill alerts/workflow
-- per-merchant gas cost reporting
+### Execution steps
+1. Define gas health model and refill thresholds.
+2. Implement gas balance monitors by network.
+3. Implement refill workflow hooks.
+4. Add per-merchant gas fee attribution in settlement/bridge paths.
+5. Simulate low-gas and route degradation scenarios.
+6. Finalize alarms and incident response runbook.
 
 ### Exit criteria
-- Low-gas condition detected before settlement failures.
-- Gas costs attributed per settlement/bridge event.
+- low-gas condition detected before settlement failures
+- gas costs attributed per settlement/bridge event
+
+## 3.3 Assignment command template
+
+Use this instruction format when assigning an AI:
+
+"You are the single implementation agent for RailBridge Merchant Treasury OS. Execute the next ready ticket in sequence, keep end-to-end context from prior tickets, and follow Sections 2.2, 2.3, and 2.4."
 
 ---
 
@@ -263,17 +271,19 @@ AI agents can propose; humans approve critical financial-risk decisions.
 
 ---
 
-## 8) First 10 AI Tickets (ready to run)
+## 8) First 10 AI Tickets (sequential execution queue)
 
-1. `AI-TREASURY-001`: Event envelope types + schema validation
-2. `AI-TREASURY-002`: Outbox migration + repository
-3. `AI-TREASURY-003`: Merchant users/accounts/wallets migrations
-4. `AI-TREASURY-004`: Auth middleware + role scope enforcement
-5. `AI-TREASURY-005`: Emit `payment.verified` / `payment.settled_source`
-6. `AI-TREASURY-006`: Outbox relay worker + retries
-7. `AI-TREASURY-007`: Ledger tables + invariant checker
-8. `AI-TREASURY-008`: Balance projector + replay command
-9. `AI-TREASURY-009`: Account-scoped balances/settlements/policy APIs
-10. `AI-TREASURY-010`: Consolidation trigger API + gas monitor hooks
+| Order | Ticket | Depends on | Scope |
+| --- | --- | --- | --- |
+| 1 | `AI-TREASURY-001` | none | event envelope types + schema validation |
+| 2 | `AI-TREASURY-002` | `AI-TREASURY-001` | outbox migration + repository |
+| 3 | `AI-TREASURY-003` | `AI-TREASURY-002` | merchant users/accounts/wallets migrations |
+| 4 | `AI-TREASURY-004` | `AI-TREASURY-003` | auth middleware + role scope enforcement |
+| 5 | `AI-TREASURY-005` | `AI-TREASURY-004` | emit `payment.verified` / `payment.settled_source` |
+| 6 | `AI-TREASURY-006` | `AI-TREASURY-005` | outbox relay worker + retries |
+| 7 | `AI-TREASURY-007` | `AI-TREASURY-006` | ledger tables + invariant checker |
+| 8 | `AI-TREASURY-008` | `AI-TREASURY-007` | balance projector + replay command |
+| 9 | `AI-TREASURY-009` | `AI-TREASURY-008` | account-scoped balances/settlements/policy APIs |
+| 10 | `AI-TREASURY-010` | `AI-TREASURY-009` | consolidation trigger API + gas monitor hooks |
 
-This sequence maps directly to the original technical spec while optimizing execution for AI-agent delivery.
+Execution rule: do not start ticket `N+1` until ticket `N` passes DoD and verification checks.

@@ -11,6 +11,7 @@ import { createNonceManager, jsonRpc } from "viem/nonce";
 import { Network } from "@x402/core/types";
 import { BridgeKit, type EVMChainDefinition } from "@circle-fin/bridge-kit";
 import { CircleCCTPBridgeService } from "./services/circleCCTPBridgeService.js";
+import { MerchantOsPublisher } from "./services/merchantOsPublisher.js";
 import { extractCrossChainInfo, CROSS_CHAIN } from "./extensions/crossChain.js";
 import { CrossChainRouter } from "./schemes/crossChainRouter.js";
 import { handleCrossChainBridgeAsync } from "./bridgeWorker.js";
@@ -133,6 +134,98 @@ const bridgeService = new CircleCCTPBridgeService({
   provider: "cctp",
   facilitatorAddress: evmAccount.address,
 });
+
+const merchantOsPublisher = new MerchantOsPublisher({
+  ingestUrl: config.MERCHANT_OS_EVENT_INGEST_URL,
+  ingestToken: config.MERCHANT_OS_INGEST_TOKEN,
+  merchantContextMapJson: config.MERCHANT_CONTEXT_MAP_JSON,
+  defaultContext:
+    config.MERCHANT_OS_DEFAULT_MERCHANT_ID && config.MERCHANT_OS_DEFAULT_ACCOUNT_ID
+      ? {
+          merchantId: config.MERCHANT_OS_DEFAULT_MERCHANT_ID,
+          accountId: config.MERCHANT_OS_DEFAULT_ACCOUNT_ID,
+        }
+      : undefined,
+});
+
+if (!config.MERCHANT_OS_EVENT_INGEST_URL) {
+  console.warn(
+    "[merchant-os] MERCHANT_OS_EVENT_INGEST_URL is not set. Settlement events will not appear in Merchant OS dashboard.",
+  );
+} else {
+  console.info(`[merchant-os] Settlement event ingest enabled: ${config.MERCHANT_OS_EVENT_INGEST_URL}`);
+  if (!config.MERCHANT_CONTEXT_MAP_JSON && !config.MERCHANT_OS_DEFAULT_MERCHANT_ID) {
+    console.warn(
+      "[merchant-os] No merchant context mapping/default configured. If requirements omit merchant metadata, events will be dropped.",
+    );
+  } else {
+    console.info(
+      `[merchant-os] Merchant context mode: ${
+        config.MERCHANT_CONTEXT_MAP_JSON ? "address_map" : "default_tenant"
+      }`,
+    );
+  }
+}
+
+const pickString = (...values: unknown[]): string | undefined =>
+  values.find((value): value is string => typeof value === "string" && value.trim() !== "")?.trim();
+
+const extractApiRevenueMeta = (requirements: PaymentRequirements) => {
+  const reqAny = requirements as any;
+  const reqExtra = reqAny.extra || {};
+  const priceExtra = reqAny.price?.extra || {};
+  const method = pickString(
+    reqAny.method,
+    reqExtra.method,
+    reqExtra.httpMethod,
+    priceExtra.method,
+    priceExtra.httpMethod,
+  );
+  const path = pickString(
+    reqAny.resource,
+    reqAny.route,
+    reqAny.path,
+    reqAny.endpoint,
+    reqAny.resourcePath,
+    reqExtra.route,
+    reqExtra.path,
+    reqExtra.endpoint,
+    reqExtra.apiPath,
+    priceExtra.route,
+    priceExtra.path,
+    priceExtra.endpoint,
+    priceExtra.apiPath,
+  );
+
+  const derivedRoute = path ? `${method ? `${method.toUpperCase()} ` : ""}${path}` : undefined;
+  const apiRoute = pickString(reqExtra.apiRoute, priceExtra.apiRoute, derivedRoute);
+  const apiId = pickString(
+    reqAny.resourceId,
+    reqAny.routeId,
+    reqAny.endpointId,
+    reqExtra.apiId,
+    priceExtra.apiId,
+    apiRoute,
+  );
+  const apiName = pickString(
+    reqExtra.apiName,
+    reqExtra.name,
+    priceExtra.apiName,
+    priceExtra.name,
+    reqExtra.description,
+  );
+
+  return { apiId, apiRoute, apiName };
+};
+
+const extractMerchantContextMeta = (requirements: PaymentRequirements) => {
+  const reqAny = requirements as any;
+  const reqExtra = reqAny.extra || {};
+  const priceExtra = reqAny.price?.extra || {};
+  const merchantId = pickString(reqExtra.merchantId, priceExtra.merchantId, reqAny.merchantId);
+  const accountId = pickString(reqExtra.accountId, priceExtra.accountId, reqAny.accountId);
+  return { merchantId, accountId };
+};
 
 // ============================================================================
 // Scheme Setup
@@ -263,8 +356,36 @@ const facilitator = new x402Facilitator()
       network: context.result.network,
     });
 
-    // Handle cross-chain bridging asynchronously after settlement
     const crossChainInfo = extractCrossChainInfo(context.paymentPayload);
+    const merchantAddress = crossChainInfo?.destinationPayTo || context.requirements.payTo;
+    const apiMeta = extractApiRevenueMeta(context.requirements);
+    const merchantContextMeta = extractMerchantContextMeta(context.requirements);
+    const isCrossChain =
+      Boolean(crossChainInfo) &&
+      context.result.success &&
+      context.result.network !== crossChainInfo?.destinationNetwork &&
+      config.CROSS_CHAIN_ENABLED;
+
+    if (context.result.success) {
+      const initialStatus = isCrossChain ? "bridge_pending" : "settled_source";
+      await merchantOsPublisher.publishSettlementEvent({
+        eventId: `${context.result.transaction}:${initialStatus}`,
+        merchantAddress,
+        sourceNetwork: context.result.network as Network,
+        destinationNetwork: crossChainInfo?.destinationNetwork,
+        ...apiMeta,
+        ...merchantContextMeta,
+        asset: context.requirements.asset,
+        amount: context.requirements.amount,
+        status: initialStatus,
+        txHash: context.result.transaction,
+        sourceTxHash: context.result.transaction,
+        destinationTxHash: isCrossChain ? undefined : context.result.transaction,
+        settlementId: context.result.transaction,
+      });
+    }
+
+    // Handle cross-chain bridging asynchronously after settlement
     if (
       crossChainInfo &&
       context.result.success &&
@@ -279,6 +400,43 @@ const facilitator = new x402Facilitator()
         crossChainInfo.destinationAsset,
         context.requirements.amount,
         crossChainInfo.destinationPayTo,
+        undefined,
+        {
+          onSuccess: async (bridgeResult) => {
+            await merchantOsPublisher.publishSettlementEvent({
+              eventId: `${context.result.transaction}:bridge_confirmed`,
+              merchantAddress: crossChainInfo.destinationPayTo,
+              sourceNetwork: context.result.network as Network,
+              destinationNetwork: crossChainInfo.destinationNetwork,
+              ...apiMeta,
+              ...merchantContextMeta,
+              asset: context.requirements.asset,
+              amount: context.requirements.amount,
+              status: "bridge_confirmed",
+              txHash: bridgeResult.destinationTxHash || bridgeResult.bridgeTxHash || context.result.transaction,
+              sourceTxHash: context.result.transaction,
+              bridgeTxHash: bridgeResult.bridgeTxHash || undefined,
+              destinationTxHash: bridgeResult.destinationTxHash || undefined,
+              settlementId: context.result.transaction,
+            });
+          },
+          onFailure: async () => {
+            await merchantOsPublisher.publishSettlementEvent({
+              eventId: `${context.result.transaction}:failed`,
+              merchantAddress: crossChainInfo.destinationPayTo,
+              sourceNetwork: context.result.network as Network,
+              destinationNetwork: crossChainInfo.destinationNetwork,
+              ...apiMeta,
+              ...merchantContextMeta,
+              asset: context.requirements.asset,
+              amount: context.requirements.amount,
+              status: "failed",
+              txHash: context.result.transaction,
+              sourceTxHash: context.result.transaction,
+              settlementId: context.result.transaction,
+            });
+          },
+        },
       );
     }
   })
@@ -418,5 +576,3 @@ app.listen(parseInt(config.PORT), () => {
   console.log(`   GET  /supported - Get supported payment kinds`);
   console.log(`   GET  /health - Health check`);
 });
-
-
