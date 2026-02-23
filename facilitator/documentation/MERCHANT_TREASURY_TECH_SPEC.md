@@ -5,6 +5,7 @@
 ## Companion Delivery Plan
 
 For AI-agent execution planning and sprint operations, see `MERCHANT_TREASURY_AI_AGENT_SPRINT_PLAN.md`.
+For hackathon demo scope, see `MERCHANT_TREASURY_MVP_V1_DEMO_SPEC.md` and `MERCHANT_TREASURY_MVP_V1_DEMO_PLAN.md`.
 
 ---
 
@@ -15,6 +16,8 @@ This spec defines how to evolve RailBridge from a cross-chain x402 facilitator i
 - Gas abstraction for multi-chain operations
 - Merchant-facing APIs and dashboard data
 - Web2-friendly merchant onboarding, auth, and custody controls
+
+RailBridge remains the x402 facilitator for merchant payment revenue; Merchant Treasury OS is the chain-abstracted operating layer used to manage that x402-generated revenue.
 
 This document is implementation-oriented and designed for engineering planning and sprint execution.
 
@@ -29,6 +32,8 @@ We are aligned on an MVP that does **three things first**:
 3. Supports manual consolidation into a preferred destination chain, with policy automation added incrementally.
 
 Out of scope for MVP v1: advanced non-custodial wallet orchestration, complex strategy automation, and multi-account hierarchy management.
+
+Current implementation constraint: MVP v1 asset support is USDC-only; multi-asset support is a later phase.
 
 ---
 

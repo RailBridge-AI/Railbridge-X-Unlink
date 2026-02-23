@@ -25,6 +25,11 @@ type CircleErrorLike = {
   message?: string;
 };
 
+export interface BridgeLifecycleCallbacks {
+  onSuccess?: (result: BridgeResult) => void | Promise<void>;
+  onFailure?: (error: unknown) => void | Promise<void>;
+}
+
 /**
  * Decide whether a bridge error is retryable.
  * Uses Circle CCTP error shape when available (code, type, recoverability, cause).
@@ -131,6 +136,7 @@ export function handleCrossChainBridgeAsync(
   amount: string,
   recipient: string,
   maxAttempts: number = DEFAULT_MAX_ATTEMPTS,
+  callbacks?: BridgeLifecycleCallbacks,
 ): void {
   void (async () => {
     try {
@@ -164,6 +170,10 @@ export function handleCrossChainBridgeAsync(
         destinationTx: bridgeResult.destinationTxHash,
         messageId: bridgeResult.messageId,
       });
+
+      if (callbacks?.onSuccess) {
+        await callbacks.onSuccess(bridgeResult);
+      }
     } catch (error) {
       logBridgeEvent("bridge_failure", {
         error: error instanceof Error ? error.message : String(error),
@@ -177,6 +187,10 @@ export function handleCrossChainBridgeAsync(
         amount,
         attempts: maxAttempts,
       });
+
+      if (callbacks?.onFailure) {
+        await callbacks.onFailure(error);
+      }
     }
   })();
 }

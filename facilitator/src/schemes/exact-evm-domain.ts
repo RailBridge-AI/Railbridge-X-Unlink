@@ -109,6 +109,55 @@ const buildDomain = (
   return domain;
 };
 
+const toErrorText = (error: unknown): string => {
+  if (!error) {
+    return "unknown error";
+  }
+
+  const parts: string[] = [];
+  const anyError = error as any;
+  if (typeof anyError.shortMessage === "string" && anyError.shortMessage) {
+    parts.push(anyError.shortMessage);
+  }
+  if (typeof anyError.details === "string" && anyError.details) {
+    parts.push(anyError.details);
+  }
+  if (Array.isArray(anyError.metaMessages)) {
+    anyError.metaMessages
+      .filter((item: unknown) => typeof item === "string" && item)
+      .forEach((item: string) => parts.push(item));
+  }
+  if (anyError.cause) {
+    parts.push(toErrorText(anyError.cause));
+  }
+  if (error instanceof Error && error.message) {
+    parts.push(error.message);
+  } else if (typeof error === "string") {
+    parts.push(error);
+  }
+
+  const normalized = parts
+    .map((part) => part.trim())
+    .filter(Boolean);
+
+  return normalized.length ? normalized.join(" | ") : String(error);
+};
+
+const classifySettlementErrorReason = (message: string): string => {
+  const lower = message.toLowerCase();
+  if (lower.includes("insufficient funds") && (lower.includes("gas") || lower.includes("fee"))) {
+    return "insufficient_funds";
+  }
+  if (
+    lower.includes("authorization is used") ||
+    lower.includes("authorization has expired") ||
+    lower.includes("invalid signature")
+  ) {
+    return "invalid_payment";
+  }
+  return "transaction_failed";
+};
+
 export class ExactEvmSchemeDomainClient implements SchemeNetworkClient {
   readonly scheme = "exact";
 
@@ -429,10 +478,20 @@ export class ExactEvmSchemeDomainFacilitator implements SchemeNetworkFacilitator
         payer: exactEvmPayload.authorization.from,
       };
     } catch (error) {
-      console.error("Failed to settle transaction:", error);
+      const errorMessage = toErrorText(error);
+      const errorReason = classifySettlementErrorReason(errorMessage);
+      console.error("Failed to settle transaction:", {
+        network: payload.accepted.network,
+        asset: requirements.asset,
+        payTo: requirements.payTo,
+        amount: requirements.amount,
+        payer: exactEvmPayload.authorization.from,
+        errorReason,
+        error: errorMessage,
+      });
       return {
         success: false,
-        errorReason: "transaction_failed",
+        errorReason,
         transaction: "",
         network: payload.accepted.network,
         payer: exactEvmPayload.authorization.from,
@@ -440,4 +499,3 @@ export class ExactEvmSchemeDomainFacilitator implements SchemeNetworkFacilitator
     }
   }
 }
-

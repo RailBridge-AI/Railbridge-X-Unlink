@@ -1,18 +1,6 @@
-import dotenv from "dotenv";
-import { fileURLToPath } from "url";
-import { dirname, join } from "path";
+import { loadFacilitatorEnv } from "./load-env.js";
 
-// Load environment variables from .env file in project root
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = dirname(__filename);
-const envPath = join(__dirname, "..", ".env");
-const result = dotenv.config({ path: envPath });
-
-if (result.error) {
-  console.warn(`⚠️  Could not load .env file from ${envPath}`);
-  console.warn(`   Make sure you have created a .env file from env.template`);
-  console.warn(`   Error: ${result.error.message}`);
-}
+loadFacilitatorEnv();
 
 const EVM_PRIVATE_KEY = process.env.EVM_PRIVATE_KEY as `0x${string}` | undefined;
 
@@ -33,6 +21,22 @@ const PORT = process.env.PORT || "4022";
 const CROSS_CHAIN_ENABLED = process.env.CROSS_CHAIN_ENABLED !== "false"; // Default to enabled
 const EVM_RPC_URL = process.env.EVM_RPC_URL;
 const DEPLOY_ERC4337_WITH_EIP6492 = process.env.DEPLOY_ERC4337_WITH_EIP6492 === "true";
+const MERCHANT_OS_EVENT_INGEST_URL = process.env.MERCHANT_OS_EVENT_INGEST_URL;
+const MERCHANT_OS_INGEST_TOKEN = process.env.MERCHANT_OS_INGEST_TOKEN;
+const MERCHANT_CONTEXT_MAP_JSON = process.env.MERCHANT_CONTEXT_MAP_JSON;
+const MERCHANT_OS_DEFAULT_MERCHANT_ID =
+  process.env.MERCHANT_OS_DEFAULT_MERCHANT_ID || process.env.MERCHANT_OS_MERCHANT_ID;
+const MERCHANT_OS_DEFAULT_ACCOUNT_ID =
+  process.env.MERCHANT_OS_DEFAULT_ACCOUNT_ID || process.env.MERCHANT_OS_ACCOUNT_ID;
+const ARBITRUM_SEPOLIA_RPC_URL =
+  process.env.ARBITRUM_SEPOLIA_RPC_URL ||
+  process.env.MERCHANT_OS_RPC_EIP155_421614?.split(/[\s,]+/).find(Boolean) ||
+  "https://sepolia-rollup.arbitrum.io/rpc";
+const REVENUE_REGISTRY_ADDRESS = process.env.REVENUE_REGISTRY_ADDRESS as `0x${string}` | undefined;
+const REVENUE_REGISTRY_ENABLED =
+  process.env.REVENUE_REGISTRY_ENABLED === "true" || Boolean(REVENUE_REGISTRY_ADDRESS);
+const REVENUE_REGISTRY_OWNER = process.env.REVENUE_REGISTRY_OWNER as `0x${string}` | undefined;
+const ARBISCAN_API_KEY = process.env.ARBISCAN_API_KEY;
 
 export const config = {
   PORT,
@@ -40,5 +44,14 @@ export const config = {
   EVM_PRIVATE_KEY,
   EVM_RPC_URL,
   DEPLOY_ERC4337_WITH_EIP6492,
+  MERCHANT_OS_EVENT_INGEST_URL,
+  MERCHANT_OS_INGEST_TOKEN,
+  MERCHANT_CONTEXT_MAP_JSON,
+  MERCHANT_OS_DEFAULT_MERCHANT_ID,
+  MERCHANT_OS_DEFAULT_ACCOUNT_ID,
+  ARBITRUM_SEPOLIA_RPC_URL,
+  REVENUE_REGISTRY_ADDRESS,
+  REVENUE_REGISTRY_ENABLED,
+  REVENUE_REGISTRY_OWNER,
+  ARBISCAN_API_KEY,
 };
-

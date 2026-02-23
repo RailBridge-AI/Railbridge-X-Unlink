@@ -12,6 +12,8 @@ RailBridge currently behaves as a **cross-chain payment facilitator** with:
 
 In practical terms, the product center of gravity is still **transaction rail orchestration** (protocol correctness + settlement), not merchant-facing finance operations.
 
+RailBridge remains the x402 facilitator for merchant payment revenue, and the treasury direction is the chain-abstracted operating layer that helps merchants manage that x402-driven revenue.
+
 ### What this means strategically
 
 The current architecture is a strong **infrastructure base**:
