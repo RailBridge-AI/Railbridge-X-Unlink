@@ -190,25 +190,58 @@ const buildOverviewResponse = async (merchantId, accountId) => {
   const onchainByNetwork = await fetchOnchainUsdcBalancesByNetwork({
     wallets,
     rpcByNetwork: config.rpcByNetwork,
+    rpcUrlsByNetwork: config.rpcUrlsByNetwork,
     usdcTokenByNetwork: config.usdcTokenByNetwork,
     timeoutMs: config.onchainReadTimeoutMs,
     totalBudgetMs: config.onchainReadTotalBudgetMs
   });
+
+  const parseBaseUnits = (value) => {
+    try {
+      return BigInt(String(value || "0"));
+    } catch {
+      return 0n;
+    }
+  };
 
   const mergedByNetwork = new Map();
   wallets.forEach((wallet) => {
     if (!mergedByNetwork.has(wallet.network)) {
       const onchain = onchainByNetwork.get(wallet.network);
       const projected = projectedByNetwork.get(wallet.network);
-      const amount = onchain?.amount || projected?.amount || "0";
+      let amount = "0";
+      let balanceSource = "none";
+      let updatedAt = nowIso();
+
+      if (onchain && projected) {
+        const onchainAmount = parseBaseUnits(onchain.amount);
+        const projectedAmount = parseBaseUnits(projected.amount);
+        if (onchainAmount === 0n && projectedAmount > 0n) {
+          amount = projected.amount;
+          balanceSource = "projected";
+          updatedAt = projected.updatedAt || onchain.asOf || nowIso();
+        } else {
+          amount = onchain.amount;
+          balanceSource = "onchain";
+          updatedAt = onchain.asOf || projected.updatedAt || nowIso();
+        }
+      } else if (onchain) {
+        amount = onchain.amount;
+        balanceSource = "onchain";
+        updatedAt = onchain.asOf || nowIso();
+      } else if (projected) {
+        amount = projected.amount;
+        balanceSource = "projected";
+        updatedAt = projected.updatedAt || nowIso();
+      }
       mergedByNetwork.set(wallet.network, {
         network: wallet.network,
         asset: "USDC",
         amount,
         decimals: 6,
         usdValue: toDecimalUsdcString(amount),
-        balanceSource: onchain ? "onchain" : projected ? "projected" : "none",
-        updatedAt: onchain?.asOf || projected?.updatedAt || nowIso()
+        balanceSource,
+        updatedAt
       });
     }
   });
@@ -268,7 +301,8 @@ const validateInternalToken = (req) => {
 const consolidationBridgeService = new ConsolidationBridgeService();
 const gasSponsorService = new GasSponsorService({
   privateKey: config.gasSponsorPrivateKey,
-  rpcByNetwork: config.rpcByNetwork
+  rpcByNetwork: config.rpcByNetwork,
+  rpcUrlsByNetwork: config.rpcUrlsByNetwork
 });
 
 if (config.realConsolidationBridgeEnabled) {
@@ -348,6 +382,7 @@ const estimateRequiredBridgeGas = async ({
   const gasPrice = await fetchOnchainGasPrice({
     network,
     rpcByNetwork: config.rpcByNetwork,
+    rpcUrlsByNetwork: config.rpcUrlsByNetwork,
     timeoutMs: config.onchainReadTimeoutMs
   });
 
@@ -471,6 +506,7 @@ const ensureNetworkGasForBridge = async ({
       network,
       address: walletAddress,
       rpcByNetwork: config.rpcByNetwork,
+      rpcUrlsByNetwork: config.rpcUrlsByNetwork,
       timeoutMs: config.onchainReadTimeoutMs
     });
     if (!updated) {
@@ -1211,12 +1247,14 @@ const server = createServer(async (req, res) => {
               network: sourceNetwork,
               address: sourceWallet.address,
               rpcByNetwork: config.rpcByNetwork,
+              rpcUrlsByNetwork: config.rpcUrlsByNetwork,
               timeoutMs: config.onchainReadTimeoutMs
             }),
             fetchOnchainNativeBalance({
               network: destinationNetwork,
               address: destinationWallet.address,
               rpcByNetwork: config.rpcByNetwork,
+              rpcUrlsByNetwork: config.rpcUrlsByNetwork,
               timeoutMs: config.onchainReadTimeoutMs
             })
           ]);
@@ -1248,6 +1286,7 @@ const server = createServer(async (req, res) => {
           const onchainSourceMap = await fetchOnchainUsdcBalancesByNetwork({
             wallets: [sourceWallet],
             rpcByNetwork: config.rpcByNetwork,
+            rpcUrlsByNetwork: config.rpcUrlsByNetwork,
             usdcTokenByNetwork: config.usdcTokenByNetwork,
             timeoutMs: config.onchainReadTimeoutMs,
             totalBudgetMs: Math.max(config.onchainReadTimeoutMs, config.onchainReadTotalBudgetMs)
@@ -1304,6 +1343,21 @@ const server = createServer(async (req, res) => {
           if (!destinationGasCheck.ok) {
             return sendJson(res, 400, destinationGasCheck);
           }
+
+          console.info("[merchant-os] consolidation preflight gas verified", {
+            sourceNetwork,
+            sourceWallet: sourceWallet.address,
+            sourceAvailableWei: sourceGasCheck.availableWei?.toString?.() || null,
+            sourceRequiredWei: sourceGasCheck.requiredWei?.toString?.() || null,
+            sourceToppedUp: Boolean(sourceGasCheck.toppedUp),
+            sourceTopUpTxHash: sourceGasCheck.topUpTxHash || null,
+            destinationNetwork,
+            destinationWallet: destinationWallet.address,
+            destinationAvailableWei: destinationGasCheck.availableWei?.toString?.() || null,
+            destinationRequiredWei: destinationGasCheck.requiredWei?.toString?.() || null,
+            destinationToppedUp: Boolean(destinationGasCheck.toppedUp),
+            destinationTopUpTxHash: destinationGasCheck.topUpTxHash || null
+          });
 
           if (sourceGasCheck.toppedUp || destinationGasCheck.toppedUp) {
             console.info("[merchant-os] gas sponsor top-up completed", {

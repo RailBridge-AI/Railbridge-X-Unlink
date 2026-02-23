@@ -62,8 +62,9 @@ const sanitizeTopupAmount = (value) => {
 };
 
 export class GasSponsorService {
-  constructor({ privateKey, rpcByNetwork }) {
+  constructor({ privateKey, rpcByNetwork, rpcUrlsByNetwork }) {
     this.rpcByNetwork = rpcByNetwork || {};
+    this.rpcUrlsByNetwork = rpcUrlsByNetwork || {};
     this.privateKey = normalizePrivateKey(privateKey);
     this.account = this.privateKey ? privateKeyToAccount(this.privateKey) : null;
   }
@@ -76,8 +77,26 @@ export class GasSponsorService {
     return this.account?.address || null;
   }
 
+  resolveRpcUrls(network) {
+    const urls = new Set();
+    const list = this.rpcUrlsByNetwork?.[network];
+    if (Array.isArray(list)) {
+      list.forEach((item) => {
+        const url = String(item || "").trim();
+        if (url.startsWith("http://") || url.startsWith("https://")) {
+          urls.add(url);
+        }
+      });
+    }
+    const fallback = String(this.rpcByNetwork?.[network] || "").trim();
+    if (fallback.startsWith("http://") || fallback.startsWith("https://")) {
+      urls.add(fallback);
+    }
+    return Array.from(urls);
+  }
+
   supportsNetwork(network) {
-    return Boolean(this.rpcByNetwork?.[network] && parseCaip2EvmChainId(network));
+    return Boolean(this.resolveRpcUrls(network).length && parseCaip2EvmChainId(network));
   }
 
   async topUp({
@@ -112,47 +131,55 @@ export class GasSponsorService {
       throw new Error("Gas top-up amount must be a positive integer (wei)");
     }
 
-    const rpcUrl = this.rpcByNetwork[network];
+    const rpcUrls = this.resolveRpcUrls(network);
     const chainId = parseCaip2EvmChainId(network);
-    if (!rpcUrl || !chainId) {
+    if (rpcUrls.length === 0 || !chainId) {
       throw new Error(`Invalid chain RPC config for ${network}`);
     }
 
-    const chain = buildAdHocChain(chainId, rpcUrl);
-    const transport = http(rpcUrl, { timeout: 12000 });
-    const publicClient = createPublicClient({ chain, transport });
-    const walletClient = createWalletClient({
-      account: this.account,
-      chain,
-      transport
-    });
+    let lastError = null;
+    for (const rpcUrl of rpcUrls) {
+      try {
+        const chain = buildAdHocChain(chainId, rpcUrl);
+        const transport = http(rpcUrl, { timeout: 12000, retryCount: 1 });
+        const publicClient = createPublicClient({ chain, transport });
+        const walletClient = createWalletClient({
+          account: this.account,
+          chain,
+          transport
+        });
 
-    const sponsorBalance = await publicClient.getBalance({ address: this.account.address });
-    if (sponsorBalance < value) {
-      throw new Error(
-        `Gas sponsor wallet has insufficient native balance on ${network} (needed=${value.toString()} wei, available=${sponsorBalance.toString()} wei)`
-      );
+        const sponsorBalance = await publicClient.getBalance({ address: this.account.address });
+        if (sponsorBalance < value) {
+          throw new Error(
+            `Gas sponsor wallet has insufficient native balance on ${network} (needed=${value.toString()} wei, available=${sponsorBalance.toString()} wei)`
+          );
+        }
+
+        const txHash = await walletClient.sendTransaction({
+          account: this.account,
+          to: targetAddress,
+          value
+        });
+
+        await publicClient.waitForTransactionReceipt({
+          hash: txHash,
+          timeout: Math.max(30000, Number(receiptTimeoutMs || 0) || 120000)
+        });
+
+        return {
+          skipped: false,
+          txHash,
+          sponsorAddress,
+          targetAddress,
+          amountWei: value.toString(),
+          network
+        };
+      } catch (error) {
+        lastError = error;
+      }
     }
 
-    const txHash = await walletClient.sendTransaction({
-      account: this.account,
-      to: targetAddress,
-      value
-    });
-
-    await publicClient.waitForTransactionReceipt({
-      hash: txHash,
-      timeout: Math.max(30000, Number(receiptTimeoutMs || 0) || 120000)
-    });
-
-    return {
-      skipped: false,
-      txHash,
-      sponsorAddress,
-      targetAddress,
-      amountWei: value.toString(),
-      network
-    };
+    throw lastError || new Error(`Gas sponsor top-up failed on all RPC endpoints for ${network}`);
   }
 }
-

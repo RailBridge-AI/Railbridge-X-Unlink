@@ -12,6 +12,7 @@ import { Network } from "@x402/core/types";
 import { BridgeKit, type EVMChainDefinition } from "@circle-fin/bridge-kit";
 import { CircleCCTPBridgeService } from "./services/circleCCTPBridgeService.js";
 import { MerchantOsPublisher } from "./services/merchantOsPublisher.js";
+import { RevenueRegistryRecorder } from "./services/revenueRegistryRecorder.js";
 import { extractCrossChainInfo, CROSS_CHAIN } from "./extensions/crossChain.js";
 import { CrossChainRouter } from "./schemes/crossChainRouter.js";
 import { handleCrossChainBridgeAsync } from "./bridgeWorker.js";
@@ -148,6 +149,13 @@ const merchantOsPublisher = new MerchantOsPublisher({
       : undefined,
 });
 
+const revenueRegistryRecorder = new RevenueRegistryRecorder({
+  enabled: config.REVENUE_REGISTRY_ENABLED,
+  contractAddress: config.REVENUE_REGISTRY_ADDRESS,
+  rpcUrl: config.ARBITRUM_SEPOLIA_RPC_URL,
+  privateKey: config.EVM_PRIVATE_KEY
+});
+
 if (!config.MERCHANT_OS_EVENT_INGEST_URL) {
   console.warn(
     "[merchant-os] MERCHANT_OS_EVENT_INGEST_URL is not set. Settlement events will not appear in Merchant OS dashboard.",
@@ -165,6 +173,16 @@ if (!config.MERCHANT_OS_EVENT_INGEST_URL) {
       }`,
     );
   }
+}
+
+if (revenueRegistryRecorder.isEnabled()) {
+  console.info(
+    `[revenue-registry] Enabled: ${config.REVENUE_REGISTRY_ADDRESS} (Arbitrum Sepolia)`
+  );
+} else {
+  console.warn(
+    "[revenue-registry] Disabled. Set REVENUE_REGISTRY_ADDRESS (and optionally REVENUE_REGISTRY_ENABLED=true) to enable onchain revenue proof."
+  );
 }
 
 const pickString = (...values: unknown[]): string | undefined =>
@@ -225,6 +243,28 @@ const extractMerchantContextMeta = (requirements: PaymentRequirements) => {
   const merchantId = pickString(reqExtra.merchantId, priceExtra.merchantId, reqAny.merchantId);
   const accountId = pickString(reqExtra.accountId, priceExtra.accountId, reqAny.accountId);
   return { merchantId, accountId };
+};
+
+const normalizeAddress = (value: unknown): `0x${string}` | undefined => {
+  if (typeof value !== "string") {
+    return undefined;
+  }
+  const text = value.trim();
+  if (!/^0x[a-fA-F0-9]{40}$/.test(text)) {
+    return undefined;
+  }
+  return text as `0x${string}`;
+};
+
+const normalizeBytes32 = (value: unknown): `0x${string}` | undefined => {
+  if (typeof value !== "string") {
+    return undefined;
+  }
+  const text = value.trim();
+  if (!/^0x[a-fA-F0-9]{64}$/.test(text)) {
+    return undefined;
+  }
+  return text as `0x${string}`;
 };
 
 // ============================================================================
@@ -383,6 +423,45 @@ const facilitator = new x402Facilitator()
         destinationTxHash: isCrossChain ? undefined : context.result.transaction,
         settlementId: context.result.transaction,
       });
+
+      const payer =
+        normalizeAddress(context.result.payer) ||
+        normalizeAddress((context.paymentPayload as any)?.payload?.authorization?.from) ||
+        normalizeAddress((context.paymentPayload as any)?.payload?.from);
+      const settlementId = normalizeBytes32(context.result.transaction);
+      const sourceTxHash = normalizeBytes32(context.result.transaction);
+
+      if (revenueRegistryRecorder.isEnabled() && payer && settlementId && sourceTxHash) {
+        revenueRegistryRecorder
+          .recordSettlement({
+            settlementId,
+            sourceTxHash,
+            merchantId: merchantContextMeta.merchantId || "unknown_merchant",
+            apiId: apiMeta.apiId || apiMeta.apiRoute || "unknown_api",
+            amount: context.requirements.amount,
+            payer,
+          })
+          .then((registryTxHash) => {
+            if (!registryTxHash) {
+              return;
+            }
+            console.info("[revenue-registry] Settlement recorded onchain", {
+              settlementId,
+              registryTxHash,
+            });
+          })
+          .catch((error) => {
+            console.error("[revenue-registry] Failed to record settlement onchain", {
+              settlementId,
+              error: error instanceof Error ? error.message : String(error),
+            });
+          });
+      } else if (revenueRegistryRecorder.isEnabled()) {
+        console.warn("[revenue-registry] Skip record: missing payer or tx hash", {
+          payer: context.result.payer,
+          txHash: context.result.transaction,
+        });
+      }
     }
 
     // Handle cross-chain bridging asynchronously after settlement

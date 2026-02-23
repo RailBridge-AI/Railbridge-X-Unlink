@@ -80,6 +80,76 @@ const parseBigIntEnv = (value, fallback) => {
   }
 };
 
+const resolveDbPath = (value) => {
+  const raw = String(value || "").trim();
+  if (!raw) {
+    return join(rootDir, "data", "merchant-os.db");
+  }
+  return resolve(rootDir, raw);
+};
+
+const parseRpcUrlList = (value) => {
+  if (!value || typeof value !== "string") {
+    return [];
+  }
+  return value
+    .split(/[\s,]+/)
+    .map((item) => item.trim())
+    .filter((item) => item.startsWith("http://") || item.startsWith("https://"));
+};
+
+const parseRpcOverridesFromEnv = () => {
+  const overrides = {};
+
+  Object.entries(process.env).forEach(([key, rawValue]) => {
+    if (!key.startsWith("MERCHANT_OS_RPC_EIP155_")) {
+      return;
+    }
+    const chainId = key.slice("MERCHANT_OS_RPC_EIP155_".length).trim();
+    if (!/^[0-9]+$/.test(chainId)) {
+      return;
+    }
+    const urls = parseRpcUrlList(rawValue);
+    if (urls.length === 0) {
+      return;
+    }
+    overrides[`eip155:${chainId}`] = urls;
+  });
+
+  const rawJson = process.env.MERCHANT_OS_RPC_OVERRIDES_JSON;
+  if (rawJson && rawJson.trim()) {
+    try {
+      const parsed = JSON.parse(rawJson);
+      if (parsed && typeof parsed === "object") {
+        Object.entries(parsed).forEach(([network, urls]) => {
+          if (!/^eip155:[0-9]+$/.test(network)) {
+            return;
+          }
+          if (Array.isArray(urls)) {
+            const valid = urls
+              .map((item) => String(item || "").trim())
+              .filter((item) => item.startsWith("http://") || item.startsWith("https://"));
+            if (valid.length > 0) {
+              overrides[network] = valid;
+            }
+            return;
+          }
+          if (typeof urls === "string") {
+            const valid = parseRpcUrlList(urls);
+            if (valid.length > 0) {
+              overrides[network] = valid;
+            }
+          }
+        });
+      }
+    } catch {
+      // Ignore invalid JSON overrides and keep defaults.
+    }
+  }
+
+  return overrides;
+};
+
 // Static snapshot from Circle supported EVM chains.
 // Refresh intentionally if Circle updates supported networks.
 const hardcodedUsdcTokenByNetwork = {
@@ -159,6 +229,18 @@ const hardcodedRpcByNetwork = {
   "eip155:812242": "https://rpc.codex-stg.xyz"
 };
 
+const hardcodedRpcUrlsByNetwork = Object.fromEntries(
+  Object.entries(hardcodedRpcByNetwork).map(([network, url]) => [network, [url]])
+);
+const rpcOverridesByNetwork = parseRpcOverridesFromEnv();
+const rpcUrlsByNetwork = {
+  ...hardcodedRpcUrlsByNetwork,
+  ...rpcOverridesByNetwork
+};
+const resolvedRpcByNetwork = Object.fromEntries(
+  Object.entries(rpcUrlsByNetwork).map(([network, urls]) => [network, urls[0]])
+);
+
 const defaultUsdcAssets = ["USDC", ...new Set(Object.values(hardcodedUsdcTokenByNetwork))];
 const usdcAssetAllowlist = new Set(defaultUsdcAssets.map((asset) => asset.toLowerCase()));
 
@@ -166,7 +248,7 @@ export const config = {
   appName: "railbridge-merchant-os",
   port: parseIntEnv(process.env.MERCHANT_OS_PORT, 4030),
   webUrl: process.env.MERCHANT_OS_WEB_URL || "http://localhost:3000",
-  dbPath: process.env.MERCHANT_OS_DB_PATH || join(rootDir, "data", "merchant-os.db"),
+  dbPath: resolveDbPath(process.env.MERCHANT_OS_DB_PATH || "data/merchant-os.db"),
   sessionHours: parseIntEnv(process.env.MERCHANT_OS_SESSION_HOURS, 24),
   ingestToken: process.env.MERCHANT_OS_INGEST_TOKEN || "merchant-os-demo-ingest",
   internalToken:
@@ -226,7 +308,8 @@ export const config = {
   demoSourceNetwork: process.env.MERCHANT_OS_DEMO_SOURCE_NETWORK || "eip155:421614",
   onchainReadTimeoutMs: parseIntEnv(process.env.MERCHANT_OS_ONCHAIN_TIMEOUT_MS, 7000),
   onchainReadTotalBudgetMs: parseIntEnv(process.env.MERCHANT_OS_ONCHAIN_TOTAL_BUDGET_MS, 2200),
-  rpcByNetwork: hardcodedRpcByNetwork,
+  rpcByNetwork: resolvedRpcByNetwork,
+  rpcUrlsByNetwork,
   usdcTokenByNetwork: hardcodedUsdcTokenByNetwork,
   usdcAssetAllowlist
 };

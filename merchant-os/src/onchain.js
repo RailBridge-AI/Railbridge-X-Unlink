@@ -54,6 +54,48 @@ const rpcCall = async (rpcUrl, method, params, timeoutMs) => {
   }
 };
 
+const resolveRpcCandidates = ({ network, rpcByNetwork, rpcUrlsByNetwork }) => {
+  const urls = new Set();
+  const list = rpcUrlsByNetwork?.[network];
+  if (Array.isArray(list)) {
+    list.forEach((url) => {
+      const text = String(url || "").trim();
+      if (text.startsWith("http://") || text.startsWith("https://")) {
+        urls.add(text);
+      }
+    });
+  }
+  const fallback = String(rpcByNetwork?.[network] || "").trim();
+  if (fallback.startsWith("http://") || fallback.startsWith("https://")) {
+    urls.add(fallback);
+  }
+  return Array.from(urls);
+};
+
+const rpcCallWithFallback = async ({
+  network,
+  rpcByNetwork,
+  rpcUrlsByNetwork,
+  method,
+  params,
+  timeoutMs
+}) => {
+  const candidates = resolveRpcCandidates({ network, rpcByNetwork, rpcUrlsByNetwork });
+  if (candidates.length === 0) {
+    throw new Error("RPC URL not configured");
+  }
+
+  let lastError = null;
+  for (const rpcUrl of candidates) {
+    try {
+      return await rpcCall(rpcUrl, method, params, timeoutMs);
+    } catch (error) {
+      lastError = error;
+    }
+  }
+  throw lastError || new Error("RPC request failed");
+};
+
 const sleep = (ms) =>
   new Promise((resolve) => {
     setTimeout(resolve, ms);
@@ -63,25 +105,28 @@ export const fetchOnchainNativeBalance = async ({
   network,
   address,
   rpcByNetwork,
+  rpcUrlsByNetwork,
   timeoutMs
 }) => {
   const normalizedAddress = normalizeEvmAddress(address);
   if (!normalizedAddress) {
     return null;
   }
-  const rpcUrl = rpcByNetwork?.[network];
-  if (!rpcUrl) {
+  const rpcCandidates = resolveRpcCandidates({ network, rpcByNetwork, rpcUrlsByNetwork });
+  if (rpcCandidates.length === 0) {
     return null;
   }
 
   const safeTimeoutMs = Math.max(400, Number(timeoutMs || 0) || 1500);
   try {
-    const hex = await rpcCall(
-      rpcUrl,
-      "eth_getBalance",
-      [normalizedAddress, "latest"],
-      safeTimeoutMs
-    );
+    const hex = await rpcCallWithFallback({
+      network,
+      rpcByNetwork,
+      rpcUrlsByNetwork,
+      method: "eth_getBalance",
+      params: [normalizedAddress, "latest"],
+      timeoutMs: safeTimeoutMs
+    });
     if (typeof hex !== "string" || !/^0x[0-9a-fA-F]+$/.test(hex)) {
       return null;
     }
@@ -104,21 +149,24 @@ export const fetchOnchainNativeBalance = async ({
 export const fetchOnchainGasPrice = async ({
   network,
   rpcByNetwork,
+  rpcUrlsByNetwork,
   timeoutMs
 }) => {
-  const rpcUrl = rpcByNetwork?.[network];
-  if (!rpcUrl) {
+  const rpcCandidates = resolveRpcCandidates({ network, rpcByNetwork, rpcUrlsByNetwork });
+  if (rpcCandidates.length === 0) {
     return null;
   }
 
   const safeTimeoutMs = Math.max(400, Number(timeoutMs || 0) || 1500);
   try {
-    const hex = await rpcCall(
-      rpcUrl,
-      "eth_gasPrice",
-      [],
-      safeTimeoutMs
-    );
+    const hex = await rpcCallWithFallback({
+      network,
+      rpcByNetwork,
+      rpcUrlsByNetwork,
+      method: "eth_gasPrice",
+      params: [],
+      timeoutMs: safeTimeoutMs
+    });
     if (typeof hex !== "string" || !/^0x[0-9a-fA-F]+$/.test(hex)) {
       return null;
     }
@@ -139,6 +187,7 @@ export const fetchOnchainGasPrice = async ({
 export const fetchOnchainUsdcBalancesByNetwork = async ({
   wallets,
   rpcByNetwork,
+  rpcUrlsByNetwork,
   usdcTokenByNetwork,
   timeoutMs,
   totalBudgetMs
@@ -152,11 +201,11 @@ export const fetchOnchainUsdcBalancesByNetwork = async ({
 
   const tasks = (wallets || []).map(async (wallet) => {
     const network = wallet.network;
-    const rpcUrl = rpcByNetwork[network];
+    const rpcCandidates = resolveRpcCandidates({ network, rpcByNetwork, rpcUrlsByNetwork });
     const tokenAddress = normalizeEvmAddress(usdcTokenByNetwork[network]);
     const walletAddress = normalizeEvmAddress(wallet.address);
 
-    if (!rpcUrl || !tokenAddress || !walletAddress) {
+    if (rpcCandidates.length === 0 || !tokenAddress || !walletAddress) {
       return;
     }
 
@@ -166,12 +215,14 @@ export const fetchOnchainUsdcBalancesByNetwork = async ({
     }
 
     try {
-      const hex = await rpcCall(
-        rpcUrl,
-        "eth_call",
-        [{ to: tokenAddress, data }, "latest"],
-        effectivePerCallTimeoutMs
-      );
+      const hex = await rpcCallWithFallback({
+        network,
+        rpcByNetwork,
+        rpcUrlsByNetwork,
+        method: "eth_call",
+        params: [{ to: tokenAddress, data }, "latest"],
+        timeoutMs: effectivePerCallTimeoutMs
+      });
 
       if (typeof hex !== "string" || !/^0x[0-9a-fA-F]+$/.test(hex)) {
         return;

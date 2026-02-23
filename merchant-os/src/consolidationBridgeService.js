@@ -24,6 +24,19 @@ const TRANSIENT_ERROR_PATTERNS = [
   "failed to fetch",
   "gateway"
 ];
+const EXTRA_RPC_URLS_BY_CAIP2 = {
+  "eip155:421614": [
+    "https://arbitrum-sepolia-rpc.publicnode.com",
+    "https://arbitrum-sepolia.drpc.org"
+  ],
+  "eip155:11155111": [
+    "https://ethereum-sepolia-rpc.publicnode.com",
+    "https://rpc.sepolia.org"
+  ],
+  "eip155:11155420": [
+    "https://optimism-sepolia-rpc.publicnode.com"
+  ]
+};
 
 const normalizeEvmAddress = (value) => {
   if (!value || typeof value !== "string") {
@@ -207,9 +220,11 @@ export class ConsolidationBridgeService {
   rpcUrlsForChain(chain) {
     const urls = new Set();
     const caip2 = toCaip2(chain);
+    pushUnique(urls, caip2 ? config.rpcUrlsByNetwork?.[caip2] : null);
     if (caip2 && typeof config.rpcByNetwork?.[caip2] === "string") {
       urls.add(config.rpcByNetwork[caip2].trim());
     }
+    pushUnique(urls, caip2 ? EXTRA_RPC_URLS_BY_CAIP2[caip2] : null);
     pushUnique(urls, chain?.rpcUrls?.default?.http);
     pushUnique(urls, chain?.rpcUrls?.public?.http);
     return Array.from(urls);

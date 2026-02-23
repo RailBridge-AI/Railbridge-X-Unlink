@@ -16,7 +16,9 @@
     "example:client": "tsx src/client-example.ts",
     "demo:cctp": "tsx src/integration_demo/usdc_cctp.ts",
     "test:testnets": "tsx scripts/testnet-coverage.ts",
-    "diagnose:domain": "tsx scripts/diagnose-domain.ts"
+    "diagnose:domain": "tsx scripts/diagnose-domain.ts",
+    "deploy:revenue-registry": "node scripts/deploy-revenue-registry.js",
+    "verify:revenue-registry": "node scripts/verify-revenue-registry.js"
   },
   "dependencies": {
     "@circle-fin/adapter-viem-v2": "^1.2.0",

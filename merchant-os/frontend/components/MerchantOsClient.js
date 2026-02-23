@@ -826,7 +826,6 @@ export default function MerchantOsClient({ page }) {
           <div className="flex items-center gap-3">
             <img src="/RailBridge-Logo.png" alt="RailBridge" className="h-10 w-10 rounded-sm object-contain" draggable={false} />
             <span className="text-[15px] font-semibold tracking-tight">RailBridge Merchant OS</span>
-            <span className="hidden text-xs text-slate-500 dark:text-slate-400 sm:inline">Custodial USDC Treasury</span>
           </div>
           <button
             type="button"
