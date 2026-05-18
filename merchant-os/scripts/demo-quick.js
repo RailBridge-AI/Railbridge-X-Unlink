@@ -5,8 +5,13 @@ import { resetDatabase } from "../src/db.js";
 
 const baseUrl = `http://localhost:${config.port}`;
 
-const waitForHealth = async () => {
+const waitForHealth = async (serverState) => {
   for (let i = 0; i < 30; i += 1) {
+    if (serverState.exited) {
+      throw new Error(
+        `Merchant OS server exited before health check (code=${serverState.code ?? "unknown"}, signal=${serverState.signal ?? "none"})`
+      );
+    }
     try {
       const res = await fetch(`${baseUrl}/health`);
       if (res.ok) {
@@ -21,7 +26,7 @@ const waitForHealth = async () => {
 };
 
 const runFlow = async () => {
-  const loginRes = await fetch(`${baseUrl}/v1/demo/auth/login`, {
+  const loginRes = await fetch(`${baseUrl}/v1/auth/login`, {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({
@@ -33,16 +38,19 @@ const runFlow = async () => {
   if (!loginRes.ok) {
     throw new Error(`Login failed: ${JSON.stringify(login)}`);
   }
+  if (!login.apiKey) {
+    throw new Error("Login response missing apiKey");
+  }
 
   const merchantId = login.merchantId;
   const accountId = login.accountId;
-  const authHeaders = {
+  const merchantHeaders = {
     "content-type": "application/json",
-    authorization: `Bearer ${login.token}`,
+    "x-railbridge-api-key": login.apiKey,
   };
 
   const ingest = async (payload) => {
-    const res = await fetch(`${baseUrl}/v1/demo/internal/events/settlements`, {
+    const res = await fetch(`${baseUrl}/v1/internal/events/settlements`, {
       method: "POST",
       headers: {
         "content-type": "application/json",
@@ -120,25 +128,11 @@ const runFlow = async () => {
     txHash: "0xmint0003",
   });
 
-  const policyRes = await fetch(`${baseUrl}/v1/demo/merchant/${merchantId}/accounts/${accountId}/policy`, {
-    method: "PUT",
-    headers: authHeaders,
-    body: JSON.stringify({
-      preferredNetwork: "eip155:11155111",
-      preferredAsset: "USDC",
-      autoBridgeEnabled: true,
-    }),
-  });
-  const policy = await policyRes.json();
-  if (!policyRes.ok) {
-    throw new Error(`Policy update failed: ${JSON.stringify(policy)}`);
-  }
-
   const consolidationRes = await fetch(
-    `${baseUrl}/v1/demo/merchant/${merchantId}/accounts/${accountId}/consolidations`,
+    `${baseUrl}/v1/merchants/${merchantId}/consolidations`,
     {
       method: "POST",
-      headers: authHeaders,
+      headers: merchantHeaders,
       body: JSON.stringify({
         sourceNetwork: "eip155:84532",
         destinationNetwork: "eip155:11155111",
@@ -152,19 +146,17 @@ const runFlow = async () => {
     throw new Error(`Consolidation failed: ${JSON.stringify(consolidation)}`);
   }
 
-  const overviewRes = await fetch(
-    `${baseUrl}/v1/demo/merchant/${merchantId}/accounts/${accountId}/overview`,
-    { headers: { authorization: `Bearer ${login.token}` } },
-  );
+  const overviewRes = await fetch(`${baseUrl}/v1/merchants/${merchantId}/balances`, {
+    headers: { "x-railbridge-api-key": login.apiKey },
+  });
   const overview = await overviewRes.json();
   if (!overviewRes.ok) {
     throw new Error(`Overview failed: ${JSON.stringify(overview)}`);
   }
 
-  const settlementsRes = await fetch(
-    `${baseUrl}/v1/demo/merchant/${merchantId}/accounts/${accountId}/settlements`,
-    { headers: { authorization: `Bearer ${login.token}` } },
-  );
+  const settlementsRes = await fetch(`${baseUrl}/v1/merchants/${merchantId}/settlements`, {
+    headers: { "x-railbridge-api-key": login.apiKey },
+  });
   const settlements = await settlementsRes.json();
   if (!settlementsRes.ok) {
     throw new Error(`Settlements failed: ${JSON.stringify(settlements)}`);
@@ -173,10 +165,9 @@ const runFlow = async () => {
   console.log("Demo flow complete.");
   console.log(`Merchant: ${merchantId}`);
   console.log(`Account: ${accountId}`);
-  console.log(`Unified USD: ${overview.unifiedUsd}`);
+  console.log(`Unified USD: ${overview.availableUsd}`);
   console.log(`Balances: ${overview.balances.map((b) => `${b.network}:${b.usdValue}`).join(", ")}`);
-  console.log(`Timeline items: ${settlements.timeline.length}`);
-  console.log(`Policy preferred network: ${policy.preferredNetwork}`);
+  console.log(`Timeline items: ${settlements.items.length}`);
   console.log(`Consolidation status: ${consolidation.status}`);
   console.log(`Open dashboard: ${baseUrl}/`);
 };
@@ -187,9 +178,24 @@ const main = async () => {
     stdio: "inherit",
     cwd: process.cwd(),
   });
+  const serverState = {
+    exited: false,
+    code: null,
+    signal: null,
+  };
+  server.on("exit", (code, signal) => {
+    serverState.exited = true;
+    serverState.code = code;
+    serverState.signal = signal;
+  });
 
   try {
-    await waitForHealth();
+    await waitForHealth(serverState);
+    if (serverState.exited) {
+      throw new Error(
+        `Merchant OS server exited before demo flow (code=${serverState.code ?? "unknown"}, signal=${serverState.signal ?? "none"})`
+      );
+    }
     await runFlow();
   } finally {
     server.kill("SIGTERM");

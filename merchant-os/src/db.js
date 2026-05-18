@@ -2,7 +2,7 @@ import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, rmSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { randomUUID } from "node:crypto";
+import { createHash, pbkdf2Sync, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
 import { privateKeyToAccount } from "viem/accounts";
 import { config } from "./config.js";
 import {
@@ -16,6 +16,9 @@ import { addHoursIso, newId, nowIso, statusPrecedence, toDecimalUsdcString } fro
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 const schemaPath = join(__dirname, "schema.sql");
+const PASSWORD_HASH_ITERATIONS = 210000;
+const PASSWORD_HASH_KEYLEN = 64;
+const PASSWORD_HASH_DIGEST = "sha512";
 
 const TESTNET_CAIP2 = [
   "eip155:421614",
@@ -38,14 +41,22 @@ const TESTNET_CAIP2 = [
 
 const DEFAULT_USDC_ASSET = "0x3600000000000000000000000000000000000000";
 
-const USDC_ASSET_BY_NETWORK = {
-  "eip155:421614": "0x75faf114eafb1BDbe2F0316DF893fd58CE46AA4d", // Arbitrum Sepolia
-  "eip155:5042002": "0x3600000000000000000000000000000000000000", // Arc Testnet
-  "eip155:84532": "0x036CbD53842c5426634e7929541eC2318f3dCF7e", // Base Sepolia
-  "eip155:11155111": "0x1c7d4b196cb0c7b01d743fbc6116a902379c7238" // Ethereum Sepolia
+const resolveUsdcAssetForNetwork = (network) => {
+  try {
+    const row = one(`
+      SELECT usdc_address AS usdcAddress
+      FROM chain_catalog
+      WHERE network = ${sqlLiteral(network)}
+      LIMIT 1;
+    `);
+    if (row?.usdcAddress && /^0x[a-fA-F0-9]{40}$/.test(String(row.usdcAddress))) {
+      return String(row.usdcAddress);
+    }
+  } catch {
+    // chain catalog may not exist on first boot; fallback below.
+  }
+  return DEFAULT_USDC_ASSET;
 };
-
-const resolveUsdcAssetForNetwork = (network) => USDC_ASSET_BY_NETWORK[network] || DEFAULT_USDC_ASSET;
 const resolveDemoSourceNetwork = () =>
   TESTNET_CAIP2.includes(config.demoSourceNetwork) ? config.demoSourceNetwork : "eip155:421614";
 
@@ -87,7 +98,7 @@ const demoWalletsFor = (prefix, keyPrefix) =>
     network,
     asset: "USDC",
     address: sharedCustodyAddress || demoWalletAddress(prefix, network),
-    keyReference: `custody:${keyPrefix}:${network}`
+    keyReference: config.mpcCustodyEnabled ? `mpc:${keyPrefix}:${network}` : `custody:${keyPrefix}:${network}`
   }));
 
 const DEMO_MERCHANTS = [
@@ -130,6 +141,63 @@ const sqlLiteral = (value) => {
   return `'${String(value).replace(/'/g, "''")}'`;
 };
 
+const sha256Hex = (value) => createHash("sha256").update(String(value)).digest("hex");
+
+const hashPassword = (password) => {
+  const normalized = String(password || "");
+  if (!normalized) {
+    throw new Error("password is required");
+  }
+  const salt = randomBytes(16).toString("hex");
+  const hash = pbkdf2Sync(
+    normalized,
+    salt,
+    PASSWORD_HASH_ITERATIONS,
+    PASSWORD_HASH_KEYLEN,
+    PASSWORD_HASH_DIGEST
+  ).toString("hex");
+  return `pbkdf2$${PASSWORD_HASH_DIGEST}$${PASSWORD_HASH_ITERATIONS}$${salt}$${hash}`;
+};
+
+const verifyPasswordHash = (encoded, password) => {
+  const text = String(encoded || "");
+  if (!text.startsWith("pbkdf2$")) {
+    return false;
+  }
+
+  const parts = text.split("$");
+  if (parts.length !== 5) {
+    return false;
+  }
+  const [, algo, iterationsRaw, salt, expectedHash] = parts;
+  const iterations = Number.parseInt(iterationsRaw, 10);
+  if (!algo || !salt || !expectedHash || Number.isNaN(iterations) || iterations <= 0) {
+    return false;
+  }
+  const calculated = pbkdf2Sync(
+    String(password || ""),
+    salt,
+    iterations,
+    expectedHash.length / 2,
+    algo
+  );
+  const expected = Buffer.from(expectedHash, "hex");
+  if (calculated.length !== expected.length) {
+    return false;
+  }
+  return timingSafeEqual(calculated, expected);
+};
+
+const buildApiKey = () => {
+  const raw = `rb_live_${randomBytes(24).toString("base64url")}`;
+  const prefix = raw.slice(0, 16);
+  return {
+    raw,
+    prefix,
+    hash: sha256Hex(raw)
+  };
+};
+
 const sqlite = (args) =>
   execFileSync("sqlite3", args, {
     encoding: "utf8",
@@ -162,6 +230,13 @@ const ensureColumn = (tableName, columnName, columnType) => {
 };
 
 const runSchemaMigrations = () => {
+  ensureColumn("merchants", "status", "TEXT NOT NULL DEFAULT 'active'");
+  ensureColumn("merchants", "compliance_profile_json", "TEXT");
+  ensureColumn("merchant_users", "password_hash_algo", "TEXT NOT NULL DEFAULT 'legacy_plaintext'");
+  ensureColumn("merchant_users", "status", "TEXT NOT NULL DEFAULT 'active'");
+  ensureColumn("merchant_accounts", "status", "TEXT NOT NULL DEFAULT 'active'");
+  ensureColumn("merchant_account_wallets", "signer_provider", "TEXT NOT NULL DEFAULT 'mpc'");
+  ensureColumn("merchant_account_wallets", "signer_reference", "TEXT");
   ensureColumn("treasury_settlement_events", "api_id", "TEXT");
   ensureColumn("treasury_settlement_events", "api_route", "TEXT");
   ensureColumn("treasury_settlement_events", "api_name", "TEXT");
@@ -171,14 +246,143 @@ const runSchemaMigrations = () => {
   ensureColumn("treasury_settlement_events", "block_number", "INTEGER");
   ensureColumn("treasury_settlement_events", "log_index", "INTEGER");
   ensureColumn("treasury_settlement_events", "confirmations", "INTEGER NOT NULL DEFAULT 0");
+  ensureColumn("treasury_settlement_events", "fail_reason", "TEXT");
   ensureColumn("treasury_consolidations", "tx_hash", "TEXT");
   ensureColumn("treasury_consolidations", "source_tx_hash", "TEXT");
   ensureColumn("treasury_consolidations", "bridge_tx_hash", "TEXT");
   ensureColumn("treasury_consolidations", "destination_tx_hash", "TEXT");
+  ensureColumn("treasury_payout_requests", "fail_reason", "TEXT");
+  ensureColumn("treasury_payout_requests", "tx_hash", "TEXT");
   run(`
     CREATE INDEX IF NOT EXISTS idx_settlement_source_tx
       ON treasury_settlement_events(source_network, source_tx_hash, log_index);
   `);
+  run(`
+    CREATE TABLE IF NOT EXISTS chain_catalog (
+      network TEXT PRIMARY KEY,
+      chain_name TEXT NOT NULL,
+      display_name TEXT NOT NULL,
+      chain_type TEXT NOT NULL DEFAULT 'evm',
+      usdc_address TEXT NOT NULL,
+      rpc_endpoints_json TEXT NOT NULL,
+      explorer_url TEXT,
+      status TEXT NOT NULL DEFAULT 'active',
+      source TEXT NOT NULL DEFAULT 'circle_bridge_kit',
+      source_updated_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+  `);
+  run(`
+    CREATE INDEX IF NOT EXISTS idx_chain_catalog_status
+      ON chain_catalog(status);
+  `);
+  run(`
+    CREATE TABLE IF NOT EXISTS api_keys (
+      id TEXT PRIMARY KEY,
+      merchant_id TEXT NOT NULL REFERENCES merchants(id),
+      account_id TEXT NOT NULL REFERENCES merchant_accounts(id),
+      name TEXT NOT NULL,
+      key_prefix TEXT NOT NULL UNIQUE,
+      key_hash TEXT NOT NULL UNIQUE,
+      role TEXT NOT NULL CHECK(role IN ('admin', 'finance', 'readonly')),
+      status TEXT NOT NULL DEFAULT 'active',
+      created_by_user_id TEXT REFERENCES merchant_users(id),
+      last_used_at TEXT,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+  `);
+  run(`
+    CREATE INDEX IF NOT EXISTS idx_api_keys_tenant
+      ON api_keys(merchant_id, account_id, status);
+  `);
+  run(`
+    CREATE TABLE IF NOT EXISTS webhook_endpoints (
+      id TEXT PRIMARY KEY,
+      merchant_id TEXT NOT NULL REFERENCES merchants(id),
+      account_id TEXT NOT NULL REFERENCES merchant_accounts(id),
+      url TEXT NOT NULL,
+      signing_secret TEXT NOT NULL,
+      status TEXT NOT NULL DEFAULT 'active',
+      last_test_status TEXT,
+      last_test_at TEXT,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+  `);
+  run(`
+    CREATE INDEX IF NOT EXISTS idx_webhooks_tenant
+      ON webhook_endpoints(merchant_id, account_id, status);
+  `);
+  run(`
+    CREATE TABLE IF NOT EXISTS webhook_deliveries (
+      id TEXT PRIMARY KEY,
+      webhook_id TEXT NOT NULL REFERENCES webhook_endpoints(id),
+      merchant_id TEXT NOT NULL REFERENCES merchants(id),
+      account_id TEXT NOT NULL REFERENCES merchant_accounts(id),
+      event_type TEXT NOT NULL,
+      event_id TEXT NOT NULL,
+      request_body TEXT NOT NULL,
+      response_status INTEGER,
+      response_body TEXT,
+      error TEXT,
+      created_at TEXT NOT NULL
+    );
+  `);
+  run(`
+    CREATE INDEX IF NOT EXISTS idx_webhook_deliveries_event
+      ON webhook_deliveries(event_id, event_type);
+  `);
+  run(`
+    CREATE TABLE IF NOT EXISTS bridge_jobs (
+      id TEXT PRIMARY KEY,
+      settlement_id TEXT NOT NULL,
+      merchant_id TEXT NOT NULL REFERENCES merchants(id),
+      account_id TEXT NOT NULL REFERENCES merchant_accounts(id),
+      source_network TEXT NOT NULL,
+      destination_network TEXT NOT NULL,
+      destination_address TEXT NOT NULL,
+      asset TEXT NOT NULL,
+      amount TEXT NOT NULL,
+      status TEXT NOT NULL,
+      attempt_count INTEGER NOT NULL DEFAULT 0,
+      max_attempts INTEGER NOT NULL DEFAULT 5,
+      next_retry_at TEXT,
+      last_error TEXT,
+      source_tx_hash TEXT,
+      bridge_tx_hash TEXT,
+      destination_tx_hash TEXT,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+  `);
+  run(`
+    CREATE INDEX IF NOT EXISTS idx_bridge_jobs_status
+      ON bridge_jobs(status, next_retry_at);
+  `);
+};
+
+const migrateLegacyPlaintextPasswords = () => {
+  const legacyUsers = all(`
+    SELECT id, password_hash AS passwordHash, password_hash_algo AS passwordHashAlgo
+    FROM merchant_users
+    WHERE password_hash_algo = 'legacy_plaintext';
+  `);
+
+  legacyUsers.forEach((user) => {
+    const plaintext = String(user.passwordHash || "");
+    if (!plaintext) {
+      return;
+    }
+    const upgradedHash = hashPassword(plaintext);
+    run(`
+      UPDATE merchant_users
+      SET
+        password_hash = ${sqlLiteral(upgradedHash)},
+        password_hash_algo = 'pbkdf2_sha512'
+      WHERE id = ${sqlLiteral(user.id)};
+    `);
+  });
 };
 
 const ensureDbDirectory = () => {
@@ -203,6 +407,9 @@ const alignDemoApiProductSourceNetwork = () => {
 };
 
 const assertCustodyMasterKeyConfigured = () => {
+  if (config.mpcCustodyEnabled) {
+    return;
+  }
   if (!isValidCustodyMasterKey(config.custodyMasterKey)) {
     throw new Error(
       "MERCHANT_OS_CUSTODY_MASTER_KEY is required and must be a 32-byte hex string (64 hex chars, optional 0x prefix)"
@@ -309,6 +516,9 @@ const resolveSeedPrivateKeyForTenant = (merchantId, accountId) => {
 };
 
 const ensureCustodyKeyForWallet = (wallet) => {
+  if (String(wallet.keyReference || "").startsWith("mpc:")) {
+    return null;
+  }
   const existing = getCustodyKeyRecord(wallet.merchantId, wallet.accountId, wallet.keyReference);
   if (existing) {
     const walletAddress = normalizeEvmAddress(wallet.address);
@@ -367,8 +577,23 @@ const backfillCustodyKeysForWallets = () => {
   `);
 
   wallets.forEach((wallet) => {
+    if (String(wallet.keyReference || "").startsWith("mpc:")) {
+      return;
+    }
     ensureCustodyKeyForWallet(wallet);
   });
+};
+
+const alignMpcWalletAddressesToSharedCustody = () => {
+  if (!config.mpcCustodyEnabled || !sharedCustodyAddress) {
+    return;
+  }
+  run(`
+    UPDATE merchant_account_wallets
+    SET address = ${sqlLiteral(sharedCustodyAddress)}
+    WHERE asset = 'USDC'
+      AND key_reference LIKE 'mpc:%';
+  `);
 };
 
 export const initializeDatabase = () => {
@@ -379,13 +604,17 @@ export const initializeDatabase = () => {
   run("PRAGMA foreign_keys = ON;");
   run(readFileSync(schemaPath, "utf8"));
   runSchemaMigrations();
+  migrateLegacyPlaintextPasswords();
 
   const merchantCount = one("SELECT COUNT(*) AS count FROM merchants;");
   if (!merchantCount || Number(merchantCount.count) === 0) {
     seedDemoData();
   }
 
-  backfillCustodyKeysForWallets();
+  if (!config.mpcCustodyEnabled) {
+    backfillCustodyKeysForWallets();
+  }
+  alignMpcWalletAddressesToSharedCustody();
 
   // Keep demo premium API aligned with configured source network (defaults to Arbitrum Sepolia).
   alignDemoApiProductSourceNetwork();
@@ -419,13 +648,24 @@ export const seedDemoData = () => {
     `);
 
     run(`
-      INSERT OR IGNORE INTO merchant_users (id, merchant_id, email, password_hash, role, created_at)
+      INSERT OR IGNORE INTO merchant_users (
+        id,
+        merchant_id,
+        email,
+        password_hash,
+        password_hash_algo,
+        role,
+        status,
+        created_at
+      )
       VALUES (
         ${sqlLiteral(merchant.userId)},
         ${sqlLiteral(merchant.merchantId)},
-        ${sqlLiteral(merchant.email)},
-        ${sqlLiteral(merchant.password)},
+        ${sqlLiteral(String(merchant.email || "").trim().toLowerCase())},
+        ${sqlLiteral(hashPassword(merchant.password))},
+        'pbkdf2_sha512',
         ${sqlLiteral(merchant.role)},
+        'active',
         ${sqlLiteral(now)}
       );
     `);
@@ -507,7 +747,9 @@ export const seedDemoData = () => {
     `);
   });
 
-  backfillCustodyKeysForWallets();
+  if (!config.mpcCustodyEnabled) {
+    backfillCustodyKeysForWallets();
+  }
 };
 
 export const getDemoMerchants = () =>
@@ -518,6 +760,57 @@ export const getDemoMerchants = () =>
     email: merchant.email,
     password: merchant.password
   }));
+
+export const onboardMerchantAccount = ({
+  merchantName,
+  adminEmail,
+  adminPassword,
+  complianceProfile = null,
+  chainProfiles = []
+}) => {
+  const organization = createMerchantOrganization({
+    merchantName,
+    accountName: `${merchantName} Treasury`,
+    complianceProfile
+  });
+
+  const adminUser = createPlatformUser({
+    merchantId: organization.merchantId,
+    email: adminEmail,
+    password: adminPassword,
+    role: "admin"
+  });
+
+  (chainProfiles || []).forEach((chain) => {
+    const normalizedNetwork = String(chain.network || "").trim();
+    const normalizedAddress = normalizeEvmAddress(chain.address);
+    if (!normalizedNetwork || !normalizedAddress) {
+      return;
+    }
+    const signerReference =
+      String(chain.signerReference || "").trim() || `mpc:${organization.merchantId}:${normalizedNetwork}`;
+    createWalletProfile({
+      merchantId: organization.merchantId,
+      accountId: organization.accountId,
+      network: normalizedNetwork,
+      address: normalizedAddress,
+      signerProvider: "mpc",
+      signerReference
+    });
+  });
+
+  const firstNetwork = chainProfiles[0]?.network || resolveDemoSourceNetwork();
+  upsertPolicy(organization.merchantId, organization.accountId, {
+    preferredNetwork: firstNetwork,
+    autoBridgeEnabled: true
+  });
+
+  return {
+    merchantId: organization.merchantId,
+    accountId: organization.accountId,
+    adminUserId: adminUser.id
+  };
+};
 
 export const authenticateUser = (email, password) =>
   one(`
@@ -533,6 +826,103 @@ export const authenticateUser = (email, password) =>
       AND u.password_hash = ${sqlLiteral(password)}
     LIMIT 1;
   `);
+
+export const authenticatePlatformUser = (email, password) => {
+  const user = one(`
+    SELECT
+      u.id,
+      u.merchant_id AS merchantId,
+      a.id AS accountId,
+      u.email,
+      u.role,
+      u.password_hash AS passwordHash,
+      u.password_hash_algo AS passwordHashAlgo,
+      u.status
+    FROM merchant_users u
+    JOIN merchant_accounts a ON a.merchant_id = u.merchant_id
+    JOIN merchants m ON m.id = u.merchant_id
+    WHERE lower(u.email) = ${sqlLiteral(String(email || "").trim().toLowerCase())}
+      AND u.status = 'active'
+      AND a.status = 'active'
+      AND m.status = 'active'
+    ORDER BY a.created_at ASC
+    LIMIT 1;
+  `);
+
+  if (!user) {
+    return null;
+  }
+  const storedAlgo = String(user.passwordHashAlgo || "").trim();
+  if (storedAlgo === "pbkdf2_sha512") {
+    if (!verifyPasswordHash(user.passwordHash, password)) {
+      return null;
+    }
+  } else if (storedAlgo === "legacy_plaintext") {
+    if (String(user.passwordHash || "") !== String(password || "")) {
+      return null;
+    }
+
+    // Upgrade successful legacy auth to PBKDF2 immediately.
+    const upgradedHash = hashPassword(password);
+    run(`
+      UPDATE merchant_users
+      SET
+        password_hash = ${sqlLiteral(upgradedHash)},
+        password_hash_algo = 'pbkdf2_sha512'
+      WHERE id = ${sqlLiteral(user.id)};
+    `);
+  } else {
+    return null;
+  }
+
+  return {
+    id: user.id,
+    merchantId: user.merchantId,
+    accountId: user.accountId,
+    email: user.email,
+    role: user.role
+  };
+};
+
+export const createPlatformUser = ({
+  merchantId,
+  email,
+  password,
+  role = "admin"
+}) => {
+  const userId = newId();
+  const createdAt = nowIso();
+  const passwordHash = hashPassword(password);
+  run(`
+    INSERT INTO merchant_users (
+      id,
+      merchant_id,
+      email,
+      password_hash,
+      password_hash_algo,
+      role,
+      status,
+      created_at
+    ) VALUES (
+      ${sqlLiteral(userId)},
+      ${sqlLiteral(merchantId)},
+      ${sqlLiteral(String(email || "").trim().toLowerCase())},
+      ${sqlLiteral(passwordHash)},
+      'pbkdf2_sha512',
+      ${sqlLiteral(role)},
+      'active',
+      ${sqlLiteral(createdAt)}
+    );
+  `);
+
+  return {
+    id: userId,
+    merchantId,
+    email: String(email || "").trim().toLowerCase(),
+    role,
+    createdAt
+  };
+};
 
 export const createSession = ({ userId, merchantId, accountId, role }) => {
   const token = `demo_${newId().replace(/-/g, "")}`;
@@ -591,6 +981,94 @@ export const getSession = (token) => {
   return session;
 };
 
+export const createMerchantOrganization = ({
+  merchantName,
+  accountName = "Primary Treasury",
+  complianceProfile = null
+}) => {
+  const merchantId = newId();
+  const accountId = newId();
+  const createdAt = nowIso();
+  run(`
+    INSERT INTO merchants (
+      id,
+      name,
+      status,
+      compliance_profile_json,
+      created_at
+    ) VALUES (
+      ${sqlLiteral(merchantId)},
+      ${sqlLiteral(merchantName)},
+      'active',
+      ${sqlLiteral(complianceProfile ? JSON.stringify(complianceProfile) : null)},
+      ${sqlLiteral(createdAt)}
+    );
+  `);
+  run(`
+    INSERT INTO merchant_accounts (
+      id,
+      merchant_id,
+      account_name,
+      custody_mode,
+      status,
+      created_at
+    ) VALUES (
+      ${sqlLiteral(accountId)},
+      ${sqlLiteral(merchantId)},
+      ${sqlLiteral(accountName)},
+      'custodial',
+      'active',
+      ${sqlLiteral(createdAt)}
+    );
+  `);
+
+  return {
+    merchantId,
+    accountId,
+    createdAt
+  };
+};
+
+export const createWalletProfile = ({
+  merchantId,
+  accountId,
+  network,
+  address,
+  signerProvider = "mpc",
+  signerReference
+}) => {
+  const id = newId();
+  const createdAt = nowIso();
+  const keyReference = signerReference || `mpc:${merchantId}:${network}`;
+  const normalizedAddress =
+    String(keyReference).startsWith("mpc:") && sharedCustodyAddress ? sharedCustodyAddress : address;
+  run(`
+    INSERT OR IGNORE INTO merchant_account_wallets (
+      id,
+      merchant_id,
+      account_id,
+      network,
+      asset,
+      address,
+      key_reference,
+      signer_provider,
+      signer_reference,
+      created_at
+    ) VALUES (
+      ${sqlLiteral(id)},
+      ${sqlLiteral(merchantId)},
+      ${sqlLiteral(accountId)},
+      ${sqlLiteral(network)},
+      'USDC',
+      ${sqlLiteral(normalizedAddress)},
+      ${sqlLiteral(keyReference)},
+      ${sqlLiteral(signerProvider)},
+      ${sqlLiteral(keyReference)},
+      ${sqlLiteral(createdAt)}
+    );
+  `);
+};
+
 export const getWallets = (merchantId, accountId) =>
   all(`
     SELECT network, asset, address, key_reference AS keyReference
@@ -611,6 +1089,493 @@ export const getWalletByNetwork = (merchantId, accountId, network) =>
     LIMIT 1;
   `);
 
+export const createApiKey = ({
+  merchantId,
+  accountId,
+  name = "Default API Key",
+  role = "admin",
+  createdByUserId = null
+}) => {
+  const id = newId();
+  const createdAt = nowIso();
+  const generated = buildApiKey();
+  run(`
+    INSERT INTO api_keys (
+      id,
+      merchant_id,
+      account_id,
+      name,
+      key_prefix,
+      key_hash,
+      role,
+      status,
+      created_by_user_id,
+      created_at,
+      updated_at
+    ) VALUES (
+      ${sqlLiteral(id)},
+      ${sqlLiteral(merchantId)},
+      ${sqlLiteral(accountId)},
+      ${sqlLiteral(name)},
+      ${sqlLiteral(generated.prefix)},
+      ${sqlLiteral(generated.hash)},
+      ${sqlLiteral(role)},
+      'active',
+      ${sqlLiteral(createdByUserId)},
+      ${sqlLiteral(createdAt)},
+      ${sqlLiteral(createdAt)}
+    );
+  `);
+
+  return {
+    id,
+    merchantId,
+    accountId,
+    name,
+    role,
+    token: generated.raw,
+    keyPrefix: generated.prefix,
+    createdAt
+  };
+};
+
+export const listApiKeys = (merchantId, accountId) =>
+  all(`
+    SELECT
+      id,
+      merchant_id AS merchantId,
+      account_id AS accountId,
+      name,
+      key_prefix AS keyPrefix,
+      role,
+      status,
+      created_by_user_id AS createdByUserId,
+      last_used_at AS lastUsedAt,
+      created_at AS createdAt,
+      updated_at AS updatedAt
+    FROM api_keys
+    WHERE merchant_id = ${sqlLiteral(merchantId)}
+      AND account_id = ${sqlLiteral(accountId)}
+    ORDER BY created_at DESC;
+  `);
+
+export const findApiKeyByToken = (token) => {
+  const normalized = String(token || "").trim();
+  if (!normalized) {
+    return null;
+  }
+  const keyHash = sha256Hex(normalized);
+  return one(`
+    SELECT
+      id,
+      merchant_id AS merchantId,
+      account_id AS accountId,
+      name,
+      role,
+      status
+    FROM api_keys
+    WHERE key_hash = ${sqlLiteral(keyHash)}
+      AND status = 'active'
+    LIMIT 1;
+  `);
+};
+
+export const touchApiKeyUsed = (id) => {
+  run(`
+    UPDATE api_keys
+    SET last_used_at = ${sqlLiteral(nowIso())},
+        updated_at = ${sqlLiteral(nowIso())}
+    WHERE id = ${sqlLiteral(id)};
+  `);
+};
+
+export const getApiKeyById = (merchantId, accountId, keyId) =>
+  one(`
+    SELECT
+      id,
+      merchant_id AS merchantId,
+      account_id AS accountId,
+      name,
+      key_prefix AS keyPrefix,
+      role,
+      status,
+      created_by_user_id AS createdByUserId,
+      last_used_at AS lastUsedAt,
+      created_at AS createdAt,
+      updated_at AS updatedAt
+    FROM api_keys
+    WHERE merchant_id = ${sqlLiteral(merchantId)}
+      AND account_id = ${sqlLiteral(accountId)}
+      AND id = ${sqlLiteral(keyId)}
+    LIMIT 1;
+  `);
+
+export const updateApiKeyMetadata = (merchantId, accountId, keyId, patch = {}) => {
+  const updates = [];
+  if (patch.name !== undefined) {
+    updates.push(`name = ${sqlLiteral(String(patch.name || "").trim())}`);
+  }
+  if (patch.role !== undefined) {
+    updates.push(`role = ${sqlLiteral(String(patch.role || "").trim())}`);
+  }
+  if (!updates.length) {
+    return getApiKeyById(merchantId, accountId, keyId);
+  }
+  updates.push(`updated_at = ${sqlLiteral(nowIso())}`);
+  run(`
+    UPDATE api_keys
+    SET ${updates.join(", ")}
+    WHERE merchant_id = ${sqlLiteral(merchantId)}
+      AND account_id = ${sqlLiteral(accountId)}
+      AND id = ${sqlLiteral(keyId)};
+  `);
+  return getApiKeyById(merchantId, accountId, keyId);
+};
+
+export const revokeApiKeyById = (merchantId, accountId, keyId) => {
+  run(`
+    UPDATE api_keys
+    SET status = 'revoked',
+        updated_at = ${sqlLiteral(nowIso())}
+    WHERE merchant_id = ${sqlLiteral(merchantId)}
+      AND account_id = ${sqlLiteral(accountId)}
+      AND id = ${sqlLiteral(keyId)};
+  `);
+  return getApiKeyById(merchantId, accountId, keyId);
+};
+
+export const countActiveApiKeys = (merchantId, accountId) => {
+  const row = one(`
+    SELECT COUNT(1) AS count
+    FROM api_keys
+    WHERE merchant_id = ${sqlLiteral(merchantId)}
+      AND account_id = ${sqlLiteral(accountId)}
+      AND status = 'active';
+  `);
+  return Number(row?.count || 0);
+};
+
+export const countActiveApiKeysByRole = (merchantId, accountId, role) => {
+  const row = one(`
+    SELECT COUNT(1) AS count
+    FROM api_keys
+    WHERE merchant_id = ${sqlLiteral(merchantId)}
+      AND account_id = ${sqlLiteral(accountId)}
+      AND status = 'active'
+      AND role = ${sqlLiteral(role)};
+  `);
+  return Number(row?.count || 0);
+};
+
+export const createWebhookEndpoint = ({ merchantId, accountId, url }) => {
+  const id = newId();
+  const createdAt = nowIso();
+  const signingSecret = `whsec_${randomBytes(24).toString("base64url")}`;
+  run(`
+    INSERT INTO webhook_endpoints (
+      id,
+      merchant_id,
+      account_id,
+      url,
+      signing_secret,
+      status,
+      created_at,
+      updated_at
+    ) VALUES (
+      ${sqlLiteral(id)},
+      ${sqlLiteral(merchantId)},
+      ${sqlLiteral(accountId)},
+      ${sqlLiteral(url)},
+      ${sqlLiteral(signingSecret)},
+      'active',
+      ${sqlLiteral(createdAt)},
+      ${sqlLiteral(createdAt)}
+    );
+  `);
+
+  return {
+    id,
+    merchantId,
+    accountId,
+    url,
+    signingSecret,
+    status: "active",
+    createdAt,
+    updatedAt: createdAt
+  };
+};
+
+export const listWebhookEndpoints = (merchantId, accountId) =>
+  all(`
+    SELECT
+      id,
+      merchant_id AS merchantId,
+      account_id AS accountId,
+      url,
+      status,
+      last_test_status AS lastTestStatus,
+      last_test_at AS lastTestAt,
+      created_at AS createdAt,
+      updated_at AS updatedAt
+    FROM webhook_endpoints
+    WHERE merchant_id = ${sqlLiteral(merchantId)}
+      AND account_id = ${sqlLiteral(accountId)}
+    ORDER BY created_at DESC;
+  `);
+
+export const getWebhookEndpointById = (merchantId, accountId, webhookId) =>
+  one(`
+    SELECT
+      id,
+      merchant_id AS merchantId,
+      account_id AS accountId,
+      url,
+      status,
+      last_test_status AS lastTestStatus,
+      last_test_at AS lastTestAt,
+      created_at AS createdAt,
+      updated_at AS updatedAt
+    FROM webhook_endpoints
+    WHERE merchant_id = ${sqlLiteral(merchantId)}
+      AND account_id = ${sqlLiteral(accountId)}
+      AND id = ${sqlLiteral(webhookId)}
+    LIMIT 1;
+  `);
+
+export const listActiveWebhookEndpoints = (merchantId, accountId) =>
+  all(`
+    SELECT
+      id,
+      merchant_id AS merchantId,
+      account_id AS accountId,
+      url,
+      signing_secret AS signingSecret,
+      status
+    FROM webhook_endpoints
+    WHERE merchant_id = ${sqlLiteral(merchantId)}
+      AND account_id = ${sqlLiteral(accountId)}
+      AND status = 'active'
+    ORDER BY created_at DESC;
+  `);
+
+export const markWebhookTestResult = (webhookId, status) => {
+  const timestamp = nowIso();
+  run(`
+    UPDATE webhook_endpoints
+    SET
+      last_test_status = ${sqlLiteral(status)},
+      last_test_at = ${sqlLiteral(timestamp)},
+      updated_at = ${sqlLiteral(timestamp)}
+    WHERE id = ${sqlLiteral(webhookId)};
+  `);
+};
+
+export const updateWebhookEndpoint = (merchantId, accountId, webhookId, patch) => {
+  const existing = getWebhookEndpointById(merchantId, accountId, webhookId);
+  if (!existing) {
+    return null;
+  }
+  const now = nowIso();
+  const nextUrl = patch.url !== undefined ? patch.url : existing.url;
+  const nextStatus = patch.status !== undefined ? patch.status : existing.status;
+  run(`
+    UPDATE webhook_endpoints
+    SET
+      url = ${sqlLiteral(nextUrl)},
+      status = ${sqlLiteral(nextStatus)},
+      updated_at = ${sqlLiteral(now)}
+    WHERE merchant_id = ${sqlLiteral(merchantId)}
+      AND account_id = ${sqlLiteral(accountId)}
+      AND id = ${sqlLiteral(webhookId)};
+  `);
+  return getWebhookEndpointById(merchantId, accountId, webhookId);
+};
+
+export const deactivateWebhookEndpoint = (merchantId, accountId, webhookId) =>
+  updateWebhookEndpoint(merchantId, accountId, webhookId, { status: "disabled" });
+
+export const deleteWebhookEndpoint = (merchantId, accountId, webhookId) => {
+  const existing = getWebhookEndpointById(merchantId, accountId, webhookId);
+  if (!existing) {
+    return null;
+  }
+  run(`
+    DELETE FROM webhook_endpoints
+    WHERE merchant_id = ${sqlLiteral(merchantId)}
+      AND account_id = ${sqlLiteral(accountId)}
+      AND id = ${sqlLiteral(webhookId)};
+  `);
+  return existing;
+};
+
+export const insertWebhookDelivery = ({
+  webhookId,
+  merchantId,
+  accountId,
+  eventType,
+  eventId,
+  requestBody,
+  responseStatus = null,
+  responseBody = null,
+  error = null
+}) => {
+  run(`
+    INSERT INTO webhook_deliveries (
+      id,
+      webhook_id,
+      merchant_id,
+      account_id,
+      event_type,
+      event_id,
+      request_body,
+      response_status,
+      response_body,
+      error,
+      created_at
+    ) VALUES (
+      ${sqlLiteral(newId())},
+      ${sqlLiteral(webhookId)},
+      ${sqlLiteral(merchantId)},
+      ${sqlLiteral(accountId)},
+      ${sqlLiteral(eventType)},
+      ${sqlLiteral(eventId)},
+      ${sqlLiteral(requestBody)},
+      ${responseStatus === null ? "NULL" : sqlLiteral(responseStatus)},
+      ${sqlLiteral(responseBody)},
+      ${sqlLiteral(error)},
+      ${sqlLiteral(nowIso())}
+    );
+  `);
+};
+
+export const upsertChainCatalogRows = (rows) => {
+  const now = nowIso();
+  (rows || []).forEach((row) => {
+    if (!row?.network || !row?.usdcAddress) {
+      return;
+    }
+    const network = String(row.network).trim();
+    if (!network) {
+      return;
+    }
+    const rpcEndpoints = Array.isArray(row.rpcEndpoints)
+      ? row.rpcEndpoints.filter((url) => typeof url === "string" && /^https?:\/\//.test(url))
+      : [];
+    run(`
+      INSERT INTO chain_catalog (
+        network,
+        chain_name,
+        display_name,
+        chain_type,
+        usdc_address,
+        rpc_endpoints_json,
+        explorer_url,
+        status,
+        source,
+        source_updated_at,
+        updated_at
+      ) VALUES (
+        ${sqlLiteral(network)},
+        ${sqlLiteral(row.chainName || network)},
+        ${sqlLiteral(row.displayName || row.chainName || network)},
+        ${sqlLiteral(row.chainType || "evm")},
+        ${sqlLiteral(row.usdcAddress)},
+        ${sqlLiteral(JSON.stringify(rpcEndpoints))},
+        ${sqlLiteral(row.explorerUrl || null)},
+        ${sqlLiteral(row.status || "active")},
+        ${sqlLiteral(row.source || "circle_bridge_kit")},
+        ${sqlLiteral(row.sourceUpdatedAt || now)},
+        ${sqlLiteral(now)}
+      )
+      ON CONFLICT(network) DO UPDATE SET
+        chain_name = excluded.chain_name,
+        display_name = excluded.display_name,
+        chain_type = excluded.chain_type,
+        usdc_address = excluded.usdc_address,
+        rpc_endpoints_json = excluded.rpc_endpoints_json,
+        explorer_url = excluded.explorer_url,
+        source = excluded.source,
+        source_updated_at = excluded.source_updated_at,
+        updated_at = excluded.updated_at;
+    `);
+  });
+};
+
+export const listChainCatalog = () =>
+  all(`
+    SELECT
+      network,
+      chain_name AS chainName,
+      display_name AS displayName,
+      chain_type AS chainType,
+      usdc_address AS usdcAddress,
+      rpc_endpoints_json AS rpcEndpointsJson,
+      explorer_url AS explorerUrl,
+      status,
+      source,
+      source_updated_at AS sourceUpdatedAt,
+      updated_at AS updatedAt
+    FROM chain_catalog
+    ORDER BY network ASC;
+  `).map((row) => {
+    let rpcEndpoints = [];
+    try {
+      const parsed = JSON.parse(row.rpcEndpointsJson || "[]");
+      if (Array.isArray(parsed)) {
+        rpcEndpoints = parsed;
+      }
+    } catch {
+      rpcEndpoints = [];
+    }
+    return {
+      ...row,
+      rpcEndpoints
+    };
+  });
+
+export const getChainCatalogByNetwork = (network) =>
+  listChainCatalog().find((row) => row.network === network) || null;
+
+export const setChainCatalogStatus = (network, status) => {
+  const normalizedStatus = String(status || "").trim();
+  if (!["active", "degraded", "paused"].includes(normalizedStatus)) {
+    throw new Error("status must be active, degraded, or paused");
+  }
+  run(`
+    UPDATE chain_catalog
+    SET
+      status = ${sqlLiteral(normalizedStatus)},
+      updated_at = ${sqlLiteral(nowIso())}
+    WHERE network = ${sqlLiteral(network)};
+  `);
+};
+
+export const getChainCatalogRuntimeMaps = () => {
+  const rows = listChainCatalog().filter((row) => row.status !== "paused");
+  const rpcUrlsByNetwork = {};
+  const rpcByNetwork = {};
+  const usdcTokenByNetwork = {};
+  const usdcAssetAllowlist = new Set(["USDC"]);
+
+  rows.forEach((row) => {
+    const urls = (row.rpcEndpoints || []).filter((item) => typeof item === "string");
+    if (urls.length > 0) {
+      rpcUrlsByNetwork[row.network] = urls;
+      rpcByNetwork[row.network] = urls[0];
+    }
+    usdcTokenByNetwork[row.network] = row.usdcAddress;
+    usdcAssetAllowlist.add(String(row.usdcAddress || "").toLowerCase());
+  });
+
+  return {
+    chains: rows,
+    rpcUrlsByNetwork,
+    rpcByNetwork,
+    usdcTokenByNetwork,
+    usdcAssetAllowlist
+  };
+};
+
 export const getCustodyKeyByReference = (merchantId, accountId, keyReference) => {
   const row = getCustodyKeyRecord(merchantId, accountId, keyReference);
   if (!row) {
@@ -628,6 +1593,9 @@ export const getCustodyKeyByReference = (merchantId, accountId, keyReference) =>
 };
 
 export const getCustodyPrivateKeyByReference = (merchantId, accountId, keyReference) => {
+  if (String(keyReference || "").startsWith("mpc:")) {
+    return sharedCustodyPrivateKey || null;
+  }
   const row = getCustodyKeyRecord(merchantId, accountId, keyReference);
   if (!row) {
     return null;
@@ -722,6 +1690,39 @@ export const getApiProductByMethodPath = (merchantId, accountId, method, path) =
       AND account_id = ${sqlLiteral(accountId)}
       AND method = ${sqlLiteral(normalizeHttpMethod(method))}
       AND path = ${sqlLiteral(path)}
+    LIMIT 1;
+  `);
+  return row ? mapApiProductRow(row) : null;
+};
+
+export const getApiProductByApiId = (merchantId, accountId, apiId) => {
+  const normalizedApiId = String(apiId || "").trim();
+  if (!normalizedApiId) {
+    return null;
+  }
+  const row = one(`
+    SELECT
+      id,
+      merchant_id AS merchantId,
+      account_id AS accountId,
+      api_id AS apiId,
+      api_name AS apiName,
+      description,
+      method,
+      path,
+      source_network AS sourceNetwork,
+      source_asset AS sourceAsset,
+      amount,
+      settlement_mode AS settlementMode,
+      destination_network AS destinationNetwork,
+      destination_asset AS destinationAsset,
+      enabled,
+      created_at AS createdAt,
+      updated_at AS updatedAt
+    FROM api_products
+    WHERE merchant_id = ${sqlLiteral(merchantId)}
+      AND account_id = ${sqlLiteral(accountId)}
+      AND lower(api_id) = lower(${sqlLiteral(normalizedApiId)})
     LIMIT 1;
   `);
   return row ? mapApiProductRow(row) : null;
@@ -836,6 +1837,20 @@ export const updateApiProduct = (merchantId, accountId, apiProductId, patch) => 
   return getApiProductById(merchantId, accountId, apiProductId);
 };
 
+export const deleteApiProduct = (merchantId, accountId, apiProductId) => {
+  const existing = getApiProductById(merchantId, accountId, apiProductId);
+  if (!existing) {
+    return null;
+  }
+  run(`
+    DELETE FROM api_products
+    WHERE merchant_id = ${sqlLiteral(merchantId)}
+      AND account_id = ${sqlLiteral(accountId)}
+      AND id = ${sqlLiteral(apiProductId)};
+  `);
+  return existing;
+};
+
 export const getPolicy = (merchantId, accountId) => {
   const row = one(`
     SELECT
@@ -919,6 +1934,7 @@ export const insertSettlementEvent = (event) => {
       asset,
       amount,
       status,
+      fail_reason,
       tx_hash,
       source_tx_hash,
       bridge_tx_hash,
@@ -940,6 +1956,7 @@ export const insertSettlementEvent = (event) => {
       'USDC',
       ${sqlLiteral(event.amount)},
       ${sqlLiteral(event.status)},
+      ${sqlLiteral(event.failReason || null)},
       ${sqlLiteral(event.txHash)},
       ${sqlLiteral(event.sourceTxHash || null)},
       ${sqlLiteral(event.bridgeTxHash || null)},
@@ -1210,6 +2227,8 @@ export const createPayoutRequest = (input) => {
       amount,
       destination_address,
       status,
+      fail_reason,
+      tx_hash,
       created_at,
       updated_at
     ) VALUES (
@@ -1221,6 +2240,8 @@ export const createPayoutRequest = (input) => {
       ${sqlLiteral(input.amount)},
       ${sqlLiteral(input.destinationAddress)},
       'requested',
+      NULL,
+      NULL,
       ${sqlLiteral(createdAt)},
       ${sqlLiteral(createdAt)}
     );
@@ -1228,12 +2249,29 @@ export const createPayoutRequest = (input) => {
   return id;
 };
 
-export const updatePayoutStatus = (id, status) => {
+export const updatePayoutStatus = (id, status, details = {}) => {
+  const failReason =
+    details && Object.prototype.hasOwnProperty.call(details, "failReason")
+      ? details.failReason
+      : undefined;
+  const txHash =
+    details && Object.prototype.hasOwnProperty.call(details, "txHash")
+      ? details.txHash
+      : undefined;
+  const updates = [
+    `status = ${sqlLiteral(status)}`,
+    `updated_at = ${sqlLiteral(nowIso())}`
+  ];
+  if (failReason !== undefined) {
+    updates.push(`fail_reason = ${sqlLiteral(failReason)}`);
+  }
+  if (txHash !== undefined) {
+    updates.push(`tx_hash = ${sqlLiteral(txHash)}`);
+  }
   run(`
     UPDATE treasury_payout_requests
     SET
-      status = ${sqlLiteral(status)},
-      updated_at = ${sqlLiteral(nowIso())}
+      ${updates.join(",\n      ")}
     WHERE id = ${sqlLiteral(id)};
   `);
 };
@@ -1249,6 +2287,8 @@ export const getPayoutRequest = (id) =>
       amount,
       destination_address AS destinationAddress,
       status,
+      fail_reason AS failReason,
+      tx_hash AS txHash,
       created_at AS createdAt,
       updated_at AS updatedAt
     FROM treasury_payout_requests
@@ -1342,6 +2382,7 @@ export const getTimeline = (merchantId, accountId, limit = 100) => {
       asset,
       amount,
       status,
+      fail_reason AS failReason,
       tx_hash AS txHash,
       source_tx_hash AS sourceTxHash,
       bridge_tx_hash AS bridgeTxHash,
@@ -1368,6 +2409,7 @@ export const getTimeline = (merchantId, accountId, limit = 100) => {
       asset,
       amount,
       status,
+      fail_reason AS failReason,
       tx_hash AS txHash,
       source_tx_hash AS sourceTxHash,
       bridge_tx_hash AS bridgeTxHash,
@@ -1394,8 +2436,9 @@ export const getTimeline = (merchantId, accountId, limit = 100) => {
       asset,
       amount,
       status,
-      NULL AS txHash,
-      NULL AS sourceTxHash,
+      fail_reason AS failReason,
+      tx_hash AS txHash,
+      tx_hash AS sourceTxHash,
       NULL AS bridgeTxHash,
       NULL AS destinationTxHash,
       NULL AS blockNumber,

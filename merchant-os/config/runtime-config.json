@@ -1,0 +1,49 @@
+{
+  "port": 4030,
+  "webUrl": "http://localhost:3000",
+  "dbPath": "data/merchant-os.db",
+  "sessionHours": 24,
+  "onboardingAutoApprove": true,
+  "onboardingAllowlistDomains": [
+    "example.com"
+  ],
+  "custodyMode": "mpc",
+  "custodyAddress": "",
+  "realConsolidationBridgeEnabled": false,
+  "realPayoutsEnabled": true,
+  "facilitatorAddress": "0x0EC05eAfc58912d0B74423A099ccF2567a83A9B0",
+  "demoSourceNetwork": "eip155:421614",
+  "chainCatalogSyncMs": 300000,
+  "chainStatusOverrides": {},
+  "onchainReadTimeoutMs": 7000,
+  "onchainReadTotalBudgetMs": 7000,
+  "payoutTxTimeoutMs": 120000,
+  "consolidationBridgeTimeoutMs": 300000,
+  "consolidationBridgeRetryAttempts": 2,
+  "consolidationBridgeRetryBackoffMs": 2500,
+  "consolidationBridgeRpcTimeoutMs": 30000,
+  "consolidationBridgeRpcRetryCount": 3,
+  "gasSponsorAutoTopupEnabled": true,
+  "gasEstimatorEnabled": true,
+  "gasEstimatorSourceGasUnits": 450000,
+  "gasEstimatorDestinationGasUnits": 350000,
+  "gasEstimatorBufferBps": 18000,
+  "minBridgeNativeBalanceWei": "100000000000000",
+  "gasSponsorTopupWei": "300000000000000",
+  "gasSponsorReceiptTimeoutMs": 120000,
+  "rpcOverridesByNetwork": {
+    "eip155:421614": [
+      "https://arbitrum-sepolia-rpc.publicnode.com",
+      "https://sepolia-rollup.arbitrum.io/rpc",
+      "https://arbitrum-sepolia.drpc.org"
+    ],
+    "eip155:11155111": [
+      "https://sepolia.drpc.org",
+      "https://ethereum-sepolia-rpc.publicnode.com",
+      "https://rpc.sepolia.org"
+    ],
+    "eip155:5042002": [
+      "https://rpc.testnet.arc.network/"
+    ]
+  }
+}

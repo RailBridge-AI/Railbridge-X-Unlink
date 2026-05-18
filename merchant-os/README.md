@@ -1,116 +1,183 @@
-# Merchant OS (Demo MVP)
+# RailBridge Merchant OS (Working Prototype)
 
-Demo-first Merchant Treasury OS app for RailBridge.
+Merchant OS is the merchant-facing control plane for RailBridge.
 
-## Scope
+It gives merchants a Stripe-like experience for stablecoin acceptance:
 
-- Custodial-only model (RailBridge-managed wallets)
-- USDC-only flows
-- Web2 login
-- Merchant/account scoped overview, settlements, policy, consolidation, payout endpoints
+1. Define paid API routes/products.
+2. Accept USDC from supported chains.
+3. Track settlement lifecycle in one dashboard.
+4. Request payouts without handling wallet keys.
 
-## Architecture
+## What Merchants Should And Should Not Do
 
-- `merchant-os/src/*`: Node API + demo data layer
-- `merchant-os/frontend/*`: Next.js + React + Tailwind frontend
+Merchant responsibilities:
 
-## Run (Local)
+1. Build or update their backend paid routes.
+2. Add RailBridge requirement resolution + payment middleware wiring.
+3. Configure webhook endpoint(s).
+4. Use Merchant Console for products, settlements, payouts, and keys.
 
-1. Install frontend dependencies:
+RailBridge responsibilities:
+
+1. Verify/settle payment flow (through payment middleware/facilitator layer).
+2. Handle chain complexity and settlement lifecycle events.
+3. Keep ledger + balance projection updated.
+4. Deliver signed webhooks for payment/payout events.
+
+Important: merchants should not manually call facilitator `/verify` or `/settle`.
+
+## Product Simplicity Defaults
+
+By default, product creation is abstraction-first:
+
+1. `sourceNetwork` defaults to `any`.
+2. Product can accept USDC from any active supported chain.
+3. Settlement mode defaults to `cross_chain`.
+4. Destination network can fall back to treasury policy.
+
+Merchants can still use advanced routing controls when they want explicit source/destination behavior.
+
+## Documentation Map
+
+1. Demo runbook: `merchant-os/DEMO_GUIDE.md`
+2. Merchant onboarding + integration technical guide: `merchant-os/ONBOARDING_TECHNICAL.md`
+3. Webhook setup guide: `merchant-os/WEBHOOK_SETUP_GUIDE.md`
+4. Reality status matrix: `merchant-os/REALITY_CHECK.md`
+5. Architecture overview: `merchant-os/ARCHITECTURE.md`
+6. Deep architecture diagrams: `merchant-os/ARCHITECTURE_DEEP_DIVE.md`
+7. Runtime config guide: `merchant-os/config/README.md`
+
+## Local Run
+
+1. Install dependencies:
 
 ```bash
-cd merchant-os/frontend
-npm install
+npm --prefix merchant-os install
+npm --prefix merchant-os/frontend install
 ```
 
-2. Start API server (terminal 1):
+2. Start API:
 
 ```bash
-cd merchant-os
-npm run dev:api
+npm --prefix merchant-os run dev:api
 ```
 
-3. Start Next.js frontend (terminal 2):
+3. Start frontend:
 
 ```bash
-cd merchant-os
-npm run dev:web
+npm --prefix merchant-os run dev:web
 ```
 
-Frontend: `http://localhost:3000`
-API: `http://localhost:4030`
+Default URLs:
 
-Notes:
-- API `/` redirects to `MERCHANT_OS_WEB_URL` (default `http://localhost:3000`).
-- Frontend `/v1/*` requests are proxied to API via Next rewrites.
-- Merchant OS API auto-loads `merchant-os/.env` when present (shell env vars still override it).
+1. Merchant Console: `http://localhost:3000`
+2. Merchant OS API: `http://localhost:4030`
 
-## Demo Credentials
+## Runtime Config And Env
 
-Printed by the API server on startup. Default passwords are `demo123`.
+Merchant OS now uses:
 
-## Optional Env Vars
+1. `merchant-os/config/runtime-config.json` for non-sensitive, editable defaults.
+2. `merchant-os/config/runtime-config.local.json` (optional, gitignored) for local overrides.
+3. `merchant-os/.env` for secrets and deployment-time overrides.
 
-API (`merchant-os/.env`):
+Primary secrets in `.env`:
 
-- `MERCHANT_OS_PORT` (default `4030`)
-- `MERCHANT_OS_WEB_URL` (default `http://localhost:3000`)
-- `MERCHANT_OS_DB_PATH` (default `merchant-os/data/merchant-os.db`)
-- `MERCHANT_OS_SESSION_HOURS` (default `24`)
-- `MERCHANT_OS_INGEST_TOKEN` (default `merchant-os-demo-ingest`)
-- `MERCHANT_OS_INTERNAL_TOKEN` (default same as ingest token)
-- `MERCHANT_OS_FACILITATOR_ADDRESS` (required for cross-chain requirement resolution)
-- `MERCHANT_OS_DEMO_SOURCE_NETWORK` (default `eip155:421614`, Arbitrum Sepolia)
-- `MERCHANT_OS_ONCHAIN_TIMEOUT_MS` (default `7000`, per-network RPC timeout)
-- `MERCHANT_OS_ONCHAIN_TOTAL_BUDGET_MS` (default `2200`, max total wait before overview returns partial/fallback balances)
+1. `MERCHANT_OS_INGEST_TOKEN`
+2. `MERCHANT_OS_INTERNAL_TOKEN`
+3. `MERCHANT_OS_ADMIN_TOKEN`
+4. `MERCHANT_OS_CUSTODY_MASTER_KEY`
+5. `MERCHANT_OS_BRIDGE_EVM_PRIVATE_KEY` (optional)
+6. `MERCHANT_OS_GAS_SPONSOR_PRIVATE_KEY` (optional)
 
-RPC + USDC token metadata are hardcoded from a Circle-supported chain snapshot.
-USDC allowlist for demo is auto-derived from those hardcoded token addresses plus `USDC` symbol, so no env var is required.
+Generate platform tokens quickly:
+
+```bash
+npm --prefix merchant-os run tokens:generate
+```
 
 Frontend (`merchant-os/frontend/.env.local`):
 
-- `MERCHANT_OS_API_URL` (default `http://localhost:4030`)
+1. `MERCHANT_OS_API_URL` (default `http://localhost:4030`)
 
-## Key Endpoints
+Env variables still override runtime config when present (useful for tests, CI, and deployments).
 
-- `POST /v1/demo/auth/login`
-- `GET /v1/demo/meta/credentials`
-- `GET /v1/demo/merchant/{merchantId}/accounts/{accountId}/overview`
-- `GET /v1/demo/merchant/{merchantId}/accounts/{accountId}/settlements`
-- `GET /v1/demo/merchant/{merchantId}/accounts/{accountId}/api-revenue`
-- `GET /v1/demo/merchant/{merchantId}/accounts/{accountId}/api-products`
-- `POST /v1/demo/merchant/{merchantId}/accounts/{accountId}/api-products`
-- `PUT /v1/demo/merchant/{merchantId}/accounts/{accountId}/api-products/{apiProductId}`
-- `PUT /v1/demo/merchant/{merchantId}/accounts/{accountId}/policy`
-- `POST /v1/demo/merchant/{merchantId}/accounts/{accountId}/consolidations`
-- `POST /v1/demo/merchant/{merchantId}/accounts/{accountId}/payouts`
-- `POST /v1/demo/internal/events/settlements` (ingest token required)
-- `POST /v1/demo/internal/requirements/resolve` (internal token required)
+## API Surface (Current)
+
+Session-auth onboarding/config endpoints (`Authorization: Bearer <sessionToken>`):
+
+1. `POST /v1/auth/login`
+2. `POST /v1/onboarding/start`
+3. `GET /v1/onboarding/checklist`
+4. `GET /v1/onboarding/settings`
+5. `POST /v1/onboarding/api-keys`
+6. `PATCH /v1/onboarding/api-keys/{apiKeyId}`
+7. `POST /v1/onboarding/api-keys/{apiKeyId}/revoke`
+8. `POST /v1/onboarding/webhooks`
+9. `PATCH /v1/onboarding/webhooks/{webhookId}`
+10. `DELETE /v1/onboarding/webhooks/{webhookId}`
+11. `POST /v1/onboarding/webhooks/test`
+12. `POST /v1/onboarding/products`
+
+Merchant runtime endpoints (`x-railbridge-api-key: <apiKey>`):
+
+1. `GET /v1/merchants/{merchantId}/balances`
+2. `GET /v1/merchants/{merchantId}/settlements`
+3. `GET /v1/merchants/{merchantId}/products`
+4. `POST /v1/merchants/{merchantId}/products`
+5. `PUT /v1/merchants/{merchantId}/products/{apiProductId}`
+6. `DELETE /v1/merchants/{merchantId}/products/{apiProductId}`
+7. `GET /v1/merchants/{merchantId}/consolidations`
+8. `POST /v1/merchants/{merchantId}/consolidations`
+9. `GET /v1/merchants/{merchantId}/payouts`
+10. `POST /v1/merchants/{merchantId}/payouts`
+11. `GET /v1/merchants/{merchantId}/settings`
+
+Platform/internal endpoints (not merchant public integration contract yet):
+
+1. `POST /v1/internal/requirements/resolve` (internal token, platform-to-platform)
+2. `POST /v1/internal/events/settlements` (ingest token, platform-to-platform)
+
+Merchant SDK resolver endpoint:
+
+1. `POST /v1/sdk/requirements/resolve` (`x-railbridge-api-key`)
+
+Ops/admin endpoints:
+
+1. `GET /v1/chains`
+2. `POST /v1/admin/chains/{network}/status` (admin token)
+
+## Integration Note
+
+`resolveRequirements(...)` now targets merchant-facing `POST /v1/sdk/requirements/resolve` using `x-railbridge-api-key`.
+
+Merchant integrations no longer need to pass internal platform tokens or merchant/account IDs for requirement resolution.
 
 ## One-Command Backend Demo
 
 ```bash
-cd merchant-os
-npm run demo:quick
+npm --prefix merchant-os run demo:quick
 ```
 
-This resets the DB, runs the API server, ingests sample settlement lifecycle events, applies a policy update, triggers consolidation, prints summary output, and exits.
+This resets DB, starts API, ingests sample lifecycle events, runs sample operations, prints summary, and exits.
 
-## Facilitator Integration
+## Demo Webhook Receiver
 
-In `facilitator/.env`, set:
+To run a local demo merchant webhook receiver:
 
-- `MERCHANT_OS_EVENT_INGEST_URL=http://localhost:4030/v1/demo/internal/events/settlements`
-- `MERCHANT_OS_INGEST_TOKEN=merchant-os-demo-ingest`
-- `MERCHANT_CONTEXT_MAP_JSON` mapping merchant destination addresses to Merchant OS ids.
-
-Example:
-
-```json
-{
-  "0x1111111111111111111111111111111111118453": {
-    "merchantId": "11111111-1111-4111-8111-111111111111",
-    "accountId": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
-  }
-}
+```bash
+npm --prefix merchant-os run demo:webhook:service
 ```
+
+See `merchant-os/WEBHOOK_SETUP_GUIDE.md` section `Local demo merchant webhook service` for full end-to-end verification steps.
+
+## Facilitator Event Integration (Platform Side)
+
+Facilitator should publish settlement lifecycle events to Merchant OS:
+
+1. `MERCHANT_OS_EVENT_INGEST_URL=http://localhost:4030/v1/internal/events/settlements`
+2. `MERCHANT_OS_INGEST_TOKEN=<same as Merchant OS ingest token>`
+3. `MERCHANT_CONTEXT_MAP_JSON=<destinationAddress -> merchant/account mapping>`
+
+This integration is platform-to-platform and is not a merchant onboarding action.

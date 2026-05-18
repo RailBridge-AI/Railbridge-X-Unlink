@@ -1,0 +1,15 @@
+{
+  "port": 4031,
+  "onboardingAutoApprove": false,
+  "onboardingAllowlistDomains": [
+    "yourcompany.com"
+  ],
+  "realConsolidationBridgeEnabled": false,
+  "realPayoutsEnabled": false,
+  "rpcOverridesByNetwork": {
+    "eip155:421614": [
+      "https://your-rpc-1.example",
+      "https://your-rpc-2.example"
+    ]
+  }
+}

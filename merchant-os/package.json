@@ -12,9 +12,14 @@
     "dev:web": "npm --prefix frontend run dev",
     "build:web": "npm --prefix frontend run build",
     "start:web": "npm --prefix frontend run start",
+    "test": "node --test \"tests/**/*.test.js\"",
+    "test:integration": "node --test \"tests/integration/**/*.test.js\"",
+    "test:unit": "node --test \"tests/unit/**/*.test.js\"",
     "db:reset": "node scripts/reset-db.js",
     "db:seed": "node scripts/seed-demo.js",
-    "demo:quick": "node scripts/demo-quick.js"
+    "demo:quick": "node scripts/demo-quick.js",
+    "demo:webhook:service": "node scripts/demo-webhook-service.js",
+    "tokens:generate": "node scripts/generate-platform-tokens.js"
   },
   "dependencies": {
     "@circle-fin/adapter-viem-v2": "^1.2.0",
