@@ -1,6 +1,6 @@
 # RailBridge Merchant Treasury OS — AI-Agent Sprint Delivery Plan
 
-For hackathon demo-first delivery, use `MERCHANT_TREASURY_MVP_V1_DEMO_PLAN.md` with `MERCHANT_TREASURY_MVP_V1_DEMO_SPEC.md`.
+For prototype demo-first delivery, use the current Merchant OS runbooks in `merchant-os/DEMO_GUIDE.md` and `merchant-os/ONBOARDING_TECHNICAL.md`.
 
 ## 1) Goal
 

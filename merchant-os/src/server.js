@@ -3,6 +3,8 @@ import { URL } from "node:url";
 import { fileURLToPath } from "node:url";
 import { dirname, join, resolve, sep } from "node:path";
 import { createReadStream, existsSync, statSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { privateKeyToAccount } from "viem/accounts";
 import { config } from "./config.js";
 import {
   fetchOnchainGasPrice,
@@ -11,20 +13,32 @@ import {
 } from "./onchain.js";
 import { ConsolidationBridgeError, ConsolidationBridgeService } from "./consolidationBridgeService.js";
 import { GasSponsorService } from "./gasSponsorService.js";
+import { transferUsdcOnchain, UsdcTransferError } from "./usdcTransferService.js";
 import {
-  authenticateUser,
+  authenticatePlatformUser,
+  countActiveApiKeys,
+  countActiveApiKeysByRole,
+  createApiKey,
   createApiProduct,
   createConsolidation,
+  createWebhookEndpoint,
+  deleteApiProduct,
+  deleteWebhookEndpoint,
+  findApiKeyByToken,
+  getApiProductByApiId,
+  getChainCatalogByNetwork,
+  getChainCatalogRuntimeMaps,
   createPayoutRequest,
   createSession,
   getApiProductById,
   getApiProductByMethodPath,
-  getApiRevenueBreakdown,
+  getApiKeyById,
   getAvailableBalanceForNetwork,
   getBalances,
   getConsolidation,
   getCustodyPrivateKeyByReference,
   getDemoMerchants,
+  getWebhookEndpointById,
   hasSettlementLifecycleEvent,
   getPayoutRequest,
   getPolicy,
@@ -36,12 +50,23 @@ import {
   initializeDatabase,
   insertSettlementEvent,
   listApiProducts,
+  listChainCatalog,
+  onboardMerchantAccount,
   recomputeBalances,
+  revokeApiKeyById,
+  setChainCatalogStatus,
+  touchApiKeyUsed,
+  updateApiKeyMetadata,
   updateApiProduct,
   updateConsolidationStatus,
-  updatePayoutStatus,
-  upsertPolicy
+  updateWebhookEndpoint,
+  updatePayoutStatus
 } from "./db.js";
+import { ChainCatalogService } from "./chainCatalogService.js";
+import {
+  publishTenantWebhookEvent,
+  sendWebhookTestEvent
+} from "./webhookService.js";
 import {
   newId,
   nowIso,
@@ -49,10 +74,21 @@ import {
   parsePositiveUsdcToBaseUnits,
   toDecimalUsdcString
 } from "./utils.js";
+import {
+  buildOnboardingChecklist,
+  buildTenantSettingsPayload
+} from "./services/onboardingService.js";
+import { resolvePaymentRequirementsForTenant } from "./services/requirementsResolverService.js";
+import {
+  SOURCE_NETWORK_ANY,
+  isSourceNetworkAny,
+  normalizeSourceNetworkPreference,
+  normalizeUsdcAsset
+} from "./services/usdcRoutingService.js";
 
-const ACCOUNT_ROUTE =
-  /^\/v1\/demo\/merchant\/([^/]+)\/accounts\/([^/]+)\/(overview|settlements|policy|consolidations|payouts|api-revenue)$/;
-const API_PRODUCTS_ROUTE = /^\/v1\/demo\/merchant\/([^/]+)\/accounts\/([^/]+)\/api-products(?:\/([^/]+))?$/;
+const MERCHANT_ROUTE = /^\/v1\/merchants\/([^/]+)\/(balances|settlements|products|consolidations|payouts|settings)$/;
+const MERCHANT_PRODUCTS_ITEM_ROUTE = /^\/v1\/merchants\/([^/]+)\/products\/([^/]+)$/;
+const ONBOARDING_WEBHOOK_ITEM_ROUTE = /^\/v1\/onboarding\/webhooks\/(?!test$)([^/]+)$/;
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -67,31 +103,6 @@ const MIME_TYPES = {
   ".webp": "image/webp"
 };
 
-// EIP-3009 domain parameters are token-contract specific.
-// Most Circle-issued USDC contracts use "USD Coin"/"2".
-// Arc testnet (0x3600...) has historically required "USDC"/"2" in this demo flow.
-const USDC_EIP712_DOMAIN_BY_NETWORK = {
-  "eip155:5042002": { name: "USDC", version: "2" }
-};
-
-const resolveUsdcDomainProfile = (network) =>
-  USDC_EIP712_DOMAIN_BY_NETWORK[network] || { name: "USD Coin", version: "2" };
-
-const isUsdcAsset = (asset) => {
-  if (!asset) {
-    return false;
-  }
-  const normalized = String(asset).toLowerCase();
-  return normalized === "usdc" || config.usdcAssetAllowlist.has(normalized);
-};
-
-const normalizeUsdcAsset = (asset) => {
-  if (!isUsdcAsset(asset)) {
-    return null;
-  }
-  return "USDC";
-};
-
 const normalizeHttpMethod = (method) => String(method || "").trim().toUpperCase();
 
 const normalizeRoutePath = (path) => {
@@ -102,12 +113,129 @@ const normalizeRoutePath = (path) => {
   return value.startsWith("/") ? value : `/${value}`;
 };
 
-const normalizeOptionalAddress = (value) => {
-  if (value === null || value === undefined || value === "") {
-    return null;
+const normalizeEvmAddress = (value) => {
+  const text = String(value || "").trim();
+  return /^0x[a-fA-F0-9]{40}$/.test(text) ? text : null;
+};
+
+const normalizePrivateKey = (value) => {
+  const text = String(value || "").trim();
+  return /^0x[a-fA-F0-9]{64}$/.test(text) ? text : null;
+};
+
+const bridgeSignerPrivateKey = normalizePrivateKey(config.bridgePrivateKey);
+const defaultCustodyWalletAddress =
+  normalizeEvmAddress(config.custodyAddress) ||
+  (bridgeSignerPrivateKey ? privateKeyToAccount(bridgeSignerPrivateKey).address : null);
+
+const deterministicWalletAddress = (merchantId, network) => {
+  const seed = `${merchantId}:${network}`;
+  const digest = createHash("sha256").update(seed).digest("hex");
+  return `0x${digest.slice(0, 40)}`;
+};
+
+const emailDomain = (email) => {
+  const parts = String(email || "").trim().toLowerCase().split("@");
+  return parts.length === 2 ? parts[1] : "";
+};
+
+const isOnboardingAllowlisted = (email) => {
+  if (config.onboardingAutoApprove) {
+    return true;
   }
-  const text = String(value).trim();
-  return text === "" ? null : text;
+  if (!config.onboardingAllowlistDomains.size) {
+    return false;
+  }
+  const domain = emailDomain(email);
+  return domain ? config.onboardingAllowlistDomains.has(domain) : false;
+};
+
+const resolveRuntimeChainMaps = () => {
+  const runtime = getChainCatalogRuntimeMaps();
+  return {
+    rpcByNetwork: runtime.rpcByNetwork,
+    rpcUrlsByNetwork: runtime.rpcUrlsByNetwork,
+    usdcTokenByNetwork: runtime.usdcTokenByNetwork
+  };
+};
+
+const parseBaseUnitsSafe = (value) => {
+  try {
+    return BigInt(String(value || "0"));
+  } catch {
+    return 0n;
+  }
+};
+
+const mergeOnchainAndProjectedUsdcAmount = ({ onchainAmount, projectedAmount }) => {
+  if (onchainAmount === null && projectedAmount === null) {
+    return {
+      amount: 0n,
+      source: "none"
+    };
+  }
+  if (onchainAmount !== null && projectedAmount !== null) {
+    if (onchainAmount === 0n && projectedAmount > 0n) {
+      return {
+        amount: projectedAmount,
+        source: "projected"
+      };
+    }
+    return {
+      amount: onchainAmount,
+      source: "onchain"
+    };
+  }
+  if (onchainAmount !== null) {
+    return {
+      amount: onchainAmount,
+      source: "onchain"
+    };
+  }
+  return {
+    amount: projectedAmount,
+    source: "projected"
+  };
+};
+
+const getEffectiveNetworkUsdcBalance = async ({
+  merchantId,
+  accountId,
+  network,
+  wallet = null
+}) => {
+  const projectedAmount = getAvailableBalanceForNetwork(merchantId, accountId, network);
+  const targetWallet = wallet || getWalletByNetwork(merchantId, accountId, network);
+  if (!targetWallet) {
+    return {
+      amount: projectedAmount,
+      source: projectedAmount > 0n ? "projected" : "none",
+      projectedAmount,
+      onchainAmount: null
+    };
+  }
+
+  const runtimeMaps = resolveRuntimeChainMaps();
+  const onchainByNetwork = await fetchOnchainUsdcBalancesByNetwork({
+    wallets: [targetWallet],
+    rpcByNetwork: runtimeMaps.rpcByNetwork,
+    rpcUrlsByNetwork: runtimeMaps.rpcUrlsByNetwork,
+    usdcTokenByNetwork: runtimeMaps.usdcTokenByNetwork,
+    timeoutMs: config.onchainReadTimeoutMs,
+    totalBudgetMs: Math.max(config.onchainReadTimeoutMs, config.onchainReadTotalBudgetMs)
+  });
+  const onchainRow = onchainByNetwork.get(network);
+  const onchainAmount = onchainRow ? parseBaseUnitsSafe(onchainRow.amount) : null;
+  const merged = mergeOnchainAndProjectedUsdcAmount({
+    onchainAmount,
+    projectedAmount
+  });
+  return {
+    amount: merged.amount,
+    source: merged.source,
+    projectedAmount,
+    onchainAmount
+  };
 };
 
 const parseJsonBody = async (req) => {
@@ -157,6 +285,22 @@ const requireSession = (req, res) => {
   return session;
 };
 
+const requireApiKey = (req, res) => {
+  const headerValue = req.headers["x-railbridge-api-key"];
+  const token = typeof headerValue === "string" ? headerValue.trim() : "";
+  if (!token) {
+    sendJson(res, 401, { error: "Missing x-railbridge-api-key" });
+    return null;
+  }
+  const key = findApiKeyByToken(token);
+  if (!key) {
+    sendJson(res, 401, { error: "Invalid API key" });
+    return null;
+  }
+  touchApiKeyUsed(key.id);
+  return key;
+};
+
 const requireTenant = (res, session, merchantId, accountId) => {
   if (session.merchantId !== merchantId || session.accountId !== accountId) {
     sendJson(res, 403, { error: "Forbidden: tenant scope mismatch" });
@@ -175,6 +319,7 @@ const ensureAccountExists = (res, merchantId, accountId) => {
 };
 
 const buildOverviewResponse = async (merchantId, accountId) => {
+  const runtimeMaps = resolveRuntimeChainMaps();
   const projectedBalances = getBalances(merchantId, accountId);
   const policy = getPolicy(merchantId, accountId);
   const wallets = getWallets(merchantId, accountId);
@@ -189,50 +334,33 @@ const buildOverviewResponse = async (merchantId, accountId) => {
   );
   const onchainByNetwork = await fetchOnchainUsdcBalancesByNetwork({
     wallets,
-    rpcByNetwork: config.rpcByNetwork,
-    rpcUrlsByNetwork: config.rpcUrlsByNetwork,
-    usdcTokenByNetwork: config.usdcTokenByNetwork,
+    rpcByNetwork: runtimeMaps.rpcByNetwork,
+    rpcUrlsByNetwork: runtimeMaps.rpcUrlsByNetwork,
+    usdcTokenByNetwork: runtimeMaps.usdcTokenByNetwork,
     timeoutMs: config.onchainReadTimeoutMs,
     totalBudgetMs: config.onchainReadTotalBudgetMs
   });
-
-  const parseBaseUnits = (value) => {
-    try {
-      return BigInt(String(value || "0"));
-    } catch {
-      return 0n;
-    }
-  };
 
   const mergedByNetwork = new Map();
   wallets.forEach((wallet) => {
     if (!mergedByNetwork.has(wallet.network)) {
       const onchain = onchainByNetwork.get(wallet.network);
       const projected = projectedByNetwork.get(wallet.network);
-      let amount = "0";
+      const onchainAmount = onchain ? parseBaseUnitsSafe(onchain.amount) : null;
+      const projectedAmount = projected ? parseBaseUnitsSafe(projected.amount) : null;
+      const merged = mergeOnchainAndProjectedUsdcAmount({
+        onchainAmount,
+        projectedAmount
+      });
+      let amount = merged.amount.toString();
       let balanceSource = "none";
       let updatedAt = nowIso();
+      balanceSource = merged.source;
 
-      if (onchain && projected) {
-        const onchainAmount = parseBaseUnits(onchain.amount);
-        const projectedAmount = parseBaseUnits(projected.amount);
-        if (onchainAmount === 0n && projectedAmount > 0n) {
-          amount = projected.amount;
-          balanceSource = "projected";
-          updatedAt = projected.updatedAt || onchain.asOf || nowIso();
-        } else {
-          amount = onchain.amount;
-          balanceSource = "onchain";
-          updatedAt = onchain.asOf || projected.updatedAt || nowIso();
-        }
-      } else if (onchain) {
-        amount = onchain.amount;
-        balanceSource = "onchain";
-        updatedAt = onchain.asOf || nowIso();
-      } else if (projected) {
-        amount = projected.amount;
-        balanceSource = "projected";
-        updatedAt = projected.updatedAt || nowIso();
+      if (balanceSource === "onchain") {
+        updatedAt = onchain?.asOf || projected?.updatedAt || nowIso();
+      } else if (balanceSource === "projected") {
+        updatedAt = projected?.updatedAt || onchain?.asOf || nowIso();
       }
       mergedByNetwork.set(wallet.network, {
         network: wallet.network,
@@ -280,9 +408,16 @@ const validateIngestToken = (req) => {
   if (typeof headerToken === "string" && headerToken === config.ingestToken) {
     return true;
   }
+  const internalHeader = req.headers["x-merchant-os-internal-token"];
+  if (
+    typeof internalHeader === "string" &&
+    (internalHeader === config.ingestToken || internalHeader === config.internalToken)
+  ) {
+    return true;
+  }
 
   const bearer = getBearerToken(req);
-  return Boolean(bearer && bearer === config.ingestToken);
+  return Boolean(bearer && (bearer === config.ingestToken || bearer === config.internalToken));
 };
 
 const validateInternalToken = (req) => {
@@ -304,6 +439,7 @@ const gasSponsorService = new GasSponsorService({
   rpcByNetwork: config.rpcByNetwork,
   rpcUrlsByNetwork: config.rpcUrlsByNetwork
 });
+const chainCatalogService = new ChainCatalogService();
 
 if (config.realConsolidationBridgeEnabled) {
   console.info(
@@ -320,6 +456,11 @@ if (config.realConsolidationBridgeEnabled) {
       );
     }
   }
+}
+if (config.realPayoutsEnabled) {
+  console.info("[merchant-os] Real payout execution enabled.");
+} else {
+  console.warn("[merchant-os] Real payout execution disabled. Payouts will be ledger-simulated.");
 }
 
 const sanitizeFailReason = (value) => {
@@ -649,6 +790,253 @@ const runConsolidationBridgeAsync = ({
   })();
 };
 
+const executePayout = async ({
+  merchantId,
+  accountId,
+  network,
+  destinationAddress,
+  amount
+}) => {
+  const sourceWallet = getWalletByNetwork(merchantId, accountId, network);
+  if (!sourceWallet) {
+    return {
+      ok: false,
+      statusCode: 400,
+      payload: { error: "network wallet not found" }
+    };
+  }
+  const sourceBalanceInfo = await getEffectiveNetworkUsdcBalance({
+    merchantId,
+    accountId,
+    network,
+    wallet: sourceWallet
+  });
+  if (sourceBalanceInfo.amount < amount) {
+    return {
+      ok: false,
+      statusCode: 400,
+      payload: {
+        error: "insufficient balance",
+        available: sourceBalanceInfo.amount.toString(),
+        availableSource: sourceBalanceInfo.source,
+        availableProjected: sourceBalanceInfo.projectedAmount.toString(),
+        availableOnchain: sourceBalanceInfo.onchainAmount === null ? null : sourceBalanceInfo.onchainAmount.toString()
+      }
+    };
+  }
+  const chain = getChainCatalogByNetwork(network);
+  if (chain?.status === "paused") {
+    return {
+      ok: false,
+      statusCode: 400,
+      payload: {
+        error: "network is paused by RailBridge operations",
+        network
+      }
+    };
+  }
+
+  const payoutId = createPayoutRequest({
+    merchantId,
+    accountId,
+    network,
+    amount: amount.toString(),
+    destinationAddress
+  });
+  updatePayoutStatus(payoutId, "submitted");
+
+  if (!config.realPayoutsEnabled) {
+    updatePayoutStatus(payoutId, "completed");
+    recomputeBalances(merchantId, accountId);
+    const payout = getPayoutRequest(payoutId);
+    await publishTenantWebhookEvent({
+      merchantId,
+      accountId,
+      eventType: "payout.completed",
+      eventId: `evt_${payoutId}_completed`,
+      data: payout
+    });
+    return {
+      ok: true,
+      statusCode: 201,
+      payout
+    };
+  }
+
+  const sourcePrivateKey = getCustodyPrivateKeyByReference(
+    merchantId,
+    accountId,
+    sourceWallet.keyReference
+  );
+  if (!sourcePrivateKey) {
+    updatePayoutStatus(payoutId, "failed", {
+      failReason: "missing custody signer for wallet reference"
+    });
+    const payout = getPayoutRequest(payoutId);
+    await publishTenantWebhookEvent({
+      merchantId,
+      accountId,
+      eventType: "payout.failed",
+      eventId: `evt_${payoutId}_failed`,
+      data: payout
+    });
+    return {
+      ok: false,
+      statusCode: 500,
+      payload: {
+        error: "Missing custody signer for payout source wallet",
+        payout
+      }
+    };
+  }
+
+  const signerAddress = privateKeyToAccount(sourcePrivateKey).address;
+  const normalizedWalletAddress = normalizeEvmAddress(sourceWallet.address);
+  if (!normalizedWalletAddress || normalizedWalletAddress.toLowerCase() !== signerAddress.toLowerCase()) {
+    updatePayoutStatus(payoutId, "failed", {
+      failReason: "custody signer does not match source wallet address"
+    });
+    const payout = getPayoutRequest(payoutId);
+    await publishTenantWebhookEvent({
+      merchantId,
+      accountId,
+      eventType: "payout.failed",
+      eventId: `evt_${payoutId}_failed`,
+      data: payout
+    });
+    return {
+      ok: false,
+      statusCode: 400,
+      payload: {
+        error: "custody signer does not match source wallet address",
+        signerAddress,
+        walletAddress: sourceWallet.address,
+        payout
+      }
+    };
+  }
+
+  const sourceNativeBalance = await fetchOnchainNativeBalance({
+    network,
+    address: sourceWallet.address,
+    rpcByNetwork: config.rpcByNetwork,
+    rpcUrlsByNetwork: config.rpcUrlsByNetwork,
+    timeoutMs: config.onchainReadTimeoutMs
+  });
+  if (!sourceNativeBalance) {
+    updatePayoutStatus(payoutId, "failed", {
+      failReason: "unable to verify source-network native gas balance"
+    });
+    const payout = getPayoutRequest(payoutId);
+    await publishTenantWebhookEvent({
+      merchantId,
+      accountId,
+      eventType: "payout.failed",
+      eventId: `evt_${payoutId}_failed`,
+      data: payout
+    });
+    return {
+      ok: false,
+      statusCode: 400,
+      payload: {
+        error: "unable to verify source-network native gas balance",
+        network,
+        address: sourceWallet.address,
+        payout
+      }
+    };
+  }
+
+  const gasRequirement = await estimateRequiredBridgeGas({
+    network,
+    role: "source"
+  });
+  const sourceGasCheck = await ensureNetworkGasForBridge({
+    network,
+    walletAddress: sourceWallet.address,
+    currentWei: BigInt(sourceNativeBalance.amount),
+    role: "source",
+    gasRequirement
+  });
+  if (!sourceGasCheck.ok) {
+    updatePayoutStatus(payoutId, "failed", {
+      failReason: sanitizeFailReason(sourceGasCheck.error || "gas preflight failed")
+    });
+    const payout = getPayoutRequest(payoutId);
+    await publishTenantWebhookEvent({
+      merchantId,
+      accountId,
+      eventType: "payout.failed",
+      eventId: `evt_${payoutId}_failed`,
+      data: payout
+    });
+    return {
+      ok: false,
+      statusCode: 400,
+      payload: {
+        ...sourceGasCheck,
+        payout
+      }
+    };
+  }
+
+  try {
+    const transfer = await transferUsdcOnchain({
+      network,
+      destinationAddress,
+      amountBaseUnits: amount.toString(),
+      sourcePrivateKey,
+      rpcByNetwork: config.rpcByNetwork,
+      rpcUrlsByNetwork: config.rpcUrlsByNetwork,
+      usdcTokenByNetwork: config.usdcTokenByNetwork,
+      txTimeoutMs: config.payoutTxTimeoutMs,
+      rpcTimeoutMs: config.consolidationBridgeRpcTimeoutMs,
+      rpcRetryCount: config.consolidationBridgeRpcRetryCount
+    });
+    updatePayoutStatus(payoutId, "completed", {
+      txHash: transfer.txHash,
+      failReason: null
+    });
+    recomputeBalances(merchantId, accountId);
+    const payout = getPayoutRequest(payoutId);
+    await publishTenantWebhookEvent({
+      merchantId,
+      accountId,
+      eventType: "payout.completed",
+      eventId: `evt_${payoutId}_completed`,
+      data: payout
+    });
+    return {
+      ok: true,
+      statusCode: 201,
+      payout
+    };
+  } catch (error) {
+    const details = error instanceof UsdcTransferError ? error.details || {} : {};
+    updatePayoutStatus(payoutId, "failed", {
+      failReason: sanitizeFailReason(error instanceof Error ? error.message : String(error)),
+      txHash: String(details.txHash || "").trim() || null
+    });
+    const payout = getPayoutRequest(payoutId);
+    await publishTenantWebhookEvent({
+      merchantId,
+      accountId,
+      eventType: "payout.failed",
+      eventId: `evt_${payoutId}_failed`,
+      data: payout
+    });
+    return {
+      ok: false,
+      statusCode: 502,
+      payload: {
+        error: "payout execution failed",
+        details: error instanceof Error ? error.message : String(error),
+        payout
+      }
+    };
+  }
+};
+
 const server = createServer(async (req, res) => {
   const method = req.method || "GET";
   const requestUrl = new URL(req.url || "/", `http://${req.headers.host || "localhost"}`);
@@ -671,18 +1059,39 @@ const server = createServer(async (req, res) => {
       });
     }
 
-    if (method === "GET" && pathname === "/v1/demo/meta/credentials") {
-      const merchants = getDemoMerchants().map((merchant) => ({
-        merchantName: merchant.merchantName,
-        email: merchant.email,
-        password: merchant.password,
-        merchantId: merchant.merchantId,
-        accountId: merchant.accountId
-      }));
-      return sendJson(res, 200, { merchants });
+    if (method === "GET" && pathname === "/v1/chains") {
+      return sendJson(res, 200, {
+        items: listChainCatalog()
+      });
     }
 
-    if (method === "POST" && pathname === "/v1/demo/auth/login") {
+    if (method === "POST" && pathname.startsWith("/v1/admin/chains/") && pathname.endsWith("/status")) {
+      if (!config.adminToken || getBearerToken(req) !== config.adminToken) {
+        return sendJson(res, 401, { error: "Unauthorized admin token" });
+      }
+      const parts = pathname.split("/");
+      const network = decodeURIComponent(parts[4] || "");
+      const body = await parseJsonBody(req);
+      const status = String(body.status || "").trim().toLowerCase();
+      if (!network) {
+        return sendJson(res, 400, { error: "network is required" });
+      }
+      try {
+        setChainCatalogStatus(network, status);
+        chainCatalogService.refreshRuntimeMaps();
+      } catch (error) {
+        return sendJson(res, 400, {
+          error: error instanceof Error ? error.message : "Invalid status"
+        });
+      }
+      return sendJson(res, 200, {
+        success: true,
+        network,
+        status
+      });
+    }
+
+    if (method === "POST" && pathname === "/v1/auth/login") {
       const body = await parseJsonBody(req);
       const email = String(body.email || "").trim().toLowerCase();
       const password = String(body.password || "");
@@ -691,7 +1100,7 @@ const server = createServer(async (req, res) => {
         return sendJson(res, 400, { error: "email and password are required" });
       }
 
-      const user = authenticateUser(email, password);
+      const user = authenticatePlatformUser(email, password);
       if (!user) {
         return sendJson(res, 401, { error: "Invalid credentials" });
       }
@@ -702,21 +1111,383 @@ const server = createServer(async (req, res) => {
         accountId: user.accountId,
         role: user.role
       });
+      const apiKey = createApiKey({
+        merchantId: user.merchantId,
+        accountId: user.accountId,
+        name: `Console session ${new Date().toISOString()}`,
+        role: user.role,
+        createdByUserId: user.id
+      });
 
       return sendJson(res, 200, {
         token: session.token,
         expiresAt: session.expiresAt,
+        apiKey: apiKey.token,
         user: {
           id: user.id,
           email: user.email,
           role: user.role
         },
         merchantId: user.merchantId,
-        accountId: user.accountId
+        accountId: user.accountId,
+        checklist: buildOnboardingChecklist(user.merchantId, user.accountId)
       });
     }
 
-    if (method === "POST" && pathname === "/v1/demo/internal/events/settlements") {
+    if (method === "POST" && pathname === "/v1/onboarding/start") {
+      const body = await parseJsonBody(req);
+      const merchantName = String(body.merchantName || "").trim();
+      const adminEmail = String(body.adminEmail || "").trim().toLowerCase();
+      const adminPassword = String(body.adminPassword || "");
+      const complianceProfile =
+        body.complianceProfile && typeof body.complianceProfile === "object"
+          ? body.complianceProfile
+          : null;
+
+      if (!merchantName || !adminEmail || !adminPassword) {
+        return sendJson(res, 400, {
+          error: "merchantName, adminEmail, and adminPassword are required"
+        });
+      }
+
+      if (!isOnboardingAllowlisted(adminEmail)) {
+        return sendJson(res, 403, {
+          error: "domain_not_allowlisted",
+          message:
+            "This workspace is in guided allowlist mode. Contact RailBridge to approve your domain."
+        });
+      }
+
+      const catalogChains = listChainCatalog().filter((chain) => chain.status !== "paused");
+      const fallbackChains = catalogChains.length
+        ? catalogChains
+        : [{ network: config.demoSourceNetwork }];
+
+      const chainProfiles = fallbackChains
+        .map((chain) => ({
+          network: chain.network,
+          signerReference: `mpc:${merchantName.toLowerCase().replace(/[^a-z0-9]+/g, "_")}:${chain.network}`,
+          address: defaultCustodyWalletAddress || deterministicWalletAddress(merchantName, chain.network)
+        }));
+
+      const onboarding = onboardMerchantAccount({
+        merchantName,
+        adminEmail,
+        adminPassword,
+        complianceProfile,
+        chainProfiles
+      });
+
+      const session = createSession({
+        userId: onboarding.adminUserId,
+        merchantId: onboarding.merchantId,
+        accountId: onboarding.accountId,
+        role: "admin"
+      });
+
+      const apiKey = createApiKey({
+        merchantId: onboarding.merchantId,
+        accountId: onboarding.accountId,
+        name: "Default API Key",
+        role: "admin",
+        createdByUserId: onboarding.adminUserId
+      });
+
+      return sendJson(res, 201, {
+        token: session.token,
+        merchantId: onboarding.merchantId,
+        accountId: onboarding.accountId,
+        apiKey: apiKey.token,
+        checklist: buildOnboardingChecklist(onboarding.merchantId, onboarding.accountId)
+      });
+    }
+
+    if (method === "GET" && pathname === "/v1/onboarding/checklist") {
+      const session = requireSession(req, res);
+      if (!session) {
+        return;
+      }
+      return sendJson(res, 200, buildOnboardingChecklist(session.merchantId, session.accountId));
+    }
+
+    if (method === "GET" && pathname === "/v1/onboarding/settings") {
+      const session = requireSession(req, res);
+      if (!session) {
+        return;
+      }
+      return sendJson(res, 200, buildTenantSettingsPayload(session.merchantId, session.accountId));
+    }
+
+    if (method === "POST" && pathname === "/v1/onboarding/webhooks") {
+      const session = requireSession(req, res);
+      if (!session) {
+        return;
+      }
+      const body = await parseJsonBody(req);
+      const url = String(body.url || "").trim();
+      if (!/^https?:\/\//.test(url)) {
+        return sendJson(res, 400, { error: "url must be an http(s) endpoint" });
+      }
+      const endpoint = createWebhookEndpoint({
+        merchantId: session.merchantId,
+        accountId: session.accountId,
+        url
+      });
+      return sendJson(res, 201, endpoint);
+    }
+
+    const onboardingWebhookItemMatch = pathname.match(ONBOARDING_WEBHOOK_ITEM_ROUTE);
+    if (onboardingWebhookItemMatch) {
+      const session = requireSession(req, res);
+      if (!session) {
+        return;
+      }
+      if (session.role !== "admin" && session.role !== "finance") {
+        return sendJson(res, 403, { error: "Forbidden: only admin/finance can manage webhooks" });
+      }
+      const webhookId = decodeURIComponent(onboardingWebhookItemMatch[1] || "");
+      if (!webhookId) {
+        return sendJson(res, 400, { error: "webhookId is required" });
+      }
+      const existing = getWebhookEndpointById(session.merchantId, session.accountId, webhookId);
+      if (!existing) {
+        return sendJson(res, 404, { error: "Webhook endpoint not found" });
+      }
+
+      if (method === "PATCH") {
+        const body = await parseJsonBody(req);
+        const patch = {};
+        if (body.url !== undefined) {
+          const url = String(body.url || "").trim();
+          if (!/^https?:\/\//.test(url)) {
+            return sendJson(res, 400, { error: "url must be an http(s) endpoint" });
+          }
+          patch.url = url;
+        }
+        if (body.status !== undefined) {
+          const status = String(body.status || "").trim().toLowerCase();
+          if (!["active", "disabled"].includes(status)) {
+            return sendJson(res, 400, { error: "status must be active or disabled" });
+          }
+          patch.status = status;
+        }
+        if (!Object.keys(patch).length) {
+          return sendJson(res, 400, { error: "Provide at least one editable field: url or status" });
+        }
+        const updated = updateWebhookEndpoint(session.merchantId, session.accountId, webhookId, patch);
+        return sendJson(res, 200, updated);
+      }
+
+      if (method === "DELETE") {
+        const deleted = deleteWebhookEndpoint(session.merchantId, session.accountId, webhookId);
+        return sendJson(res, 200, {
+          success: true,
+          deleted
+        });
+      }
+
+      return sendJson(res, 405, { error: "Method not allowed" });
+    }
+
+    if (method === "POST" && pathname === "/v1/onboarding/api-keys") {
+      const session = requireSession(req, res);
+      if (!session) {
+        return;
+      }
+      if (session.role !== "admin" && session.role !== "finance") {
+        return sendJson(res, 403, { error: "Forbidden: only admin/finance can create API keys" });
+      }
+
+      const body = await parseJsonBody(req);
+      const providedName = String(body.name || "").trim();
+      const keyName = providedName || `API Key ${new Date().toISOString()}`;
+      const requestedRole = String(body.role || "").trim().toLowerCase();
+      const keyRole = ["admin", "finance", "readonly"].includes(requestedRole)
+        ? requestedRole
+        : session.role === "admin"
+          ? "admin"
+          : "finance";
+
+      const apiKey = createApiKey({
+        merchantId: session.merchantId,
+        accountId: session.accountId,
+        name: keyName,
+        role: keyRole,
+        createdByUserId: session.userId
+      });
+
+      return sendJson(res, 201, {
+        id: apiKey.id,
+        name: apiKey.name,
+        role: apiKey.role,
+        keyPrefix: apiKey.keyPrefix,
+        token: apiKey.token,
+        createdAt: apiKey.createdAt
+      });
+    }
+
+    const onboardingApiKeyItemMatch = pathname.match(/^\/v1\/onboarding\/api-keys\/([^/]+)(?:\/(revoke))?$/);
+    if (onboardingApiKeyItemMatch) {
+      const session = requireSession(req, res);
+      if (!session) {
+        return;
+      }
+      if (session.role !== "admin" && session.role !== "finance") {
+        return sendJson(res, 403, { error: "Forbidden: only admin/finance can manage API keys" });
+      }
+
+      const keyId = decodeURIComponent(onboardingApiKeyItemMatch[1] || "");
+      const operation = onboardingApiKeyItemMatch[2] || "";
+      if (!keyId) {
+        return sendJson(res, 400, { error: "apiKeyId is required" });
+      }
+      const existing = getApiKeyById(session.merchantId, session.accountId, keyId);
+      if (!existing) {
+        return sendJson(res, 404, { error: "API key not found" });
+      }
+      if (existing.role === "admin" && session.role !== "admin") {
+        return sendJson(res, 403, { error: "Forbidden: only admin can manage admin API keys" });
+      }
+
+      if (method === "PATCH" && !operation) {
+        const body = await parseJsonBody(req);
+        const patch = {};
+        if (body.name !== undefined) {
+          const name = String(body.name || "").trim();
+          if (!name) {
+            return sendJson(res, 400, { error: "name cannot be empty" });
+          }
+          patch.name = name;
+        }
+        if (body.role !== undefined) {
+          const role = String(body.role || "").trim().toLowerCase();
+          if (!["admin", "finance", "readonly"].includes(role)) {
+            return sendJson(res, 400, { error: "role must be admin, finance, or readonly" });
+          }
+          if (role === "admin" && session.role !== "admin") {
+            return sendJson(res, 403, { error: "Forbidden: only admin can assign admin role" });
+          }
+          patch.role = role;
+        }
+        if (!Object.keys(patch).length) {
+          return sendJson(res, 400, { error: "Provide at least one editable field: name or role" });
+        }
+        const updated = updateApiKeyMetadata(session.merchantId, session.accountId, keyId, patch);
+        return sendJson(res, 200, updated);
+      }
+
+      if (method === "POST" && operation === "revoke") {
+        if (existing.status !== "active") {
+          return sendJson(res, 200, existing);
+        }
+        const activeCount = countActiveApiKeys(session.merchantId, session.accountId);
+        if (activeCount <= 1) {
+          return sendJson(res, 400, { error: "cannot revoke the last active API key" });
+        }
+        if (existing.role === "admin") {
+          const activeAdminCount = countActiveApiKeysByRole(session.merchantId, session.accountId, "admin");
+          if (activeAdminCount <= 1) {
+            return sendJson(res, 400, { error: "cannot revoke the last active admin API key" });
+          }
+        }
+        const revoked = revokeApiKeyById(session.merchantId, session.accountId, keyId);
+        return sendJson(res, 200, revoked);
+      }
+
+      return sendJson(res, 405, { error: "Method not allowed" });
+    }
+
+    if (method === "POST" && pathname === "/v1/onboarding/webhooks/test") {
+      const session = requireSession(req, res);
+      if (!session) {
+        return;
+      }
+      const result = await sendWebhookTestEvent({
+        merchantId: session.merchantId,
+        accountId: session.accountId
+      });
+      return sendJson(res, 200, result);
+    }
+
+    if (method === "POST" && pathname === "/v1/onboarding/products") {
+      const session = requireSession(req, res);
+      if (!session) {
+        return;
+      }
+
+      const body = await parseJsonBody(req);
+      const apiId = String(body.apiId || "").trim();
+      const apiName = String(body.apiName || "").trim();
+      const routeMethod = normalizeHttpMethod(body.method || "GET");
+      const routePath = normalizeRoutePath(body.path);
+      const sourceNetwork = normalizeSourceNetworkPreference(body.sourceNetwork);
+      if (!apiId || !apiName || !routePath) {
+        return sendJson(res, 400, {
+          error: "apiId, apiName, method, and path are required"
+        });
+      }
+      const existingRoute = getApiProductByMethodPath(session.merchantId, session.accountId, routeMethod, routePath);
+      if (existingRoute) {
+        return sendJson(res, 409, {
+          error: "A product already exists for this method and path"
+        });
+      }
+      const existingApiId = getApiProductByApiId(session.merchantId, session.accountId, apiId);
+      if (existingApiId) {
+        return sendJson(res, 409, {
+          error: "API ID already exists. Use a unique API ID for each product."
+        });
+      }
+      let amount;
+      try {
+        amount = parsePositiveUsdcToBaseUnits(body.amountUsdc || "0.01", "amountUsdc");
+      } catch (error) {
+        return sendJson(res, 400, {
+          error: error instanceof Error ? error.message : "Invalid amountUsdc"
+        });
+      }
+      let destinationNetwork = body.destinationNetwork ? String(body.destinationNetwork).trim() : null;
+      const settlementModeInput = String(body.settlementMode || "").trim().toLowerCase();
+      const settlementMode =
+        settlementModeInput === "same_chain"
+          ? "same_chain"
+          : "cross_chain";
+      if (settlementMode === "same_chain") {
+        destinationNetwork = null;
+      }
+      if (!isSourceNetworkAny(sourceNetwork)) {
+        const sourceWallet = getWalletByNetwork(session.merchantId, session.accountId, sourceNetwork);
+        if (!sourceWallet) {
+          return sendJson(res, 400, { error: "source network wallet not found for merchant account" });
+        }
+      }
+      if (destinationNetwork) {
+        const destinationWallet = getWalletByNetwork(session.merchantId, session.accountId, destinationNetwork);
+        if (!destinationWallet) {
+          return sendJson(res, 400, { error: "destination wallet not found for merchant account" });
+        }
+      }
+
+      const created = createApiProduct({
+        merchantId: session.merchantId,
+        accountId: session.accountId,
+        apiId,
+        apiName,
+        description: body.description ? String(body.description) : null,
+        method: routeMethod,
+        path: routePath,
+        sourceNetwork,
+        sourceAsset: sourceNetwork === SOURCE_NETWORK_ANY ? "USDC" : null,
+        amount: amount.toString(),
+        settlementMode,
+        destinationNetwork,
+        destinationAsset: null,
+        enabled: true
+      });
+      return sendJson(res, 201, created);
+    }
+
+    if (method === "POST" && pathname === "/v1/internal/events/settlements") {
       if (!validateIngestToken(req)) {
         return sendJson(res, 401, { error: "Unauthorized ingest token" });
       }
@@ -729,6 +1500,7 @@ const server = createServer(async (req, res) => {
       const status = String(body.status || "").trim();
       const txHash = String(body.txHash || "").trim();
       const amount = String(body.amount || "").trim();
+      const failReason = body.failReason ? sanitizeFailReason(String(body.failReason).trim()) : null;
       const eventId = String(body.eventId || newId()).trim();
       const settlementId = String(body.settlementId || txHash || eventId).trim();
       const createdAt = String(body.createdAt || nowIso());
@@ -792,6 +1564,7 @@ const server = createServer(async (req, res) => {
           apiName,
           amount,
           status,
+          failReason,
           txHash,
           sourceTxHash,
           bridgeTxHash,
@@ -802,6 +1575,37 @@ const server = createServer(async (req, res) => {
           createdAt
         });
         recomputeBalances(merchantId, accountId);
+
+        const eventTypeByStatus = {
+          settled_source: "payment.settled_source",
+          bridge_pending: "payment.bridge_pending",
+          bridge_confirmed: "payment.bridge_confirmed",
+          failed: "payment.failed"
+        };
+        const webhookEventType = eventTypeByStatus[status] || "payment.updated";
+        await publishTenantWebhookEvent({
+          merchantId,
+          accountId,
+          eventType: webhookEventType,
+          eventId: `evt_${eventId}_${status}`,
+          data: {
+            eventId,
+            settlementId,
+            merchantId,
+            accountId,
+            sourceNetwork,
+            destinationNetwork,
+            asset: "USDC",
+            amount,
+            status,
+            failReason,
+            txHash,
+            sourceTxHash,
+            bridgeTxHash,
+            destinationTxHash,
+            confirmations
+          }
+        });
       }
 
       return sendJson(res, 200, {
@@ -812,7 +1616,35 @@ const server = createServer(async (req, res) => {
       });
     }
 
-    if (method === "POST" && pathname === "/v1/demo/internal/requirements/resolve") {
+    if (method === "POST" && pathname === "/v1/sdk/requirements/resolve") {
+      const key = requireApiKey(req, res);
+      if (!key) {
+        return;
+      }
+
+      const body = await parseJsonBody(req);
+      const apiProductId = body.apiProductId ? String(body.apiProductId).trim() : "";
+      const apiId = body.apiId ? String(body.apiId).trim() : "";
+      const routeMethod = normalizeHttpMethod(body.method || "GET");
+      const routePath = normalizeRoutePath(body.path || "/api/premium");
+      const settlementModeOverride =
+        body.settlementModeOverride === undefined || body.settlementModeOverride === null
+          ? null
+          : String(body.settlementModeOverride).trim();
+
+      const resolved = resolvePaymentRequirementsForTenant({
+        merchantId: key.merchantId,
+        accountId: key.accountId,
+        apiProductId,
+        apiId,
+        routeMethod,
+        routePath,
+        settlementModeOverride
+      });
+      return sendJson(res, resolved.status, resolved.payload);
+    }
+
+    if (method === "POST" && pathname === "/v1/internal/requirements/resolve") {
       if (!validateInternalToken(req)) {
         return sendJson(res, 401, { error: "Unauthorized internal token" });
       }
@@ -821,6 +1653,7 @@ const server = createServer(async (req, res) => {
       const merchantId = String(body.merchantId || "").trim();
       const accountId = String(body.accountId || "").trim();
       const apiProductId = body.apiProductId ? String(body.apiProductId).trim() : "";
+      const apiId = body.apiId ? String(body.apiId).trim() : "";
       const routeMethod = normalizeHttpMethod(body.method || "GET");
       const routePath = normalizeRoutePath(body.path || "/api/premium");
       const settlementModeOverride =
@@ -828,373 +1661,266 @@ const server = createServer(async (req, res) => {
           ? null
           : String(body.settlementModeOverride).trim();
 
-      if (!merchantId || !accountId) {
-        return sendJson(res, 400, { error: "merchantId and accountId are required" });
-      }
-      if (!ensureAccountExists(res, merchantId, accountId)) {
-        return;
-      }
-
-      const apiProduct = apiProductId
-        ? getApiProductById(merchantId, accountId, apiProductId)
-        : getApiProductByMethodPath(merchantId, accountId, routeMethod, routePath);
-
-      if (!apiProduct || !apiProduct.enabled) {
-        return sendJson(res, 404, { error: "API product not found or disabled" });
-      }
-      if (
-        settlementModeOverride &&
-        settlementModeOverride !== "same_chain" &&
-        settlementModeOverride !== "cross_chain"
-      ) {
-        return sendJson(res, 400, {
-          error: "settlementModeOverride must be same_chain or cross_chain"
-        });
-      }
-      const effectiveSettlementMode = settlementModeOverride || apiProduct.settlementMode;
-
-      const sourceWallet = getWalletByNetwork(merchantId, accountId, apiProduct.sourceNetwork);
-      if (!sourceWallet) {
-        return sendJson(res, 400, { error: "source network wallet not found for merchant account" });
-      }
-
-      const sourceAsset = String(apiProduct.sourceAsset || "").trim();
-      if (!sourceAsset || !isUsdcAsset(sourceAsset)) {
-        return sendJson(res, 400, { error: "source asset is invalid or not in USDC allowlist" });
-      }
-      const sourceDomain = resolveUsdcDomainProfile(apiProduct.sourceNetwork);
-
-      let payTo = sourceWallet.address;
-      let crossChain = null;
-      if (effectiveSettlementMode === "cross_chain") {
-        const destinationNetwork = apiProduct.destinationNetwork || getPolicy(merchantId, accountId)?.preferredNetwork;
-        if (!destinationNetwork) {
-          return sendJson(res, 400, { error: "destination network is required for cross-chain product" });
-        }
-        const destinationWallet = getWalletByNetwork(merchantId, accountId, destinationNetwork);
-        if (!destinationWallet) {
-          return sendJson(res, 400, { error: "destination wallet not found for cross-chain product" });
-        }
-        const destinationAsset = String(apiProduct.destinationAsset || sourceAsset).trim();
-        if (!destinationAsset || !isUsdcAsset(destinationAsset)) {
-          return sendJson(res, 400, { error: "destination asset is invalid or not in USDC allowlist" });
-        }
-        if (!config.facilitatorAddress || !/^0x[a-fA-F0-9]{40}$/.test(config.facilitatorAddress)) {
-          return sendJson(res, 500, {
-            error: "MERCHANT_OS_FACILITATOR_ADDRESS is required for cross-chain requirement resolution"
-          });
-        }
-        payTo = config.facilitatorAddress;
-        crossChain = {
-          destinationNetwork,
-          destinationAsset,
-          destinationPayTo: destinationWallet.address
-        };
-      }
-
-      const description = apiProduct.description || `${apiProduct.apiName} (${apiProduct.method} ${apiProduct.path})`;
-      return sendJson(res, 200, {
+      const resolved = resolvePaymentRequirementsForTenant({
         merchantId,
         accountId,
-        settlementMode: effectiveSettlementMode,
-        apiProduct,
-        requirement: {
-          scheme: "exact",
-          network: apiProduct.sourceNetwork,
-          price: {
-            asset: sourceAsset,
-            amount: apiProduct.amount,
-            extra: {
-              name: sourceDomain.name,
-              version: sourceDomain.version,
-              apiId: apiProduct.apiId,
-              apiName: apiProduct.apiName,
-              method: apiProduct.method,
-              route: apiProduct.path,
-              merchantId,
-              accountId
-            }
-          },
-          payTo,
-          extra: {
-            apiId: apiProduct.apiId,
-            apiName: apiProduct.apiName,
-            method: apiProduct.method,
-            route: apiProduct.path,
-            merchantId,
-            accountId,
-            description
-          }
-        },
-        crossChain
+        apiProductId,
+        apiId,
+        routeMethod,
+        routePath,
+        settlementModeOverride
       });
+      return sendJson(res, resolved.status, resolved.payload);
     }
 
-    const apiProductsMatch = pathname.match(API_PRODUCTS_ROUTE);
-    if (apiProductsMatch) {
-      const merchantId = decodeURIComponent(apiProductsMatch[1]);
-      const accountId = decodeURIComponent(apiProductsMatch[2]);
-      const apiProductId = apiProductsMatch[3] ? decodeURIComponent(apiProductsMatch[3]) : null;
-
-      const session = requireSession(req, res);
-      if (!session) {
+    const merchantItemProductMatch = pathname.match(MERCHANT_PRODUCTS_ITEM_ROUTE);
+    if (merchantItemProductMatch && (method === "PUT" || method === "DELETE")) {
+      const merchantId = decodeURIComponent(merchantItemProductMatch[1]);
+      const apiProductId = decodeURIComponent(merchantItemProductMatch[2]);
+      const key = requireApiKey(req, res);
+      if (!key) {
         return;
       }
-      if (!requireTenant(res, session, merchantId, accountId)) {
-        return;
-      }
-      if (!ensureAccountExists(res, merchantId, accountId)) {
-        return;
+      if (key.merchantId !== merchantId) {
+        return sendJson(res, 403, { error: "Forbidden: merchant mismatch" });
       }
 
-      if (method === "GET" && !apiProductId) {
+      const existing = getApiProductById(key.merchantId, key.accountId, apiProductId);
+      if (!existing) {
+        return sendJson(res, 404, { error: "API product not found" });
+      }
+      if (method === "DELETE") {
+        const deleted = deleteApiProduct(key.merchantId, key.accountId, apiProductId);
         return sendJson(res, 200, {
-          merchantId,
-          accountId,
-          items: listApiProducts(merchantId, accountId)
+          success: true,
+          deleted
+        });
+      }
+      const body = await parseJsonBody(req);
+
+      const patch = {};
+      if (body.apiId !== undefined) {
+        const apiId = String(body.apiId || "").trim();
+        if (!apiId) {
+          return sendJson(res, 400, { error: "apiId cannot be empty" });
+        }
+        patch.apiId = apiId;
+      }
+      if (body.apiName !== undefined) {
+        patch.apiName = String(body.apiName || "").trim();
+      }
+      if (body.description !== undefined) {
+        patch.description = body.description === null ? null : String(body.description);
+      }
+      if (body.enabled !== undefined) {
+        patch.enabled = Boolean(body.enabled);
+      }
+      if (body.amountUsdc !== undefined) {
+        try {
+          patch.amount = parsePositiveUsdcToBaseUnits(body.amountUsdc, "amountUsdc").toString();
+        } catch (error) {
+          return sendJson(res, 400, {
+            error: error instanceof Error ? error.message : "Invalid amountUsdc"
+          });
+        }
+      }
+      if (body.method !== undefined) {
+        const method = normalizeHttpMethod(body.method || "");
+        if (!method) {
+          return sendJson(res, 400, { error: "method cannot be empty" });
+        }
+        patch.method = method;
+      }
+      if (body.path !== undefined) {
+        const path = normalizeRoutePath(body.path || "");
+        if (!path) {
+          return sendJson(res, 400, { error: "path cannot be empty" });
+        }
+        patch.path = path;
+      }
+      if (body.sourceNetwork !== undefined) {
+        patch.sourceNetwork = normalizeSourceNetworkPreference(body.sourceNetwork);
+      }
+      if (body.settlementMode !== undefined) {
+        const settlementMode = String(body.settlementMode || "").trim().toLowerCase();
+        if (!["same_chain", "cross_chain"].includes(settlementMode)) {
+          return sendJson(res, 400, { error: "settlementMode must be same_chain or cross_chain" });
+        }
+        patch.settlementMode = settlementMode;
+      }
+      if (body.destinationNetwork !== undefined) {
+        patch.destinationNetwork = body.destinationNetwork ? String(body.destinationNetwork).trim() : null;
+      }
+      const nextMethod = patch.method || existing.method;
+      const nextPath = patch.path || existing.path;
+      if (nextMethod !== existing.method || nextPath !== existing.path) {
+        const duplicate = getApiProductByMethodPath(key.merchantId, key.accountId, nextMethod, nextPath);
+        if (duplicate && duplicate.id !== existing.id) {
+          return sendJson(res, 409, {
+            error: "A product already exists for this method and path"
+          });
+        }
+      }
+      if (patch.apiId !== undefined) {
+        const duplicateApiId = getApiProductByApiId(key.merchantId, key.accountId, patch.apiId);
+        if (duplicateApiId && duplicateApiId.id !== existing.id) {
+          return sendJson(res, 409, {
+            error: "API ID already exists. Use a unique API ID for each product."
+          });
+        }
+      }
+      const nextSourceNetwork = patch.sourceNetwork !== undefined ? patch.sourceNetwork : existing.sourceNetwork;
+      const nextSettlementMode = patch.settlementMode || existing.settlementMode;
+      let nextDestinationNetwork =
+        patch.destinationNetwork !== undefined ? patch.destinationNetwork : existing.destinationNetwork;
+      if (nextSettlementMode === "same_chain") {
+        nextDestinationNetwork = null;
+        patch.destinationNetwork = null;
+      }
+      if (!isSourceNetworkAny(nextSourceNetwork)) {
+        const sourceWallet = getWalletByNetwork(key.merchantId, key.accountId, nextSourceNetwork);
+        if (!sourceWallet) {
+          return sendJson(res, 400, { error: "source network wallet not found for merchant account" });
+        }
+      }
+      if (nextDestinationNetwork) {
+        const destinationWallet = getWalletByNetwork(key.merchantId, key.accountId, nextDestinationNetwork);
+        if (!destinationWallet) {
+          return sendJson(res, 400, { error: "destination wallet not found for merchant account" });
+        }
+      }
+      const updated = updateApiProduct(key.merchantId, key.accountId, apiProductId, patch);
+      return sendJson(res, 200, updated);
+    }
+
+    const merchantMatch = pathname.match(MERCHANT_ROUTE);
+    if (merchantMatch) {
+      const merchantId = decodeURIComponent(merchantMatch[1]);
+      const action = merchantMatch[2];
+      const key = requireApiKey(req, res);
+      if (!key) {
+        return;
+      }
+      if (key.merchantId !== merchantId) {
+        return sendJson(res, 403, { error: "Forbidden: merchant mismatch" });
+      }
+
+      if (method === "GET" && action === "balances") {
+        const overview = await buildOverviewResponse(key.merchantId, key.accountId);
+        return sendJson(res, 200, {
+          merchantId: key.merchantId,
+          accountId: key.accountId,
+          asOf: overview.asOf,
+          availableUsd: overview.unifiedUsd,
+          pendingBridgeUsd: "0.00",
+          balances: overview.balances
         });
       }
 
-      if (method === "POST" && !apiProductId) {
+      if (method === "GET" && action === "settlements") {
+        return sendJson(res, 200, {
+          merchantId: key.merchantId,
+          accountId: key.accountId,
+          asOf: nowIso(),
+          items: getTimeline(key.merchantId, key.accountId, 200)
+        });
+      }
+
+      if (action === "products" && method === "GET") {
+        return sendJson(res, 200, {
+          merchantId: key.merchantId,
+          accountId: key.accountId,
+          items: listApiProducts(key.merchantId, key.accountId)
+        });
+      }
+
+      if (action === "products" && method === "POST") {
         const body = await parseJsonBody(req);
         const apiId = String(body.apiId || "").trim();
         const apiName = String(body.apiName || "").trim();
-        const description = body.description === undefined ? null : String(body.description || "").trim();
         const routeMethod = normalizeHttpMethod(body.method || "GET");
         const routePath = normalizeRoutePath(body.path);
-        const sourceNetwork = String(body.sourceNetwork || "").trim();
-        const sourceAsset = normalizeOptionalAddress(body.sourceAsset);
-        const settlementMode = String(body.settlementMode || "cross_chain").trim();
-        const destinationNetwork = body.destinationNetwork ? String(body.destinationNetwork).trim() : null;
-        const destinationAsset = normalizeOptionalAddress(body.destinationAsset);
-        const enabled = body.enabled === undefined ? true : Boolean(body.enabled);
-
-        if (!apiId || !apiName || !routeMethod || !routePath || !sourceNetwork) {
+        const sourceNetwork = normalizeSourceNetworkPreference(body.sourceNetwork);
+        if (!apiId || !apiName || !routePath) {
           return sendJson(res, 400, {
-            error: "apiId, apiName, method, path, and sourceNetwork are required"
+            error: "apiId, apiName, method, and path are required"
           });
         }
-        if (settlementMode !== "same_chain" && settlementMode !== "cross_chain") {
-          return sendJson(res, 400, { error: "settlementMode must be same_chain or cross_chain" });
+        const existingRoute = getApiProductByMethodPath(key.merchantId, key.accountId, routeMethod, routePath);
+        if (existingRoute) {
+          return sendJson(res, 409, {
+            error: "A product already exists for this method and path"
+          });
         }
-        if (!getWalletByNetwork(merchantId, accountId, sourceNetwork)) {
-          return sendJson(res, 400, { error: "source network wallet not found for this merchant account" });
-        }
-        if (settlementMode === "cross_chain") {
-          if (!destinationNetwork) {
-            return sendJson(res, 400, { error: "destinationNetwork is required for cross_chain products" });
-          }
-          if (!getWalletByNetwork(merchantId, accountId, destinationNetwork)) {
-            return sendJson(res, 400, { error: "destination network wallet not found for this merchant account" });
-          }
-        }
-        if (sourceAsset && !isUsdcAsset(sourceAsset)) {
-          return sendJson(res, 400, { error: "USDC-only: sourceAsset not in allowlist" });
-        }
-        if (destinationAsset && !isUsdcAsset(destinationAsset)) {
-          return sendJson(res, 400, { error: "USDC-only: destinationAsset not in allowlist" });
+        const existingApiId = getApiProductByApiId(key.merchantId, key.accountId, apiId);
+        if (existingApiId) {
+          return sendJson(res, 409, {
+            error: "API ID already exists. Use a unique API ID for each product."
+          });
         }
 
         let amount;
         try {
-          if (body.amountUsdc !== undefined && body.amountUsdc !== null && String(body.amountUsdc).trim() !== "") {
-            amount = parsePositiveUsdcToBaseUnits(body.amountUsdc, "amountUsdc");
-          } else {
-            amount = parsePositiveBigInt(body.amount, "amount");
-          }
+          amount =
+            body.amountUsdc !== undefined
+              ? parsePositiveUsdcToBaseUnits(body.amountUsdc, "amountUsdc")
+              : parsePositiveBigInt(body.amount || "0", "amount");
         } catch (error) {
-          return sendJson(res, 400, { error: error instanceof Error ? error.message : "Invalid amount" });
+          return sendJson(res, 400, {
+            error: error instanceof Error ? error.message : "Invalid amount"
+          });
         }
 
+        const settlementModeInput = String(body.settlementMode || "").trim().toLowerCase();
+        const settlementMode =
+          settlementModeInput === "same_chain"
+            ? "same_chain"
+            : "cross_chain";
+        let destinationNetwork = body.destinationNetwork ? String(body.destinationNetwork).trim() : null;
+        if (settlementMode === "same_chain") {
+          destinationNetwork = null;
+        }
+        if (!isSourceNetworkAny(sourceNetwork)) {
+          const sourceWallet = getWalletByNetwork(key.merchantId, key.accountId, sourceNetwork);
+          if (!sourceWallet) {
+            return sendJson(res, 400, { error: "source network wallet not found for merchant account" });
+          }
+        }
+        if (destinationNetwork) {
+          const destinationWallet = getWalletByNetwork(key.merchantId, key.accountId, destinationNetwork);
+          if (!destinationWallet) {
+            return sendJson(res, 400, { error: "destination wallet not found for merchant account" });
+          }
+        }
         const created = createApiProduct({
-          merchantId,
-          accountId,
+          merchantId: key.merchantId,
+          accountId: key.accountId,
           apiId,
           apiName,
-          description,
+          description: body.description ? String(body.description) : null,
           method: routeMethod,
           path: routePath,
           sourceNetwork,
-          sourceAsset: sourceAsset || undefined,
+          sourceAsset: sourceNetwork === SOURCE_NETWORK_ANY ? "USDC" : null,
           amount: amount.toString(),
           settlementMode,
           destinationNetwork,
-          destinationAsset,
-          enabled
+          destinationAsset: null,
+          enabled: body.enabled === undefined ? true : Boolean(body.enabled)
         });
-        return sendJson(res, 200, created);
+        return sendJson(res, 201, created);
       }
 
-      if (method === "PUT" && apiProductId) {
-        const body = await parseJsonBody(req);
-        const existing = getApiProductById(merchantId, accountId, apiProductId);
-        if (!existing) {
-          return sendJson(res, 404, { error: "API product not found" });
-        }
-        const patch = {};
-
-        if (body.apiId !== undefined) {
-          patch.apiId = String(body.apiId || "").trim();
-          if (!patch.apiId) {
-            return sendJson(res, 400, { error: "apiId cannot be empty" });
-          }
-        }
-        if (body.apiName !== undefined) {
-          patch.apiName = String(body.apiName || "").trim();
-          if (!patch.apiName) {
-            return sendJson(res, 400, { error: "apiName cannot be empty" });
-          }
-        }
-        if (body.description !== undefined) {
-          patch.description = body.description === null ? null : String(body.description || "").trim();
-        }
-        if (body.method !== undefined) {
-          patch.method = normalizeHttpMethod(body.method);
-          if (!patch.method) {
-            return sendJson(res, 400, { error: "method cannot be empty" });
-          }
-        }
-        if (body.path !== undefined) {
-          patch.path = normalizeRoutePath(body.path);
-          if (!patch.path) {
-            return sendJson(res, 400, { error: "path cannot be empty" });
-          }
-        }
-        if (body.sourceNetwork !== undefined) {
-          patch.sourceNetwork = String(body.sourceNetwork || "").trim();
-          if (!patch.sourceNetwork) {
-            return sendJson(res, 400, { error: "sourceNetwork cannot be empty" });
-          }
-          if (!getWalletByNetwork(merchantId, accountId, patch.sourceNetwork)) {
-            return sendJson(res, 400, { error: "source network wallet not found for this merchant account" });
-          }
-        }
-        if (body.sourceAsset !== undefined) {
-          patch.sourceAsset = normalizeOptionalAddress(body.sourceAsset);
-          if (patch.sourceAsset && !isUsdcAsset(patch.sourceAsset)) {
-            return sendJson(res, 400, { error: "USDC-only: sourceAsset not in allowlist" });
-          }
-        }
-        if (body.amount !== undefined) {
-          let amount;
-          try {
-            amount = parsePositiveBigInt(body.amount, "amount");
-          } catch (error) {
-            return sendJson(res, 400, { error: error instanceof Error ? error.message : "Invalid amount" });
-          }
-          patch.amount = amount.toString();
-        }
-        if (body.settlementMode !== undefined) {
-          patch.settlementMode = String(body.settlementMode || "").trim();
-          if (patch.settlementMode !== "same_chain" && patch.settlementMode !== "cross_chain") {
-            return sendJson(res, 400, { error: "settlementMode must be same_chain or cross_chain" });
-          }
-        }
-        if (body.destinationNetwork !== undefined) {
-          patch.destinationNetwork = body.destinationNetwork ? String(body.destinationNetwork).trim() : null;
-          if (patch.destinationNetwork && !getWalletByNetwork(merchantId, accountId, patch.destinationNetwork)) {
-            return sendJson(res, 400, { error: "destination network wallet not found for this merchant account" });
-          }
-        }
-        if (body.destinationAsset !== undefined) {
-          patch.destinationAsset = normalizeOptionalAddress(body.destinationAsset);
-          if (patch.destinationAsset && !isUsdcAsset(patch.destinationAsset)) {
-            return sendJson(res, 400, { error: "USDC-only: destinationAsset not in allowlist" });
-          }
-        }
-        if (body.enabled !== undefined) {
-          patch.enabled = Boolean(body.enabled);
-        }
-
-        const resultingSettlementMode = patch.settlementMode || existing.settlementMode;
-        const resultingDestinationNetwork =
-          patch.destinationNetwork !== undefined ? patch.destinationNetwork : existing.destinationNetwork;
-        if (resultingSettlementMode === "cross_chain") {
-          if (!resultingDestinationNetwork) {
-            return sendJson(res, 400, {
-              error: "destinationNetwork is required when settlementMode is cross_chain"
-            });
-          }
-          if (!getWalletByNetwork(merchantId, accountId, resultingDestinationNetwork)) {
-            return sendJson(res, 400, { error: "destination network wallet not found for this merchant account" });
-          }
-        }
-
-        const updated = updateApiProduct(merchantId, accountId, apiProductId, patch);
-        return sendJson(res, 200, updated);
-      }
-
-      return sendJson(res, 405, { error: "Method not allowed" });
-    }
-
-    const accountMatch = pathname.match(ACCOUNT_ROUTE);
-    if (accountMatch) {
-      const merchantId = decodeURIComponent(accountMatch[1]);
-      const accountId = decodeURIComponent(accountMatch[2]);
-      const action = accountMatch[3];
-
-      const session = requireSession(req, res);
-      if (!session) {
-        return;
-      }
-      if (!requireTenant(res, session, merchantId, accountId)) {
-        return;
-      }
-      if (!ensureAccountExists(res, merchantId, accountId)) {
-        return;
-      }
-
-      if (method === "GET" && action === "overview") {
-        const overview = await buildOverviewResponse(merchantId, accountId);
-        return sendJson(res, 200, overview);
-      }
-
-      if (method === "GET" && action === "settlements") {
-        const limit = Number.parseInt(requestUrl.searchParams.get("limit") || "50", 10);
+      if (action === "consolidations" && method === "GET") {
         return sendJson(res, 200, {
-          merchantId,
-          accountId,
+          merchantId: key.merchantId,
+          accountId: key.accountId,
           asOf: nowIso(),
-          timeline: getTimeline(merchantId, accountId, Number.isNaN(limit) ? 50 : limit)
+          items: getTimeline(key.merchantId, key.accountId, 200).filter((item) => item.itemType === "consolidation")
         });
       }
 
-      if (method === "GET" && action === "api-revenue") {
-        const limit = Number.parseInt(requestUrl.searchParams.get("limit") || "20", 10);
-        const breakdown = getApiRevenueBreakdown(merchantId, accountId, Number.isNaN(limit) ? 20 : limit);
-        return sendJson(res, 200, {
-          merchantId,
-          accountId,
-          asOf: nowIso(),
-          totals: breakdown.totals,
-          apis: breakdown.items
-        });
-      }
-
-      if (method === "PUT" && action === "policy") {
-        const body = await parseJsonBody(req);
-        const preferredNetwork = String(body.preferredNetwork || "").trim();
-        const autoBridgeEnabled = Boolean(body.autoBridgeEnabled);
-        const preferredAsset = body.preferredAsset ? String(body.preferredAsset) : "USDC";
-
-        if (!preferredNetwork) {
-          return sendJson(res, 400, { error: "preferredNetwork is required" });
-        }
-        if (!normalizeUsdcAsset(preferredAsset)) {
-          return sendJson(res, 400, { error: "USDC-only: preferredAsset must be USDC" });
-        }
-        if (!getWalletByNetwork(merchantId, accountId, preferredNetwork)) {
-          return sendJson(res, 400, { error: "preferredNetwork wallet not found for this merchant account" });
-        }
-
-        const policy = upsertPolicy(merchantId, accountId, {
-          preferredNetwork,
-          autoBridgeEnabled
-        });
-        return sendJson(res, 200, policy);
-      }
-
-      if (method === "POST" && action === "consolidations") {
+      if (action === "consolidations" && method === "POST") {
         const body = await parseJsonBody(req);
         const sourceNetwork = String(body.sourceNetwork || "").trim();
         const destinationNetwork = String(body.destinationNetwork || "").trim();
@@ -1221,20 +1947,28 @@ const server = createServer(async (req, res) => {
           return sendJson(res, 400, { error: error instanceof Error ? error.message : "Invalid amount" });
         }
 
-        const sourceWallet = getWalletByNetwork(merchantId, accountId, sourceNetwork);
+        const sourceWallet = getWalletByNetwork(key.merchantId, key.accountId, sourceNetwork);
         if (!sourceWallet) {
           return sendJson(res, 400, { error: "source network wallet not found" });
         }
-        const destinationWallet = getWalletByNetwork(merchantId, accountId, destinationNetwork);
+        const destinationWallet = getWalletByNetwork(key.merchantId, key.accountId, destinationNetwork);
         if (!destinationWallet) {
           return sendJson(res, 400, { error: "destination network wallet not found" });
         }
 
-        const sourceBalance = getAvailableBalanceForNetwork(merchantId, accountId, sourceNetwork);
-        if (sourceBalance < amount) {
+        const sourceBalanceInfo = await getEffectiveNetworkUsdcBalance({
+          merchantId: key.merchantId,
+          accountId: key.accountId,
+          network: sourceNetwork,
+          wallet: sourceWallet
+        });
+        if (sourceBalanceInfo.amount < amount) {
           return sendJson(res, 400, {
             error: "insufficient source balance",
-            available: sourceBalance.toString()
+            available: sourceBalanceInfo.amount.toString(),
+            availableSource: sourceBalanceInfo.source,
+            availableProjected: sourceBalanceInfo.projectedAmount.toString(),
+            availableOnchain: sourceBalanceInfo.onchainAmount === null ? null : sourceBalanceInfo.onchainAmount.toString()
           });
         }
 
@@ -1375,8 +2109,8 @@ const server = createServer(async (req, res) => {
           }
 
           sourcePrivateKey = getCustodyPrivateKeyByReference(
-            merchantId,
-            accountId,
+            key.merchantId,
+            key.accountId,
             sourceWallet.keyReference
           );
           if (!sourcePrivateKey) {
@@ -1386,7 +2120,7 @@ const server = createServer(async (req, res) => {
           }
 
           destinationPrivateKey =
-            getCustodyPrivateKeyByReference(merchantId, accountId, destinationWallet.keyReference) ||
+            getCustodyPrivateKeyByReference(key.merchantId, key.accountId, destinationWallet.keyReference) ||
             sourcePrivateKey;
           if (!destinationPrivateKey) {
             return sendJson(res, 500, {
@@ -1396,8 +2130,8 @@ const server = createServer(async (req, res) => {
         }
 
         const consolidationId = createConsolidation({
-          merchantId,
-          accountId,
+          merchantId: key.merchantId,
+          accountId: key.accountId,
           sourceNetwork,
           destinationNetwork,
           amount: amount.toString()
@@ -1406,11 +2140,10 @@ const server = createServer(async (req, res) => {
         updateConsolidationStatus(consolidationId, "submitted");
 
         if (config.realConsolidationBridgeEnabled) {
-
           runConsolidationBridgeAsync({
             consolidationId,
-            merchantId,
-            accountId,
+            merchantId: key.merchantId,
+            accountId: key.accountId,
             sourceNetwork,
             destinationNetwork,
             destinationAddress: destinationWallet.address,
@@ -1421,23 +2154,30 @@ const server = createServer(async (req, res) => {
           });
         } else {
           updateConsolidationStatus(consolidationId, "confirmed");
-          recomputeBalances(merchantId, accountId);
+          recomputeBalances(key.merchantId, key.accountId);
         }
 
         return sendJson(res, 202, getConsolidation(consolidationId));
       }
 
-      if (method === "POST" && action === "payouts") {
+      if (action === "payouts" && method === "GET") {
+        return sendJson(res, 200, {
+          merchantId: key.merchantId,
+          accountId: key.accountId,
+          asOf: nowIso(),
+          items: getTimeline(key.merchantId, key.accountId, 200).filter((item) => item.itemType === "payout")
+        });
+      }
+
+      if (action === "payouts" && method === "POST") {
         const body = await parseJsonBody(req);
         const network = String(body.network || "").trim();
         const destinationAddress = String(body.destinationAddress || "").trim();
         const normalizedAsset = normalizeUsdcAsset(body.asset || "USDC");
-
-        if (!network || !destinationAddress) {
-          return sendJson(res, 400, { error: "network and destinationAddress are required" });
-        }
-        if (!/^0x[a-fA-F0-9]{40}$/.test(destinationAddress)) {
-          return sendJson(res, 400, { error: "destinationAddress must be a valid EVM address" });
+        if (!network || !/^0x[a-fA-F0-9]{40}$/.test(destinationAddress)) {
+          return sendJson(res, 400, {
+            error: "network and valid destinationAddress are required"
+          });
         }
         if (!normalizedAsset) {
           return sendJson(res, 400, { error: "USDC-only: unsupported asset" });
@@ -1445,35 +2185,32 @@ const server = createServer(async (req, res) => {
 
         let amount;
         try {
-          amount = parsePositiveBigInt(body.amount, "amount");
+          amount =
+            body.amountUsdc !== undefined
+              ? parsePositiveUsdcToBaseUnits(body.amountUsdc, "amountUsdc")
+              : parsePositiveBigInt(body.amount || "0", "amount");
         } catch (error) {
-          return sendJson(res, 400, { error: error instanceof Error ? error.message : "Invalid amount" });
-        }
-
-        if (!getWalletByNetwork(merchantId, accountId, network)) {
-          return sendJson(res, 400, { error: "network wallet not found" });
-        }
-
-        const sourceBalance = getAvailableBalanceForNetwork(merchantId, accountId, network);
-        if (sourceBalance < amount) {
           return sendJson(res, 400, {
-            error: "insufficient balance",
-            available: sourceBalance.toString()
+            error: error instanceof Error ? error.message : "Invalid amount"
           });
         }
 
-        const payoutId = createPayoutRequest({
-          merchantId,
-          accountId,
+        const result = await executePayout({
+          merchantId: key.merchantId,
+          accountId: key.accountId,
           network,
-          amount: amount.toString(),
+          amount,
           destinationAddress
         });
+        if (!result.ok) {
+          return sendJson(res, result.statusCode, result.payload);
+        }
 
-        updatePayoutStatus(payoutId, "completed");
-        recomputeBalances(merchantId, accountId);
+        return sendJson(res, result.statusCode, result.payout);
+      }
 
-        return sendJson(res, 200, getPayoutRequest(payoutId));
+      if (action === "settings" && method === "GET") {
+        return sendJson(res, 200, buildTenantSettingsPayload(key.merchantId, key.accountId));
       }
 
       return sendJson(res, 405, { error: "Method not allowed" });
@@ -1511,11 +2248,13 @@ const server = createServer(async (req, res) => {
 });
 
 initializeDatabase();
+chainCatalogService.start();
 
 server.listen(config.port, () => {
-  console.log(`Merchant OS demo listening on http://localhost:${config.port}`);
+  console.log(`Merchant OS listening on http://localhost:${config.port}`);
   console.log(`Health: http://localhost:${config.port}/health`);
   console.log(`Frontend redirect: ${config.webUrl}`);
+  console.log(`Chain catalog entries: ${listChainCatalog().length}`);
   console.log("Demo logins:");
   getDemoMerchants().forEach((merchant) => {
     console.log(

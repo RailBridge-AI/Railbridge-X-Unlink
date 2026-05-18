@@ -5,7 +5,7 @@
 ## Companion Delivery Plan
 
 For AI-agent execution planning and sprint operations, see `MERCHANT_TREASURY_AI_AGENT_SPRINT_PLAN.md`.
-For hackathon demo scope, see `MERCHANT_TREASURY_MVP_V1_DEMO_SPEC.md` and `MERCHANT_TREASURY_MVP_V1_DEMO_PLAN.md`.
+For current prototype demo scope and setup, see `merchant-os/DEMO_GUIDE.md` and `merchant-os/ONBOARDING_TECHNICAL.md`.
 
 ---
 

@@ -17,11 +17,9 @@ import { fileURLToPath } from "url";
 import { dirname, join } from "path";
 import { wrapFetchWithPayment } from "@x402/fetch";
 import { x402Client, x402HTTPClient } from "@x402/core/client";
-import { registerExactEvmScheme } from "@x402/evm/exact/client";
 import type { PaymentRequirements } from "@x402/core/types";
-import { createWalletClient, http } from "viem";
 import { privateKeyToAccount } from "viem/accounts";
-import { baseSepolia } from "viem/chains";
+import { ExactEvmSchemeDomainClient } from "./schemes/exact-evm-domain.js";
 
 // Get directory of current file (for ESM modules)
 const __filename = fileURLToPath(import.meta.url);
@@ -46,16 +44,9 @@ if (!CLIENT_PRIVATE_KEY) {
 const signer = privateKeyToAccount(CLIENT_PRIVATE_KEY);
 console.log(`📱 Client wallet: ${signer.address}\n`);
 
-// Create viem wallet client for signing
-const viemClient = createWalletClient({
-  account: signer,
-  chain: baseSepolia,
-  transport: http(process.env.EVM_RPC_URL || "https://sepolia.base.org"),
-});
-
 // Create x402 client with custom network selector
 // Option 1: Custom selector function to prefer specific networks
-const preferredNetworks = [
+const preferredNetworks: Array<`${string}:${string}`> = [
   "eip155:84532", // Base Sepolia (preferred)
   "eip155:421614", // Arbitrum Sepolia (second choice)
   "eip155:8453",  // Base Mainnet (second choice)
@@ -91,10 +82,12 @@ const networkSelector = (
 // So the client only needs to register "exact" scheme - no cross-chain awareness needed!
 const client = new x402Client(networkSelector);
 
-// Register EVM scheme with the client
-// This enables the client to create payment payloads for EVM networks
-// The server handles cross-chain transformation, so client only sees "exact" scheme
-registerExactEvmScheme(client, { signer });
+// Register a domain-aware exact scheme so USDC variants that rely on custom EIP-712 domain
+// fields (for example, salt-based domains) can still be signed correctly.
+const registerDomainAwareExactScheme = (network: `${string}:${string}`) => {
+  client.register(network, new ExactEvmSchemeDomainClient(signer));
+};
+preferredNetworks.forEach(registerDomainAwareExactScheme);
 
 
 // Wrap fetch with payment handling

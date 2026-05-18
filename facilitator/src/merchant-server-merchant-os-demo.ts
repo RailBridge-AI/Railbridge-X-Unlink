@@ -1,227 +1,104 @@
 import express from "express";
-import { paymentMiddleware } from "@x402/express";
-import { x402ResourceServer } from "@x402/core/server";
-import { declareCrossChainExtension, CROSS_CHAIN } from "./extensions/crossChain.js";
-import { HTTPFacilitatorClient } from "@x402/core/http";
-import type {
-  PaymentPayload,
-  PaymentRequirements,
-  SettleResponse,
-  VerifyResponse,
-} from "@x402/core/types";
-import { registerExactEvmScheme } from "@x402/evm/exact/server";
-import { createPaywall } from "@x402/paywall";
-import { evmPaywall } from "@x402/paywall/evm";
 import { loadFacilitatorEnv } from "./load-env.js";
+import { createMerchantOsPaymentGuard } from "./services/merchantOsPaymentGuard.js";
 
 loadFacilitatorEnv();
 
-const FACILITATOR_URL = process.env.FACILITATOR_URL || "http://localhost:4022";
-const MERCHANT_OS_API_URL = process.env.MERCHANT_OS_API_URL || "http://localhost:4030";
-const MERCHANT_OS_INTERNAL_TOKEN =
-  process.env.MERCHANT_OS_INTERNAL_TOKEN || process.env.MERCHANT_OS_INGEST_TOKEN || "merchant-os-demo-ingest";
-const MERCHANT_OS_MERCHANT_ID =
-  process.env.MERCHANT_OS_MERCHANT_ID || "11111111-1111-4111-8111-111111111111";
-const MERCHANT_OS_ACCOUNT_ID =
-  process.env.MERCHANT_OS_ACCOUNT_ID || "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
-const MERCHANT_OS_ROUTE_METHOD = String(process.env.MERCHANT_OS_ROUTE_METHOD || "GET").toUpperCase();
-const MERCHANT_OS_ROUTE_PATH = process.env.MERCHANT_OS_ROUTE_PATH || "/api/premium";
-const MERCHANT_OS_DEMO_SETTLEMENT_MODE =
-  String(process.env.MERCHANT_OS_DEMO_SETTLEMENT_MODE || "same_chain").trim().toLowerCase();
-const MERCHANT_PORT = Number.parseInt(process.env.MERCHANT_PORT || "4021", 10);
+const RB_ENV = String(process.env.RB_ENV || "sandbox")
+  .trim()
+  .toLowerCase();
+const RB_API_KEY = String(process.env.RB_API_KEY || process.env.MERCHANT_OS_API_KEY || "").trim();
+const RB_API_ID = String(process.env.RB_API_ID || process.env.MERCHANT_OS_API_ID || "").trim();
+const RB_SETTLEMENT_MODE_OVERRIDE = String(process.env.RB_SETTLEMENT_MODE_OVERRIDE || "")
+  .trim()
+  .toLowerCase();
+const RB_MAX_PAYMENT_OPTIONS = Number.parseInt(process.env.RB_MAX_PAYMENT_OPTIONS || "8", 10);
+const MERCHANT_PORT = Number.parseInt(process.env.PORT || "4021", 10);
+const PROTECTED_ROUTE_METHOD = "GET";
+const PROTECTED_ROUTE_PATH = "/api/premium";
 
-if (!MERCHANT_OS_INTERNAL_TOKEN) {
-  console.error("MERCHANT_OS_INTERNAL_TOKEN (or MERCHANT_OS_INGEST_TOKEN) is required");
+const PLATFORM_BY_ENV = {
+  sandbox: {
+    facilitatorUrl: "http://localhost:4022",
+    merchantOsApiUrl: "http://localhost:4030",
+    paywallTestnet: true,
+  },
+  live: {
+    facilitatorUrl: "https://facilitator.railbridge.xyz",
+    merchantOsApiUrl: "https://api.railbridge.xyz",
+    paywallTestnet: false,
+  },
+} as const;
+
+const platform = PLATFORM_BY_ENV[RB_ENV as keyof typeof PLATFORM_BY_ENV] || PLATFORM_BY_ENV.sandbox;
+
+if (!RB_API_KEY) {
+  console.error("RB_API_KEY is required");
   process.exit(1);
 }
+
 if (
-  MERCHANT_OS_DEMO_SETTLEMENT_MODE !== "same_chain" &&
-  MERCHANT_OS_DEMO_SETTLEMENT_MODE !== "cross_chain"
+  RB_SETTLEMENT_MODE_OVERRIDE &&
+  RB_SETTLEMENT_MODE_OVERRIDE !== "same_chain" &&
+  RB_SETTLEMENT_MODE_OVERRIDE !== "cross_chain"
 ) {
-  console.error("MERCHANT_OS_DEMO_SETTLEMENT_MODE must be either 'same_chain' or 'cross_chain'");
+  console.error("RB_SETTLEMENT_MODE_OVERRIDE must be either 'same_chain' or 'cross_chain'");
   process.exit(1);
 }
-
-class LoggingFacilitatorClient extends HTTPFacilitatorClient {
-  async settle(
-    paymentPayload: PaymentPayload,
-    paymentRequirements: PaymentRequirements,
-  ): Promise<SettleResponse> {
-    console.log("[merchant-os-demo] settle", {
-      network: paymentRequirements.network,
-      scheme: paymentRequirements.scheme,
-    });
-    return super.settle(paymentPayload, paymentRequirements);
-  }
-
-  async verify(
-    paymentPayload: PaymentPayload,
-    paymentRequirements: PaymentRequirements,
-  ): Promise<VerifyResponse> {
-    console.log("[merchant-os-demo] verify", {
-      network: paymentRequirements.network,
-      scheme: paymentRequirements.scheme,
-    });
-    return super.verify(paymentPayload, paymentRequirements);
-  }
-}
-
-type MerchantOsResolvedRequirement = {
-  merchantId: string;
-  accountId: string;
-  settlementMode?: string;
-  requirement: {
-    scheme: string;
-    network: string;
-    price: {
-      asset: string;
-      amount: string;
-      extra?: Record<string, unknown>;
-    };
-    payTo: `0x${string}`;
-    extra?: Record<string, unknown>;
-  };
-  crossChain: null | {
-    destinationNetwork: string;
-    destinationAsset: string;
-    destinationPayTo: `0x${string}`;
-  };
-  apiProduct: {
-    apiName: string;
-    description?: string | null;
-  };
-};
-
-const facilitatorClient = new LoggingFacilitatorClient({
-  url: FACILITATOR_URL,
-});
-const resourceServer = new x402ResourceServer(facilitatorClient);
-
-registerExactEvmScheme(resourceServer, {
-  networks: [
-    "eip155:421614",
-    "eip155:5042002",
-    "eip155:84532",
-    "eip155:11155111",
-    "eip155:8453",
-    "eip155:137",
-    "eip155:1",
-  ],
-});
-
-const paywall = createPaywall()
-  .withNetwork(evmPaywall)
-  .withConfig({
-    appName: "RailBridge Merchant OS Demo Merchant",
-    testnet: true,
-  })
-  .build();
 
 const app = express();
 app.use(express.json());
 
-const routes: Record<string, any> = {};
-
-const fetchResolvedRequirement = async (): Promise<MerchantOsResolvedRequirement> => {
-  const response = await fetch(`${MERCHANT_OS_API_URL}/v1/demo/internal/requirements/resolve`, {
-    method: "POST",
-    headers: {
-      "content-type": "application/json",
-      "x-merchant-os-internal-token": MERCHANT_OS_INTERNAL_TOKEN,
-    },
-    body: JSON.stringify({
-      merchantId: MERCHANT_OS_MERCHANT_ID,
-      accountId: MERCHANT_OS_ACCOUNT_ID,
-      method: MERCHANT_OS_ROUTE_METHOD,
-      path: MERCHANT_OS_ROUTE_PATH,
-      settlementModeOverride: MERCHANT_OS_DEMO_SETTLEMENT_MODE,
-    }),
-  });
-
-  const body = (await response.json().catch(() => ({}))) as any;
-  if (!response.ok) {
-    throw new Error(
-      `Merchant OS requirement resolve failed (${response.status}): ${body.error || "unknown error"}`,
-    );
-  }
-  return body as MerchantOsResolvedRequirement;
-};
-
-const rebuildRoutesFromMerchantOs = async () => {
-  const resolved = await fetchResolvedRequirement();
-  const routeKey = `${MERCHANT_OS_ROUTE_METHOD} ${MERCHANT_OS_ROUTE_PATH}`;
-
-  const nextRoute: Record<string, unknown> = {
-    accepts: [
-      {
-        scheme: resolved.requirement.scheme,
-        network: resolved.requirement.network,
-        price: resolved.requirement.price,
-        payTo: resolved.requirement.payTo,
-        merchantId: resolved.merchantId,
-        accountId: resolved.accountId,
-        extra: resolved.requirement.extra,
-      },
-    ],
-    description:
-      resolved.requirement.extra?.description ||
-      resolved.apiProduct?.description ||
-      resolved.apiProduct?.apiName ||
-      "Merchant OS demo endpoint",
-    mimeType: "application/json",
-  };
-
-  if (resolved.crossChain) {
-    (nextRoute as any).extensions = {
-      [CROSS_CHAIN]: declareCrossChainExtension({
-        destinationNetwork: resolved.crossChain.destinationNetwork,
-        destinationAsset: resolved.crossChain.destinationAsset,
-        destinationPayTo: resolved.crossChain.destinationPayTo,
-      }),
-    };
-  }
-
-  Object.keys(routes).forEach((key) => delete routes[key]);
-  routes[routeKey] = nextRoute;
-
-  console.log("[merchant-os-demo] route config refreshed", {
-    routeKey,
-    payTo: resolved.requirement.payTo,
-    sourceNetwork: resolved.requirement.network,
-    crossChain: Boolean(resolved.crossChain),
-    settlementMode: MERCHANT_OS_DEMO_SETTLEMENT_MODE,
-  });
-};
-
-const registerRouteHandler = () => {
+const registerRouteHandler = ({ method, path }: { method: string; path: string }) => {
   const handler = (_req: express.Request, res: express.Response) => {
     res.json({
-      message: "You successfully paid for this Merchant OS demo endpoint.",
-      route: `${MERCHANT_OS_ROUTE_METHOD} ${MERCHANT_OS_ROUTE_PATH}`,
+      message: "You successfully paid for this RailBridge-protected endpoint.",
+      route: `${method} ${path}`,
       timestamp: Date.now(),
     });
   };
 
-  const method = MERCHANT_OS_ROUTE_METHOD.toLowerCase();
-  if (typeof (app as any)[method] === "function") {
-    (app as any)[method](MERCHANT_OS_ROUTE_PATH, handler);
+  const normalizedMethod = method.toLowerCase();
+  if (typeof (app as any)[normalizedMethod] === "function") {
+    (app as any)[normalizedMethod](path, handler);
     return;
   }
-  app.all(MERCHANT_OS_ROUTE_PATH, handler);
+
+  app.all(path, handler);
 };
 
 const start = async () => {
-  await rebuildRoutesFromMerchantOs();
+  const paymentGuard = await createMerchantOsPaymentGuard({
+    facilitatorUrl: platform.facilitatorUrl,
+    merchantOsApiUrl: platform.merchantOsApiUrl,
+    merchantApiKey: RB_API_KEY,
+    route: {
+      method: PROTECTED_ROUTE_METHOD,
+      path: PROTECTED_ROUTE_PATH,
+    },
+    apiId: RB_API_ID || undefined,
+    settlementModeOverride: RB_SETTLEMENT_MODE_OVERRIDE
+      ? (RB_SETTLEMENT_MODE_OVERRIDE as "same_chain" | "cross_chain")
+      : undefined,
+    paywallAppName: "RailBridge Merchant OS Demo Merchant",
+    paywallTestnet: platform.paywallTestnet,
+    autoRefreshMs: 30_000,
+    maxRequirementOptions: Number.isFinite(RB_MAX_PAYMENT_OPTIONS) ? RB_MAX_PAYMENT_OPTIONS : 8,
+    logPrefix: "[merchant-os-demo]",
+  });
 
-  const middleware = paymentMiddleware(routes, resourceServer, undefined, paywall, true);
-  app.use(middleware);
+  // Merchant app only mounts one middleware. x402 verify/settle remains abstracted behind this.
+  app.use(paymentGuard.middleware);
 
-  registerRouteHandler();
+  registerRouteHandler({
+    method: paymentGuard.routeMethod,
+    path: paymentGuard.routePath,
+  });
 
   app.post("/internal/reload-routes", async (_req, res) => {
     try {
-      await rebuildRoutesFromMerchantOs();
-      return res.json({ success: true });
+      const routeInfo = await paymentGuard.refreshRequirements();
+      return res.json({ success: true, routeInfo });
     } catch (error) {
       return res.status(500).json({
         success: false,
@@ -233,27 +110,27 @@ const start = async () => {
   app.get("/health", (_req, res) => {
     res.json({
       status: "ok",
-      route: `${MERCHANT_OS_ROUTE_METHOD} ${MERCHANT_OS_ROUTE_PATH}`,
-      merchantId: MERCHANT_OS_MERCHANT_ID,
-      accountId: MERCHANT_OS_ACCOUNT_ID,
+      route: `${paymentGuard.routeMethod} ${paymentGuard.routePath}`,
+      requirements: paymentGuard.getCurrentRouteInfo(),
     });
   });
 
   app.listen(MERCHANT_PORT, () => {
     console.log(`Merchant OS demo merchant server listening at http://localhost:${MERCHANT_PORT}`);
-    console.log(`Facilitator URL: ${FACILITATOR_URL}`);
-    console.log(`Merchant OS API URL: ${MERCHANT_OS_API_URL}`);
-    console.log(`Protected route: ${MERCHANT_OS_ROUTE_METHOD} ${MERCHANT_OS_ROUTE_PATH}`);
-    console.log(`Settlement mode override: ${MERCHANT_OS_DEMO_SETTLEMENT_MODE}`);
+    console.log(`Environment: ${RB_ENV}`);
+    console.log(`Facilitator URL: ${platform.facilitatorUrl}`);
+    console.log(`Merchant OS API URL: ${platform.merchantOsApiUrl}`);
+    console.log(`Protected route: ${paymentGuard.routeMethod} ${paymentGuard.routePath}`);
+    console.log(
+      `Settlement mode override: ${
+        RB_SETTLEMENT_MODE_OVERRIDE || "auto (use product settlement policy)"
+      }`
+    );
+    console.log(`Max payment options per challenge: ${Number.isFinite(RB_MAX_PAYMENT_OPTIONS) ? RB_MAX_PAYMENT_OPTIONS : 8}`);
+    console.log("Integration mode: abstracted (merchant does not directly call facilitator verify/settle)");
   });
 
-  setInterval(() => {
-    rebuildRoutesFromMerchantOs().catch((error) => {
-      console.warn("[merchant-os-demo] route refresh failed", {
-        error: error instanceof Error ? error.message : String(error),
-      });
-    });
-  }, 30_000).unref();
+  paymentGuard.startAutoRefresh();
 };
 
 start().catch((error) => {

@@ -1,4 +1,5 @@
 import express from "express";
+import { randomUUID } from "node:crypto";
 import { x402Facilitator } from "@x402/core/facilitator";
 import { PaymentPayload, PaymentRequirements, SettleResponse, SchemeNetworkFacilitator } from "@x402/core/types";
 import { toFacilitatorEvmSigner } from "@x402/evm";
@@ -9,13 +10,14 @@ import { createWalletClient, defineChain, http, publicActions } from "viem";
 import { privateKeyToAccount } from "viem/accounts";
 import { createNonceManager, jsonRpc } from "viem/nonce";
 import { Network } from "@x402/core/types";
-import { BridgeKit, type EVMChainDefinition } from "@circle-fin/bridge-kit";
 import { CircleCCTPBridgeService } from "./services/circleCCTPBridgeService.js";
 import { MerchantOsPublisher } from "./services/merchantOsPublisher.js";
 import { RevenueRegistryRecorder } from "./services/revenueRegistryRecorder.js";
 import { extractCrossChainInfo, CROSS_CHAIN } from "./extensions/crossChain.js";
 import { CrossChainRouter } from "./schemes/crossChainRouter.js";
-import { handleCrossChainBridgeAsync } from "./bridgeWorker.js";
+import { BridgeJobStore } from "./services/bridgeJobStore.js";
+import { BridgeJobWorker } from "./services/bridgeJobWorker.js";
+import { FacilitatorChainCatalog } from "./services/facilitatorChainCatalog.js";
 import { config } from "./config.js";
 
 // ============================================================================
@@ -32,31 +34,34 @@ type EvmChainConfig = {
   chain: ReturnType<typeof defineChain>;
 };
 
-const buildCctpEvmChains = (): EvmChainConfig[] => {
-  const kit = new BridgeKit();
-  const evmChains = kit.getSupportedChains({ chainType: "evm" });
+const chainCatalog = new FacilitatorChainCatalog();
+const syncedChains = chainCatalog.sync();
 
-  return evmChains
-    .filter((chain): chain is EVMChainDefinition => chain.type === "evm")
+const buildCctpEvmChains = (): EvmChainConfig[] =>
+  syncedChains
+    .filter((chain) => chain.status !== "paused")
     .map((chain) => {
-      const rpcUrl = chain.rpcEndpoints?.[0];
+      const rpcUrl = chain.rpcEndpoints[0];
       if (!rpcUrl) {
         return null;
       }
       return {
-        network: `eip155:${chain.chainId}` as Network,
+        network: chain.network,
         rpcUrl,
         chain: defineChain({
           id: chain.chainId,
-          name: chain.name,
-          nativeCurrency: chain.nativeCurrency,
+          name: chain.displayName,
+          nativeCurrency: {
+            name: chain.displayName,
+            symbol: "ETH",
+            decimals: 18
+          },
           rpcUrls: { default: { http: [rpcUrl] } },
-          testnet: chain.isTestnet,
-        }),
+          testnet: chain.isTestnet
+        })
       };
     })
     .filter((chain): chain is EvmChainConfig => Boolean(chain));
-};
 
 const cctpEvmChains = buildCctpEvmChains();
 if (!cctpEvmChains.length) {
@@ -76,6 +81,17 @@ cctpEvmChains.forEach(({ network, rpcUrl, chain }) => {
     chain,
     transport: http(rpcUrl),
   }).extend(publicActions);
+  const feeOverrides =
+    config.EVM_MAX_FEE_PER_GAS_WEI || config.EVM_MAX_PRIORITY_FEE_PER_GAS_WEI
+      ? {
+          ...(config.EVM_MAX_FEE_PER_GAS_WEI
+            ? { maxFeePerGas: config.EVM_MAX_FEE_PER_GAS_WEI }
+            : {}),
+          ...(config.EVM_MAX_PRIORITY_FEE_PER_GAS_WEI
+            ? { maxPriorityFeePerGas: config.EVM_MAX_PRIORITY_FEE_PER_GAS_WEI }
+            : {}),
+        }
+      : {};
 
   const evmSigner = toFacilitatorEvmSigner({
     getCode: (args: { address: `0x${string}` }) => viemClient.getCode(args),
@@ -103,11 +119,16 @@ cctpEvmChains.forEach(({ network, rpcUrl, chain }) => {
       abi: readonly unknown[];
       functionName: string;
       args: readonly unknown[];
+      maxFeePerGas?: bigint;
+      maxPriorityFeePerGas?: bigint;
     }) =>
       viemClient.writeContract({
         ...args,
         args: args.args || [],
         chain: undefined,
+        maxFeePerGas: args.maxFeePerGas ?? feeOverrides.maxFeePerGas,
+        maxPriorityFeePerGas:
+          args.maxPriorityFeePerGas ?? feeOverrides.maxPriorityFeePerGas,
       }),
     sendTransaction: (args: { to: `0x${string}`; data: `0x${string}` }) =>
       viemClient.sendTransaction({ ...args, chain: undefined }),
@@ -147,6 +168,15 @@ const merchantOsPublisher = new MerchantOsPublisher({
           accountId: config.MERCHANT_OS_DEFAULT_ACCOUNT_ID,
         }
       : undefined,
+});
+
+const bridgeJobStore = new BridgeJobStore(config.BRIDGE_JOBS_FILE);
+const bridgeJobWorker = new BridgeJobWorker({
+  store: bridgeJobStore,
+  bridgeService,
+  merchantOsPublisher,
+  intervalMs: config.BRIDGE_WORKER_INTERVAL_MS,
+  retryBaseMs: config.BRIDGE_RETRY_BASE_MS
 });
 
 const revenueRegistryRecorder = new RevenueRegistryRecorder({
@@ -319,7 +349,7 @@ const crossChainRouter = new CrossChainRouter(schemeFacilitators, bridgeService,
 // ============================================================================
 
 const facilitator = new x402Facilitator()
-  .registerExtension(CROSS_CHAIN)
+  .registerExtension({ key: CROSS_CHAIN })
   .onBeforeVerify(async (context) => {
     console.log("🔍 Before verify:", {
       scheme: context.requirements.scheme,
@@ -327,13 +357,21 @@ const facilitator = new x402Facilitator()
       payer: context.paymentPayload.payload,
     });
 
+    const sourceNetwork = context.requirements.network as Network;
+    if (chainCatalog.isPaused(sourceNetwork)) {
+      return { abort: true, reason: `source_network_paused:${sourceNetwork}` };
+    }
+
     // Check bridge liquidity for cross-chain payments
     const crossChainInfo = extractCrossChainInfo(context.paymentPayload);
     if (crossChainInfo && config.CROSS_CHAIN_ENABLED) {
-      const sourceNetwork = context.requirements.network as Network;
       const sourceAsset = context.requirements.asset;
       const destinationNetwork = crossChainInfo.destinationNetwork as Network;
       const destinationAsset = crossChainInfo.destinationAsset;
+
+      if (chainCatalog.isPaused(destinationNetwork)) {
+        return { abort: true, reason: `destination_network_paused:${destinationNetwork}` };
+      }
 
       const hasLiquidity = await bridgeService.checkLiquidity(
         sourceNetwork,
@@ -464,59 +502,39 @@ const facilitator = new x402Facilitator()
       }
     }
 
-    // Handle cross-chain bridging asynchronously after settlement
+    // Queue durable bridge job instead of in-memory async retries.
     if (
       crossChainInfo &&
       context.result.success &&
       context.result.network !== crossChainInfo.destinationNetwork &&
       config.CROSS_CHAIN_ENABLED
     ) {
-      handleCrossChainBridgeAsync(
-        bridgeService,
-        context.result.network as Network,
-        context.result.transaction,
-        crossChainInfo.destinationNetwork as Network,
-        crossChainInfo.destinationAsset,
-        context.requirements.amount,
-        crossChainInfo.destinationPayTo,
-        undefined,
-        {
-          onSuccess: async (bridgeResult) => {
-            await merchantOsPublisher.publishSettlementEvent({
-              eventId: `${context.result.transaction}:bridge_confirmed`,
-              merchantAddress: crossChainInfo.destinationPayTo,
-              sourceNetwork: context.result.network as Network,
-              destinationNetwork: crossChainInfo.destinationNetwork,
-              ...apiMeta,
-              ...merchantContextMeta,
-              asset: context.requirements.asset,
-              amount: context.requirements.amount,
-              status: "bridge_confirmed",
-              txHash: bridgeResult.destinationTxHash || bridgeResult.bridgeTxHash || context.result.transaction,
-              sourceTxHash: context.result.transaction,
-              bridgeTxHash: bridgeResult.bridgeTxHash || undefined,
-              destinationTxHash: bridgeResult.destinationTxHash || undefined,
-              settlementId: context.result.transaction,
-            });
-          },
-          onFailure: async () => {
-            await merchantOsPublisher.publishSettlementEvent({
-              eventId: `${context.result.transaction}:failed`,
-              merchantAddress: crossChainInfo.destinationPayTo,
-              sourceNetwork: context.result.network as Network,
-              destinationNetwork: crossChainInfo.destinationNetwork,
-              ...apiMeta,
-              ...merchantContextMeta,
-              asset: context.requirements.asset,
-              amount: context.requirements.amount,
-              status: "failed",
-              txHash: context.result.transaction,
-              sourceTxHash: context.result.transaction,
-              settlementId: context.result.transaction,
-            });
-          },
-        },
-      );
+      const job = bridgeJobStore.enqueue({
+        id: randomUUID(),
+        settlementId: context.result.transaction,
+        merchantAddress: crossChainInfo.destinationPayTo,
+        merchantId: merchantContextMeta.merchantId,
+        accountId: merchantContextMeta.accountId,
+        apiId: apiMeta.apiId,
+        apiRoute: apiMeta.apiRoute,
+        apiName: apiMeta.apiName,
+        sourceNetwork: context.result.network as Network,
+        destinationNetwork: crossChainInfo.destinationNetwork as Network,
+        destinationAsset: crossChainInfo.destinationAsset,
+        amount: context.requirements.amount,
+        recipient: crossChainInfo.destinationPayTo,
+        sourceTxHash: context.result.transaction,
+        maxAttempts: config.BRIDGE_MAX_ATTEMPTS
+      });
+
+      console.info("[bridge-worker] queued bridge job", {
+        jobId: job.id,
+        settlementId: job.settlementId,
+        sourceNetwork: job.sourceNetwork,
+        destinationNetwork: job.destinationNetwork,
+        attempts: job.attempts,
+        maxAttempts: job.maxAttempts
+      });
     }
   })
   .onSettleFailure(async (context) => {
@@ -559,6 +577,17 @@ console.info("   Cross-chain: Extension-based routing (any scheme + cross-chain 
 
 const app = express();
 app.use(express.json());
+
+const hasAdminAccess = (authHeader: string | undefined): boolean => {
+  if (!config.FACILITATOR_ADMIN_TOKEN) {
+    return false;
+  }
+  if (!authHeader) {
+    return false;
+  }
+  const [scheme, token] = authHeader.split(" ");
+  return (scheme || "").toLowerCase() === "bearer" && token === config.FACILITATOR_ADMIN_TOKEN;
+};
 
 app.post("/verify", async (req, res) => {
   console.log("📥 POST /verify - Received verify request");
@@ -639,6 +668,44 @@ app.get("/supported", async (req, res) => {
   }
 });
 
+app.get("/chains", (_req, res) => {
+  res.json({
+    items: chainCatalog.list(),
+    syncedAt: new Date().toISOString()
+  });
+});
+
+app.get("/bridge-jobs", (req, res) => {
+  if (!hasAdminAccess(req.headers.authorization)) {
+    return res.status(401).json({ error: "Unauthorized admin token" });
+  }
+  res.json({
+    items: bridgeJobWorker.listJobs()
+  });
+});
+
+app.post("/admin/chains/:network/status", (req, res) => {
+  if (!hasAdminAccess(req.headers.authorization)) {
+    return res.status(401).json({ error: "Unauthorized admin token" });
+  }
+  const network = String(req.params.network || "").trim() as Network;
+  const status = String(req.body?.status || "").trim().toLowerCase();
+  if (!network) {
+    return res.status(400).json({ error: "network is required" });
+  }
+  if (!["active", "degraded", "paused"].includes(status)) {
+    return res.status(400).json({ error: "status must be active, degraded, or paused" });
+  }
+  const updated = chainCatalog.setStatus(network, status as "active" | "degraded" | "paused");
+  if (!updated) {
+    return res.status(404).json({ error: "network not found in chain catalog" });
+  }
+  res.json({
+    success: true,
+    item: updated
+  });
+});
+
 app.get("/health", (req, res) => {
   res.json({
     status: "healthy",
@@ -648,10 +715,27 @@ app.get("/health", (req, res) => {
 });
 
 app.listen(parseInt(config.PORT), () => {
+  bridgeJobWorker.start();
+  const syncMs = Math.max(10000, config.CHAIN_SYNC_MS);
+  setInterval(() => {
+    try {
+      const chains = chainCatalog.sync();
+      console.info("[facilitator] chain catalog sync complete", {
+        count: chains.length
+      });
+    } catch (error) {
+      console.warn("[facilitator] chain sync failed", {
+        error: error instanceof Error ? error.message : String(error)
+      });
+    }
+  }, syncMs).unref();
+
   console.log(`🚀 RailBridge Cross-Chain Facilitator listening on port ${config.PORT}`);
   console.log(`📡 Endpoints:`);
   console.log(`   POST /verify - Verify payment payloads`);
   console.log(`   POST /settle - Settle payments on-chain`);
   console.log(`   GET  /supported - Get supported payment kinds`);
+  console.log(`   GET  /chains - Circle chain catalog`);
+  console.log(`   GET  /bridge-jobs - Durable bridge queue (admin)`);
   console.log(`   GET  /health - Health check`);
 });

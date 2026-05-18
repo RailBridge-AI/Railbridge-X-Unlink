@@ -1,8 +1,8 @@
 import "./globals.css";
 
 export const metadata = {
-  title: "RailBridge Merchant OS",
-  description: "Merchant Treasury OS demo app"
+  title: "RailBridge Merchant Console",
+  description: "Custodial stablecoin payment operations platform for agent commerce"
 };
 
 export default function RootLayout({ children }) {
