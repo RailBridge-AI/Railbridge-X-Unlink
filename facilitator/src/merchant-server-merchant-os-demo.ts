@@ -7,8 +7,8 @@ loadFacilitatorEnv();
 const RB_ENV = String(process.env.RB_ENV || "sandbox")
   .trim()
   .toLowerCase();
-const RB_API_KEY = String(process.env.RB_API_KEY || process.env.MERCHANT_OS_API_KEY || "").trim();
-const RB_API_ID = String(process.env.RB_API_ID || process.env.MERCHANT_OS_API_ID || "").trim();
+const RB_API_KEY = String(process.env.RB_API_KEY || "").trim();
+const RB_API_ID = String(process.env.RB_API_ID || "").trim();
 const RB_SETTLEMENT_MODE_OVERRIDE = String(process.env.RB_SETTLEMENT_MODE_OVERRIDE || "")
   .trim()
   .toLowerCase();

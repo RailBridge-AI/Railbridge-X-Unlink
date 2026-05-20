@@ -1,7 +1,8 @@
 node_modules/
 dist/
 .env
+config/runtime-config.local.json
+config/payment-test-config.local.json
 *.log
 .DS_Store
 *.tsbuildinfo
-

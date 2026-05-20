@@ -136,8 +136,9 @@ When enabled (`realConsolidationBridgeEnabled=true` in runtime config, or `MERCH
 
 Current signer model for prototype:
 
-1. Wallets with `mpc:*` references resolve to a shared configured signer key (`MERCHANT_OS_BRIDGE_EVM_PRIVATE_KEY`) when present.
-2. If signer key is missing or invalid, bridge fails with explicit reason and remains visible in timeline.
+1. Wallets with `mpc:*` references resolve to tenant-derived private keys from `MERCHANT_OS_CUSTODY_MASTER_KEY`.
+2. `MERCHANT_OS_BRIDGE_EVM_PRIVATE_KEY` is optional and only used for non-`mpc:*` key references.
+3. If required signer material is missing or invalid, bridge fails with explicit reason and remains visible in timeline.
 
 References:
 

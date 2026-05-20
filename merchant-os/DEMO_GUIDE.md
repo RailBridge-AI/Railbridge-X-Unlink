@@ -32,6 +32,45 @@ npm --prefix merchant-os install
 npm --prefix merchant-os/frontend install
 ```
 
+## Frontend Calls vs Internal Calls
+
+Use this section to know whether a command is simulating a browser action or exercising internal system wiring.
+
+### Called by the frontend (merchant-facing)
+
+1. `POST /v1/onboarding/start` (sign up + first session + default API key)
+2. `GET /v1/onboarding/checklist`
+3. `GET /v1/onboarding/settings`
+4. `POST /v1/onboarding/api-keys`
+5. `PATCH /v1/onboarding/api-keys/{keyId}`
+6. `POST /v1/onboarding/api-keys/{keyId}/revoke`
+7. `POST /v1/onboarding/webhooks`
+8. `PATCH /v1/onboarding/webhooks/{webhookId}`
+9. `DELETE /v1/onboarding/webhooks/{webhookId}`
+10. `POST /v1/onboarding/webhooks/test`
+11. `GET /v1/merchants/{merchantId}/balances`
+12. `GET /v1/merchants/{merchantId}/settlements`
+13. `GET /v1/merchants/{merchantId}/products`
+14. `POST /v1/merchants/{merchantId}/products`
+15. `PATCH /v1/merchants/{merchantId}/products/{productId}`
+16. `DELETE /v1/merchants/{merchantId}/products/{productId}`
+17. `POST /v1/merchants/{merchantId}/consolidations`
+18. `GET /v1/merchants/{merchantId}/payouts`
+19. `POST /v1/merchants/{merchantId}/payouts`
+
+### Internal / demo-only / operator-facing
+
+1. `POST /v1/internal/events/settlements`: internal settlement ingestion (facilitator or demo driver), not called by browser UI.
+2. `POST /v1/admin/chains/{network}/status`: admin/operator control.
+3. `POST /admin/chains/{network}/status` on facilitator: facilitator admin control.
+4. `GET /health`, `GET /v1/chains`: diagnostics and operational visibility.
+5. `npm --prefix merchant-os run demo:webhook:service`: demo receiver script (merchant-side local test helper).
+
+Notes:
+
+1. Most `curl` calls in this guide mirror what the frontend does.
+2. The ingestion/admin endpoints above are intentionally outside normal merchant UI flows.
+
 ## A) Quick Product Demo (Recommended)
 
 ### 1) Configure Merchant OS
@@ -114,6 +153,34 @@ MERCHANT_ID=$(echo "$ONBOARD" | jq -r '.merchantId')
 ACCOUNT_ID=$(echo "$ONBOARD" | jq -r '.accountId')
 ```
 
+### 3.1) API Key Creation and Usage (Important)
+
+What happens at onboarding:
+
+1. `POST /v1/onboarding/start` automatically creates a default API key for the new merchant account.
+2. That key is returned in onboarding response as `apiKey` (captured above as `API_KEY`).
+
+How auth works:
+
+1. Session token (`TOKEN`, sent as `Authorization: Bearer ...`) is for onboarding/admin console APIs:
+   - `/v1/onboarding/*`
+2. Merchant API key (`API_KEY`, sent as `x-railbridge-api-key`) is for merchant runtime APIs:
+   - `/v1/merchants/{merchantId}/*`
+
+Create an additional API key (same flow as Settings page):
+
+```bash
+curl -s -X POST http://localhost:4030/v1/onboarding/api-keys \
+  -H "authorization: Bearer $TOKEN" \
+  -H "content-type: application/json" \
+  -d '{"name":"Backend Production Key","role":"admin"}' | jq
+```
+
+Important:
+
+1. New key plaintext token is shown only at creation time; store it immediately.
+2. You can later edit metadata or revoke keys from Settings (or onboarding key APIs), but you cannot re-read token plaintext later.
+
 ### 4) Register Webhook And Send Test Event
 
 Optional: run in-repo demo webhook receiver in another terminal:
@@ -123,10 +190,14 @@ RB_WEBHOOK_REQUIRE_SIGNATURE=false npm --prefix merchant-os run demo:webhook:ser
 ```
 
 ```bash
-curl -s -X POST http://localhost:4030/v1/onboarding/webhooks \
+WEBHOOK_CREATE=$(curl -s -X POST http://localhost:4030/v1/onboarding/webhooks \
   -H "authorization: Bearer $TOKEN" \
   -H "content-type: application/json" \
-  -d '{"url":"http://localhost:4070/webhooks/railbridge"}' | jq
+  -d '{"url":"http://localhost:4070/webhooks/railbridge"}')
+
+echo "$WEBHOOK_CREATE" | jq
+
+WEBHOOK_SECRET=$(echo "$WEBHOOK_CREATE" | jq -r '.signingSecret')
 
 curl -s -X POST http://localhost:4030/v1/onboarding/webhooks/test \
   -H "authorization: Bearer $TOKEN" | jq
@@ -136,6 +207,19 @@ Inspect received events:
 
 ```bash
 curl -s http://localhost:4070/events | jq
+```
+
+Optional: rerun receiver with signature verification enabled:
+
+```bash
+RB_WEBHOOK_SECRET="$WEBHOOK_SECRET" RB_WEBHOOK_REQUIRE_SIGNATURE=true npm --prefix merchant-os run demo:webhook:service
+```
+
+Then send another test event:
+
+```bash
+curl -s -X POST http://localhost:4030/v1/onboarding/webhooks/test \
+  -H "authorization: Bearer $TOKEN" | jq
 ```
 
 ### 5) Create Paid Product
@@ -240,11 +324,34 @@ Open `http://localhost:3000` and log in with:
 Then show:
 
 1. `Onboarding`
+   - Step 4 now includes in-product backend integration guidance:
+     - copyable backend snippet for `POST /v1/sdk/requirements/resolve`
+     - copyable `curl` test
+     - `Run integration check` button (validates API key + active product can resolve requirements)
 2. `Overview`
 3. `Settlements`
 4. `Products`
 5. `Payouts`
 6. `Settings`
+
+## Webhook Signature and Shared Secret Lifecycle
+
+1. Secret creation:
+   - When merchant creates endpoint (`POST /v1/onboarding/webhooks`), RailBridge generates a new endpoint-scoped signing secret (`whsec_...`).
+2. Secret delivery to merchant:
+   - Returned in that create response as `signingSecret`.
+   - Also surfaced in frontend immediately after webhook creation so merchant can copy/store it.
+   - Not returned in normal webhook list/read responses later, so merchant should store it at creation time.
+3. Signature generation:
+   - For every webhook delivery, RailBridge computes:
+     `HMAC_SHA256(signingSecret, timestamp + "." + rawJsonBody)`
+   - Sent in header `x-railbridge-signature`.
+   - Timestamp sent in header `x-railbridge-timestamp`.
+4. Merchant verification:
+   - Merchant backend must verify signature using raw request body (not parsed/reformatted JSON), timestamp, and shared secret.
+   - If verification fails, backend should return `401`.
+5. Rotation:
+   - Current practical rotation flow: create a new webhook endpoint (new `signingSecret`), update merchant backend secret, then disable/delete old endpoint.
 
 ## B) Full x402 Integration Demo (Optional)
 
@@ -266,13 +373,17 @@ npm --prefix facilitator install
 
 Set in `facilitator/.env`:
 
-1. `EVM_PRIVATE_KEY`
-2. `EVM_RPC_URL`
-3. `CROSS_CHAIN_ENABLED=true`
-4. `MERCHANT_OS_EVENT_INGEST_URL=http://localhost:4030/v1/internal/events/settlements`
-5. `MERCHANT_OS_INGEST_TOKEN=merchant-os-demo-ingest`
-6. `FACILITATOR_ADMIN_TOKEN=facilitator-admin-token`
-7. `RB_API_KEY=<merchant API key from onboarding/settings>`
+1. `FACILITATOR_EVM_PRIVATE_KEY`
+2. Optional: `EVM_RPC_URL` (runtime override; defaults come from `facilitator/config/runtime-config.json`)
+3. `MERCHANT_OS_EVENT_INGEST_URL=http://localhost:4030/v1/internal/events/settlements`
+4. `MERCHANT_OS_INGEST_TOKEN=merchant-os-demo-ingest`
+5. `FACILITATOR_ADMIN_TOKEN=facilitator-admin-token`
+6. `RB_API_KEY=<merchant API key from onboarding/settings>`
+
+Set cross-chain behavior in `facilitator/config/runtime-config.json`:
+
+1. `"crossChainEnabled": true` to enable bridging
+2. `"crossChainEnabled": false` to run same-chain only
 
 ### 3) Start services
 
@@ -304,6 +415,49 @@ Terminal E:
 
 ```bash
 npm --prefix facilitator run example:client
+```
+
+Alternative (recommended): run one focused real payment smoke test script that logs in/onboards merchant, ensures product config, starts the Merchant OS demo merchant route, pays with `CLIENT_PRIVATE_KEY`, and checks that settlement appears in Merchant OS:
+
+```bash
+npm --prefix facilitator run test:accept-payment-merchant-os
+```
+
+Production-like split mode (merchant backend started separately):
+
+Terminal D (merchant backend only):
+
+```bash
+RB_API_KEY=<merchant_api_key> RB_API_ID=premium_api PORT=4025 npm --prefix facilitator run test:merchant-os-demo
+```
+
+Terminal E (payer client only):
+
+```bash
+npm --prefix facilitator run test:accept-payment-existing-merchant-os
+```
+
+Optional settlement verification in split mode:
+
+```bash
+RB_VERIFY_API_KEY=<merchant_api_key> \
+npm --prefix facilitator run test:accept-payment-existing-merchant-os
+```
+
+Non-sensitive split-mode settings live in:
+
+1. `facilitator/config/payment-test-config.json`
+2. Optional local override: `facilitator/config/payment-test-config.local.json`
+
+The script auto-resolves merchant context and product route from Merchant OS using:
+
+1. `GET /v1/sdk/context`
+2. `GET /v1/merchants/{merchantId}/products`
+
+Manual bridge is now separate. If you want a script utility for bridge API only:
+
+```bash
+npm --prefix facilitator run test:bridge-merchant-os
 ```
 
 Important: even in this mode, verify/settle calls are performed by middleware/platform components, not hand-written merchant API calls.

@@ -2,7 +2,12 @@
 
 import { useEffect, useMemo, useState } from "react";
 import PlatformShell from "../../components/console/PlatformShell";
-import { getNetworkInfo, formatUsdcBaseUnits } from "../../lib/assetDisplay";
+import {
+  formatUsdcBaseUnits,
+  getNetworkInfo,
+  isTestnetNetwork,
+  shouldPreferTestnetsInUi
+} from "../../lib/assetDisplay";
 import { apiWithMerchantKey } from "../../lib/platformClient";
 import { useAuthGuard } from "../../lib/useAuthGuard";
 
@@ -78,6 +83,7 @@ export default function ProductsPage() {
   const [editAdvancedRouting, setEditAdvancedRouting] = useState(false);
   const [actionProductId, setActionProductId] = useState("");
   const [actionBusy, setActionBusy] = useState(false);
+  const [showTestnetsOnly, setShowTestnetsOnly] = useState(false);
 
   const sourceSelectOptions = useMemo(
     () => [{ network: SOURCE_NETWORK_ANY, displayName: "Any supported USDC network" }, ...chainOptions],
@@ -106,28 +112,37 @@ export default function ProductsPage() {
     setItems(payload.items || []);
   };
 
-  const loadChains = async () => {
+  const loadChains = async (testnetsOnly) => {
     const response = await fetch("/v1/chains", { method: "GET" });
     const payload = await response.json().catch(() => ({}));
     if (!response.ok) {
       throw new Error(payload.error || payload.message || `HTTP ${response.status}`);
     }
-    const activeChains = Array.isArray(payload.items)
+    const availableChains = Array.isArray(payload.items)
       ? payload.items
           .filter((item) => item?.network && item.status !== "paused")
-          .sort((a, b) => String(a.displayName || a.network).localeCompare(String(b.displayName || b.network)))
       : [];
-    setChainOptions(activeChains);
+    const visibleChains = testnetsOnly
+      ? availableChains.filter((item) => isTestnetNetwork(item.network))
+      : availableChains;
+    visibleChains.sort((a, b) =>
+      String(a.displayName || a.network).localeCompare(String(b.displayName || b.network))
+    );
+    setChainOptions(visibleChains);
   };
+
+  useEffect(() => {
+    setShowTestnetsOnly(shouldPreferTestnetsInUi());
+  }, []);
 
   useEffect(() => {
     if (!auth) {
       return;
     }
-    Promise.all([loadProducts(auth), loadChains()]).catch((nextError) =>
+    Promise.all([loadProducts(auth), loadChains(showTestnetsOnly)]).catch((nextError) =>
       setError(nextError.message || "Failed to load products")
     );
-  }, [auth]);
+  }, [auth, showTestnetsOnly]);
 
   const createProduct = async (event) => {
     event.preventDefault();

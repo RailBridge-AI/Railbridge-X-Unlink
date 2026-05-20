@@ -39,13 +39,11 @@ flowchart LR
     FacBridgeStore["Bridge Job Store (durable JSON file)"]
     FacBridgeWorker["Bridge Job Worker"]
     FacBridgeService["Circle CCTP Bridge Service"]
-    RevenueRecorder["Revenue Registry Recorder (optional)"]
   end
 
   subgraph External["External Systems"]
     Circle["Circle BridgeKit / CCTP"]
     RPC["EVM RPC Endpoints"]
-    Registry["RevenueRegistry Contract (optional)"]
   end
 
   UI -->|"GET/POST /v1/*"| MOS
@@ -63,8 +61,6 @@ flowchart LR
   FacBridgeWorker -->|"bridge_confirmed / failed event"| FacPublisher
 
   FacPublisher -->|"POST /v1/internal/events/settlements"| MOS
-  RevenueRecorder --> Registry
-  Fac --> RevenueRecorder
 
   MOS --> MOSDB
   MOS -->|"USDC/native reads"| RPC
@@ -97,7 +93,6 @@ flowchart LR
 | Bridge durability layer | Persist bridge jobs + retry processing across restarts | `facilitator/src/services/bridgeJobStore.ts`, `facilitator/src/services/bridgeJobWorker.ts` |
 | Facilitator bridge execution | Run Circle CCTP bridge for queued jobs | `facilitator/src/services/circleCCTPBridgeService.ts` |
 | Event publisher | Push settlement lifecycle events into Merchant OS ingest endpoint | `facilitator/src/services/merchantOsPublisher.ts` |
-| Optional onchain proof | Record settlement proof to RevenueRegistry | `facilitator/src/services/revenueRegistryRecorder.ts` |
 | Merchant integration SDK | `protectRoute`, `resolveRequirements`, `verifyWebhook`, `getOnboardingStatus` | `merchant-os/sdk/index.js` |
 
 ## 4) Runtime Boundaries and Trust Zones

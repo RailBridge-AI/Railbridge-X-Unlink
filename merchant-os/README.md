@@ -41,12 +41,13 @@ Merchants can still use advanced routing controls when they want explicit source
 ## Documentation Map
 
 1. Demo runbook: `merchant-os/DEMO_GUIDE.md`
-2. Merchant onboarding + integration technical guide: `merchant-os/ONBOARDING_TECHNICAL.md`
-3. Webhook setup guide: `merchant-os/WEBHOOK_SETUP_GUIDE.md`
-4. Reality status matrix: `merchant-os/REALITY_CHECK.md`
-5. Architecture overview: `merchant-os/ARCHITECTURE.md`
-6. Deep architecture diagrams: `merchant-os/ARCHITECTURE_DEEP_DIVE.md`
-7. Runtime config guide: `merchant-os/config/README.md`
+2. Agent-native merchant integration guide: `merchant-os/AGENT_INTEGRATION_GUIDE.md`
+3. Merchant onboarding + integration technical guide: `merchant-os/ONBOARDING_TECHNICAL.md`
+4. Webhook setup guide: `merchant-os/WEBHOOK_SETUP_GUIDE.md`
+5. Reality status matrix: `merchant-os/REALITY_CHECK.md`
+6. Architecture overview: `merchant-os/ARCHITECTURE.md`
+7. Deep architecture diagrams: `merchant-os/ARCHITECTURE_DEEP_DIVE.md`
+8. Runtime config guide: `merchant-os/config/README.md`
 
 ## Local Run
 
@@ -90,6 +91,8 @@ Primary secrets in `.env`:
 4. `MERCHANT_OS_CUSTODY_MASTER_KEY`
 5. `MERCHANT_OS_BRIDGE_EVM_PRIVATE_KEY` (optional)
 6. `MERCHANT_OS_GAS_SPONSOR_PRIVATE_KEY` (optional)
+
+`MERCHANT_OS_CUSTODY_MASTER_KEY` is mandatory; Merchant OS exits on startup if it is missing or invalid.
 
 Generate platform tokens quickly:
 

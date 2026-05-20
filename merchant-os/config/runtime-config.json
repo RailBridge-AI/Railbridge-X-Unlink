@@ -9,7 +9,7 @@
   ],
   "custodyMode": "mpc",
   "custodyAddress": "",
-  "realConsolidationBridgeEnabled": false,
+  "realConsolidationBridgeEnabled": true,
   "realPayoutsEnabled": true,
   "facilitatorAddress": "0x0EC05eAfc58912d0B74423A099ccF2567a83A9B0",
   "demoSourceNetwork": "eip155:421614",

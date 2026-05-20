@@ -88,6 +88,42 @@ export const isTestnetNetwork = (network) => {
   return /testnet|sepolia|fuji|amoy|devnet/i.test(name);
 };
 
+export const isLocalDevelopmentHost = (hostname) => {
+  const normalized = String(
+    hostname ??
+      (typeof window !== "undefined" ? window.location.hostname : "")
+  )
+    .trim()
+    .toLowerCase();
+
+  if (!normalized) {
+    return false;
+  }
+  if (
+    normalized === "localhost" ||
+    normalized === "127.0.0.1" ||
+    normalized === "::1" ||
+    normalized === "[::1]"
+  ) {
+    return true;
+  }
+  if (normalized.endsWith(".local")) {
+    return true;
+  }
+  if (/^192\.168\.\d{1,3}\.\d{1,3}$/.test(normalized)) {
+    return true;
+  }
+  if (/^10\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(normalized)) {
+    return true;
+  }
+  if (/^172\.(1[6-9]|2\d|3[01])\.\d{1,3}\.\d{1,3}$/.test(normalized)) {
+    return true;
+  }
+  return false;
+};
+
+export const shouldPreferTestnetsInUi = () => isLocalDevelopmentHost();
+
 export const compareNetworksForDisplay = (leftNetwork, rightNetwork) => {
   const leftIsTestnet = isTestnetNetwork(leftNetwork);
   const rightIsTestnet = isTestnetNetwork(rightNetwork);

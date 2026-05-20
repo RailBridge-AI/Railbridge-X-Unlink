@@ -1,0 +1,14 @@
+{
+  "existingMerchantPayment": {
+    "facilitatorUrl": "http://localhost:4022",
+    "merchantUrl": "http://localhost:4025",
+    "merchantOsUrl": "http://localhost:4030",
+    "apiId": "premium_api",
+    "routeMethod": "GET",
+    "routePath": "/api/premium",
+    "sourceNetwork": "eip155:84532",
+    "preferredPayNetwork": "",
+    "verifySettlement": true,
+    "verifyTimeoutMs": 45000
+  }
+}

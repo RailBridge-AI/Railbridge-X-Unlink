@@ -87,11 +87,17 @@ Currently supported chains (mapped in `chainNameMap`):
 ### Environment Variables
 
 Required:
-- `EVM_PRIVATE_KEY`: Private key for facilitator wallet (used by Circle BridgeKit adapter)
+- `FACILITATOR_EVM_PRIVATE_KEY`: Private key for facilitator wallet (used by Circle BridgeKit adapter)
 
 Optional:
-- `EVM_RPC_URL`: Default RPC URL (used if chain-specific RPC not configured)
-- `CROSS_CHAIN_ENABLED`: Set to `false` to disable bridging (default: `true`)
+- `EVM_RPC_URL`: Runtime override fallback RPC URL
+- `FACILITATOR_RPC_EIP155_<CHAIN_ID>`: per-chain RPC endpoint list override
+- `CROSS_CHAIN_ENABLED`: Optional emergency override; set to `false` to disable bridging
+
+Recommended:
+- Keep public/default RPC values in `facilitator/config/runtime-config.json`
+- Keep `crossChainEnabled` in `facilitator/config/runtime-config.json` as the primary kill switch
+- Keep keyed/private provider RPC URLs in `.env`
 
 ### Bridge Config
 
@@ -157,7 +163,7 @@ Automatic conversion between:
 The service resolves RPC URLs in this order:
 1. `config.rpcUrls[chain]` (if provided)
 2. `chainRpcMap[chain]` (default RPC for chain)
-3. `process.env.EVM_RPC_URL` (fallback)
+3. `config.defaultRpcUrl` (runtime/env fallback)
 
 ### 4. Error Handling
 
@@ -204,7 +210,8 @@ To test the integration:
 
 ### Bridge Fails
 
-- Check `EVM_PRIVATE_KEY` is set correctly
+- Check `FACILITATOR_EVM_PRIVATE_KEY` is set correctly
+- Check per-chain RPCs in `facilitator/config/runtime-config.json` or `FACILITATOR_RPC_EIP155_*` overrides
 - Verify facilitator wallet has sufficient USDC on source chain
 - Ensure both chains are supported by Circle CCTP
 - Check RPC URLs are accessible
@@ -233,5 +240,3 @@ To test the integration:
 - [Circle BridgeKit Documentation](https://developers.circle.com/docs/bridgekit)
 - [Circle CCTP Overview](https://developers.circle.com/cctp)
 - [x402 Protocol Documentation](https://docs.cdp.coinbase.com/x402/docs/welcome)
-
-

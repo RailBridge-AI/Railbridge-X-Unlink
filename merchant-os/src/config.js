@@ -328,9 +328,7 @@ export const config = {
   adminToken: process.env.MERCHANT_OS_ADMIN_TOKEN || "",
 
   bridgePrivateKey:
-    process.env.MERCHANT_OS_BRIDGE_EVM_PRIVATE_KEY ||
-    process.env.EVM_PRIVATE_KEY ||
-    "",
+    process.env.MERCHANT_OS_BRIDGE_EVM_PRIVATE_KEY || "",
   gasSponsorPrivateKey: process.env.MERCHANT_OS_GAS_SPONSOR_PRIVATE_KEY || "",
   gasSponsorAutoTopupEnabled: parseBooleanValue(
     process.env.MERCHANT_OS_GAS_SPONSOR_AUTO_TOPUP,

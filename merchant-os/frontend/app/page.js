@@ -80,7 +80,13 @@ export default function HomePage() {
         token: payload.token,
         apiKey: payload.apiKey,
         merchantId: payload.merchantId,
-        accountId: payload.accountId
+        accountId: payload.accountId,
+        merchantName: payload.merchantName || form.merchantName,
+        accountName: payload.accountName || `${form.merchantName} Treasury`,
+        user: payload.user || {
+          email: form.adminEmail,
+          role: "admin"
+        }
       });
       router.replace("/onboarding");
     } catch (nextError) {
@@ -108,7 +114,10 @@ export default function HomePage() {
         token: payload.token,
         apiKey: payload.apiKey,
         merchantId: payload.merchantId,
-        accountId: payload.accountId
+        accountId: payload.accountId,
+        merchantName: payload.merchantName || "",
+        accountName: payload.accountName || "",
+        user: payload.user || null
       });
       router.replace("/onboarding");
     } catch (nextError) {
@@ -119,37 +128,37 @@ export default function HomePage() {
   };
 
   return (
-    <div className="min-h-screen bg-slate-50 text-slate-900">
-      <header className="sticky top-0 z-40 border-b border-slate-200/80 bg-slate-50/90 backdrop-blur">
-        <div className="mx-auto flex h-16 w-full max-w-[1280px] items-center justify-between px-6">
+    <div className="min-h-screen text-slate-900">
+      <header className="sticky top-0 z-40 border-b border-slate-200/70 rb-surface">
+        <div className="mx-auto flex h-16 w-full max-w-[1320px] items-center justify-between px-6">
           <div className="flex items-center gap-3">
             <img src="/RailBridge-Logo.png" alt="RailBridge" className="h-10 w-10 rounded-sm object-contain" draggable={false} />
-            <span className="text-[15px] font-semibold tracking-tight">RailBridge Merchant OS</span>
+            <span className="text-[15px] font-semibold tracking-tight text-slate-950">RailBridge Merchant OS</span>
           </div>
-          <div className="rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-xs text-slate-600 shadow-sm">
+          <div className="rounded-xl border border-slate-200 bg-white/90 px-3 py-1.5 text-xs text-slate-600 shadow-sm">
             Custodial USDC payments platform
           </div>
         </div>
       </header>
 
-      <main className="mx-auto w-full max-w-[1280px] px-6 pb-8 pt-8">
-        <section className="grid min-h-[calc(100vh-8rem)] grid-cols-1 overflow-hidden rounded-[26px] border border-slate-200 bg-white shadow-panel lg:grid-cols-2">
-          <section className="relative overflow-hidden border-b border-slate-200 px-6 py-10 lg:border-b-0 lg:border-r lg:px-10 lg:py-12">
+      <main className="mx-auto w-full max-w-[1320px] px-6 pb-8 pt-8">
+        <section className="rb-fade-up grid min-h-[calc(100vh-8rem)] grid-cols-1 overflow-hidden rounded-[30px] border border-slate-200/90 rb-surface shadow-panel lg:grid-cols-2">
+          <section className="relative overflow-hidden border-b border-slate-200/90 px-6 py-10 lg:border-b-0 lg:border-r lg:px-10 lg:py-12">
             <div className="pointer-events-none absolute inset-0 overflow-hidden">
-              <span className="absolute left-[10%] top-[15%] h-20 w-20 rounded-full bg-black/5 blur-xl"></span>
-              <span className="absolute right-[20%] top-[30%] h-16 w-16 rounded-full bg-slate-400/10 blur-xl"></span>
-              <span className="absolute bottom-[25%] left-[25%] h-12 w-12 rounded-full bg-black/5 blur-xl"></span>
-              <span className="absolute right-[15%] bottom-[20%] h-14 w-14 rounded-full bg-slate-400/10 blur-xl"></span>
+              <span className="absolute -top-8 left-[12%] h-32 w-32 rounded-full bg-slate-900/10 blur-2xl"></span>
+              <span className="absolute right-[18%] top-[28%] h-28 w-28 rounded-full bg-rail-500/10 blur-2xl"></span>
+              <span className="absolute bottom-[22%] left-[22%] h-24 w-24 rounded-full bg-slate-700/10 blur-2xl"></span>
+              <span className="absolute right-[10%] bottom-[16%] h-20 w-20 rounded-full bg-cyan-300/20 blur-2xl"></span>
             </div>
 
             <div className="relative z-10 flex h-full flex-col justify-end">
               <div>
-                <p className="text-xs font-semibold uppercase tracking-[0.16em] text-rail-700">RailBridge Platform</p>
-                <h1 className="mt-3 text-3xl font-semibold leading-tight text-slate-900 sm:text-4xl">Accept agent payments. Settle in USDC.</h1>
-                <p className="mt-3 max-w-lg text-sm leading-relaxed text-slate-600">One API and SDK to accept USDC payments with clear settlement and payout operations.</p>
+                <p className="text-xs font-semibold uppercase tracking-[0.16em] text-slate-600">RailBridge Platform</p>
+                <h1 className="mt-3 text-3xl font-semibold leading-tight text-slate-950 sm:text-4xl">Agent payments with a premium operator experience.</h1>
+                <p className="mt-3 max-w-lg text-sm leading-relaxed text-slate-600">One integration to accept USDC from supported chains, while your team stays focused on revenue and operations.</p>
 
                 <div className="mt-8">
-                  <h2 className="text-2xl font-semibold leading-tight text-slate-900">{INFO_SLIDES[infoSlide].title}</h2>
+                  <h2 className="text-2xl font-semibold leading-tight text-slate-950">{INFO_SLIDES[infoSlide].title}</h2>
                   <p className="mt-3 max-w-lg text-sm leading-relaxed text-slate-600">{INFO_SLIDES[infoSlide].subtitle}</p>
                   <div className="mt-6 flex gap-2">
                     {INFO_SLIDES.map((_, index) => (
@@ -160,7 +169,7 @@ export default function HomePage() {
                         onClick={() => setInfoSlide(index)}
                         className={classNames(
                           "h-2 w-2 rounded-full transition",
-                          index === infoSlide ? "scale-110 bg-slate-900" : "bg-slate-300 hover:bg-slate-400"
+                          index === infoSlide ? "scale-110 bg-slate-900" : "bg-slate-300 hover:bg-slate-500"
                         )}
                       ></button>
                     ))}
@@ -170,10 +179,10 @@ export default function HomePage() {
             </div>
           </section>
 
-          <section className="flex flex-col items-center justify-center bg-white px-6 py-10 lg:px-12 lg:py-12">
-            <div className="w-full max-w-sm">
+          <section className="rb-fade-up rb-fade-delay-1 flex flex-col items-center justify-center px-6 py-10 lg:px-12 lg:py-12">
+            <div className="w-full max-w-sm rounded-3xl border border-slate-200 bg-white/90 p-6 shadow-panel">
               <img src="/RailBridge-Logo.png" alt="" className="mx-auto h-12 w-12 rounded-lg object-contain" />
-              <h2 className="mt-6 text-center text-2xl font-semibold tracking-tight text-slate-900 sm:text-3xl">
+              <h2 className="mt-6 text-center text-2xl font-semibold tracking-tight text-slate-950 sm:text-3xl">
                 {mode === "onboarding" ? "Create your merchant account" : "Welcome back"}
               </h2>
               <p className="mt-2 text-center text-sm text-slate-500">
@@ -187,7 +196,7 @@ export default function HomePage() {
                   type="button"
                   className={classNames(
                     "flex-1 rounded-lg px-3 py-2 font-medium transition",
-                    mode === "onboarding" ? "bg-white text-slate-900 shadow-sm" : "text-slate-600"
+                    mode === "onboarding" ? "bg-slate-900 text-white shadow-sm" : "text-slate-600"
                   )}
                   onClick={() => setMode("onboarding")}
                 >
@@ -197,7 +206,7 @@ export default function HomePage() {
                   type="button"
                   className={classNames(
                     "flex-1 rounded-lg px-3 py-2 font-medium transition",
-                    mode === "login" ? "bg-white text-slate-900 shadow-sm" : "text-slate-600"
+                    mode === "login" ? "bg-slate-900 text-white shadow-sm" : "text-slate-600"
                   )}
                   onClick={() => setMode("login")}
                 >
@@ -251,7 +260,7 @@ export default function HomePage() {
                   <button
                     type="submit"
                     disabled={loading}
-                    className="w-full rounded-xl border border-rail-700 bg-gradient-to-br from-rail-700 to-rail-800 px-4 py-3 text-sm font-semibold text-white transition hover:brightness-105 disabled:opacity-65"
+                    className="w-full rounded-xl border border-slate-900 bg-slate-900 px-4 py-3 text-sm font-semibold text-white transition hover:bg-slate-800 disabled:opacity-65"
                   >
                     {loading ? "Creating account..." : "Create Merchant Account"}
                   </button>
@@ -283,7 +292,7 @@ export default function HomePage() {
                   <button
                     type="submit"
                     disabled={loading}
-                    className="w-full rounded-xl border border-rail-700 bg-gradient-to-br from-rail-700 to-rail-800 px-4 py-3 text-sm font-semibold text-white transition hover:brightness-105 disabled:opacity-65"
+                    className="w-full rounded-xl border border-slate-900 bg-slate-900 px-4 py-3 text-sm font-semibold text-white transition hover:bg-slate-800 disabled:opacity-65"
                   >
                     {loading ? "Signing in..." : "Sign in"}
                   </button>

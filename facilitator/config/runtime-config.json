@@ -1,0 +1,6 @@
+{
+  "evmRpcUrl": "https://sepolia.base.org",
+  "crossChainEnabled": false,
+  "chainStatusOverrides": {},
+  "rpcOverridesByNetwork": {}
+}

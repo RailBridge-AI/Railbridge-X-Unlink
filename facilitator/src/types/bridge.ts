@@ -10,6 +10,7 @@ export interface BridgeConfig {
   rpcUrls?: {
     [chainId: string]: string;
   };
+  defaultRpcUrl?: string;
   facilitatorAddress?: string; // Facilitator address to use as bridge lock address for testing
 }
 
@@ -76,4 +77,3 @@ export interface BridgeResult {
   destChain: string;
   messageId?: string; // For tracking bridge messages
 }
-

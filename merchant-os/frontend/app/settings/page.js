@@ -2,6 +2,7 @@
 
 import { useEffect, useState } from "react";
 import PlatformShell from "../../components/console/PlatformShell";
+import SyntaxCodeBlock from "../../components/console/SyntaxCodeBlock";
 import { apiWithSession } from "../../lib/platformClient";
 import { useAuthGuard } from "../../lib/useAuthGuard";
 
@@ -92,6 +93,17 @@ export default function SettingsPage() {
     }
     loadSettings(auth).catch((nextError) => setError(nextError.message || "Failed to load settings"));
   }, [auth]);
+
+  useEffect(() => {
+    if (typeof window === "undefined") {
+      return;
+    }
+    const params = new URLSearchParams(window.location.search || "");
+    const panel = String(params.get("panel") || "").trim().toLowerCase();
+    if (panel === "api_keys" || panel === "webhooks") {
+      setSettingsPanel(panel);
+    }
+  }, []);
 
   const copyText = async (id, value) => {
     try {
@@ -648,9 +660,11 @@ export default function SettingsPage() {
                       Next.js Route Handler
                     </button>
                   </div>
-                  <pre className="mt-2 overflow-x-auto rounded border border-slate-200 bg-slate-900 p-3 text-[11px] leading-relaxed text-slate-100">
-                    <code>{snippetView === "express" ? EXPRESS_WEBHOOK_SNIPPET : NEXT_WEBHOOK_SNIPPET}</code>
-                  </pre>
+                  <SyntaxCodeBlock
+                    className="mt-2"
+                    language="javascript"
+                    code={snippetView === "express" ? EXPRESS_WEBHOOK_SNIPPET : NEXT_WEBHOOK_SNIPPET}
+                  />
                 </div>
 
                 <div className="mt-3 flex flex-wrap gap-2">

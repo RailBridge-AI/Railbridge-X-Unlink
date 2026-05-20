@@ -4,6 +4,9 @@ import { config } from "../src/config.js";
 import { resetDatabase } from "../src/db.js";
 
 const baseUrl = `http://localhost:${config.port}`;
+const demoAdminEmail = process.env.RB_DEMO_ADMIN_EMAIL || "ops@example.com";
+const demoAdminPassword = process.env.RB_DEMO_ADMIN_PASSWORD || "RailBridgeDemo123!";
+const demoMerchantName = process.env.RB_DEMO_MERCHANT_NAME || "Spotlight Merchant";
 
 const waitForHealth = async (serverState) => {
   for (let i = 0; i < 30; i += 1) {
@@ -26,27 +29,31 @@ const waitForHealth = async (serverState) => {
 };
 
 const runFlow = async () => {
-  const loginRes = await fetch(`${baseUrl}/v1/auth/login`, {
+  const onboardingRes = await fetch(`${baseUrl}/v1/onboarding/start`, {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({
-      email: "ops+alpha@railbridge.demo",
-      password: "demo123",
-    }),
+      merchantName: demoMerchantName,
+      adminEmail: demoAdminEmail,
+      adminPassword: demoAdminPassword,
+      complianceProfile: {
+        country: "US",
+      },
+    })
   });
-  const login = await loginRes.json();
-  if (!loginRes.ok) {
-    throw new Error(`Login failed: ${JSON.stringify(login)}`);
+  const onboarding = await onboardingRes.json();
+  if (!onboardingRes.ok) {
+    throw new Error(`Onboarding failed: ${JSON.stringify(onboarding)}`);
   }
-  if (!login.apiKey) {
-    throw new Error("Login response missing apiKey");
+  if (!onboarding.apiKey) {
+    throw new Error("Onboarding response missing apiKey");
   }
 
-  const merchantId = login.merchantId;
-  const accountId = login.accountId;
+  const merchantId = onboarding.merchantId;
+  const accountId = onboarding.accountId;
   const merchantHeaders = {
     "content-type": "application/json",
-    "x-railbridge-api-key": login.apiKey,
+    "x-railbridge-api-key": onboarding.apiKey,
   };
 
   const ingest = async (payload) => {
@@ -147,7 +154,7 @@ const runFlow = async () => {
   }
 
   const overviewRes = await fetch(`${baseUrl}/v1/merchants/${merchantId}/balances`, {
-    headers: { "x-railbridge-api-key": login.apiKey },
+    headers: { "x-railbridge-api-key": onboarding.apiKey },
   });
   const overview = await overviewRes.json();
   if (!overviewRes.ok) {
@@ -155,7 +162,7 @@ const runFlow = async () => {
   }
 
   const settlementsRes = await fetch(`${baseUrl}/v1/merchants/${merchantId}/settlements`, {
-    headers: { "x-railbridge-api-key": login.apiKey },
+    headers: { "x-railbridge-api-key": onboarding.apiKey },
   });
   const settlements = await settlementsRes.json();
   if (!settlementsRes.ok) {

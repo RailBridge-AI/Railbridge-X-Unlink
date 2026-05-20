@@ -8,7 +8,9 @@ import {
   compareNetworksForDisplay,
   formatUsdcBaseUnits,
   getNetworkInfo,
-  getTokenInfo
+  getTokenInfo,
+  isTestnetNetwork,
+  shouldPreferTestnetsInUi
 } from "../../lib/assetDisplay";
 
 const defaultBridgeForm = {
@@ -59,6 +61,7 @@ export default function OverviewPage() {
   const [bridgeBusy, setBridgeBusy] = useState(false);
   const [bridgeMessage, setBridgeMessage] = useState("");
   const [bridgeError, setBridgeError] = useState("");
+  const [showTestnetsOnly, setShowTestnetsOnly] = useState(false);
 
   const balancesByNetwork = useMemo(
     () =>
@@ -73,10 +76,13 @@ export default function OverviewPage() {
 
   const sortedBalances = useMemo(() => {
     const balances = Array.isArray(data?.balances) ? data.balances : [];
-    return [...balances].sort((left, right) =>
+    const visibleBalances = showTestnetsOnly
+      ? balances.filter((item) => isTestnetNetwork(item?.network))
+      : balances;
+    return [...visibleBalances].sort((left, right) =>
       compareNetworksForDisplay(left.network, right.network)
     );
-  }, [data]);
+  }, [data, showTestnetsOnly]);
 
   const sourceAvailableBaseUnits = parseBaseUnitsSafe(
     balancesByNetwork[bridgeForm.sourceNetwork]?.amount || "0"
@@ -143,6 +149,10 @@ export default function OverviewPage() {
       cancelled = true;
     };
   }, [auth]);
+
+  useEffect(() => {
+    setShowTestnetsOnly(shouldPreferTestnetsInUi());
+  }, []);
 
   useEffect(() => {
     if (!networkOptions.length) {
@@ -222,55 +232,61 @@ export default function OverviewPage() {
 
       {data ? (
         <div className="space-y-4">
-          <section className="relative overflow-hidden rounded-3xl bg-gradient-to-br from-rail-700 via-cyan-700 to-rail-600 p-5 text-white">
-            <div className="pointer-events-none absolute inset-0 bg-[repeating-linear-gradient(-38deg,rgba(255,255,255,0.08)_0,rgba(255,255,255,0.08)_2px,transparent_2px,transparent_32px)]"></div>
+          <section className="relative overflow-hidden rounded-3xl bg-gradient-to-br from-slate-900 via-slate-800 to-rail-800 p-5 text-white shadow-panel">
+            <div className="pointer-events-none absolute inset-0 bg-[radial-gradient(circle_at_20%_18%,rgba(255,255,255,0.18),transparent_40%)]"></div>
+            <div className="pointer-events-none absolute inset-0 bg-[repeating-linear-gradient(-38deg,rgba(255,255,255,0.06)_0,rgba(255,255,255,0.06)_2px,transparent_2px,transparent_34px)]"></div>
             <div className="relative z-10">
-              <p className="text-xs uppercase tracking-[0.14em] text-cyan-100">Available Balance</p>
+              <p className="text-xs uppercase tracking-[0.14em] text-slate-200">Available Balance</p>
               <p className="mt-2 text-4xl font-semibold">${data.availableUsd || "0.00"}</p>
-              <p className="mt-2 text-sm text-cyan-100/95">Pending transfer: ${data.pendingBridgeUsd || "0.00"}</p>
+              <p className="mt-2 text-sm text-slate-200/95">
+                Projected ledger balance: ${data.projectedUsd || data.availableUsd || "0.00"}
+              </p>
+              <p className="mt-1 text-sm text-slate-200/95">Pending/reconciling: ${data.pendingBridgeUsd || "0.00"}</p>
             </div>
           </section>
 
           <section className="rounded-2xl border border-slate-200 bg-slate-50 p-3.5">
             <h3 className="text-base font-semibold">Balances by network</h3>
-            <div className="mt-2 grid gap-2">
-              {data.balances?.length ? (
-                sortedBalances.map((item) => {
-                  const network = getNetworkInfo(item.network);
-                  const token = getTokenInfo(item.asset);
-                  return (
-                    <article key={item.network} className="rounded-xl border border-slate-200 bg-white p-3">
-                      <div className="flex items-start justify-between gap-3">
-                        <div className="flex min-w-0 items-center gap-2.5">
-                          <div className="flex h-9 w-9 shrink-0 items-center justify-center overflow-hidden rounded-full bg-slate-100">
-                            {network.logo ? (
-                              <img src={network.logo} alt="" className="h-7 w-7 object-contain" />
-                            ) : (
-                              <span className="text-xs font-semibold text-slate-500">
-                                {network.name.charAt(0)}
-                              </span>
-                            )}
+            <div className={`mt-2 ${sortedBalances.length ? "h-[420px] overflow-y-auto pr-1" : ""}`}>
+              <div className="grid gap-2">
+                {sortedBalances.length ? (
+                  sortedBalances.map((item) => {
+                    const network = getNetworkInfo(item.network);
+                    const token = getTokenInfo(item.asset);
+                    return (
+                      <article key={item.network} className="rounded-xl border border-slate-200 bg-white p-3">
+                        <div className="flex items-start justify-between gap-3">
+                          <div className="flex min-w-0 items-center gap-2.5">
+                            <div className="flex h-9 w-9 shrink-0 items-center justify-center overflow-hidden rounded-full bg-slate-100">
+                              {network.logo ? (
+                                <img src={network.logo} alt="" className="h-7 w-7 object-contain" />
+                              ) : (
+                                <span className="text-xs font-semibold text-slate-500">
+                                  {network.name.charAt(0)}
+                                </span>
+                              )}
+                            </div>
+                            <div className="min-w-0">
+                              <p className="truncate text-sm font-semibold">{network.name}</p>
+                            </div>
                           </div>
-                          <div className="min-w-0">
-                            <p className="truncate text-sm font-semibold">{network.name}</p>
+                          <div className="text-right">
+                            <p className="text-sm font-semibold">${item.usdValue}</p>
+                            <p className="mt-0.5 flex items-center justify-end gap-1 text-xs text-slate-500">
+                              {token.logo ? (
+                                <img src={token.logo} alt={token.symbol} className="h-3.5 w-3.5 rounded-full object-contain" />
+                              ) : null}
+                              <span>{formatUsdcBaseUnits(item.amount)} {token.symbol}</span>
+                            </p>
                           </div>
                         </div>
-                        <div className="text-right">
-                          <p className="text-sm font-semibold">${item.usdValue}</p>
-                          <p className="mt-0.5 flex items-center justify-end gap-1 text-xs text-slate-500">
-                            {token.logo ? (
-                              <img src={token.logo} alt={token.symbol} className="h-3.5 w-3.5 rounded-full object-contain" />
-                            ) : null}
-                            <span>{formatUsdcBaseUnits(item.amount)} {token.symbol}</span>
-                          </p>
-                        </div>
-                      </div>
-                    </article>
-                  );
-                })
-              ) : (
-                <p className="rounded-xl border border-slate-200 bg-white p-3 text-sm text-slate-500">No balances yet.</p>
-              )}
+                      </article>
+                    );
+                  })
+                ) : (
+                  <p className="rounded-xl border border-slate-200 bg-white p-3 text-sm text-slate-500">No balances yet.</p>
+                )}
+              </div>
             </div>
           </section>
 

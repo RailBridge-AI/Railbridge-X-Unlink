@@ -37,7 +37,6 @@ import {
   getBalances,
   getConsolidation,
   getCustodyPrivateKeyByReference,
-  getDemoMerchants,
   getWebhookEndpointById,
   hasSettlementLifecycleEvent,
   getPayoutRequest,
@@ -49,6 +48,7 @@ import {
   hasSettlementEvent,
   initializeDatabase,
   insertSettlementEvent,
+  listWorkspaceLoginIdentities,
   listApiProducts,
   listChainCatalog,
   onboardMerchantAccount,
@@ -59,6 +59,7 @@ import {
   updateApiKeyMetadata,
   updateApiProduct,
   updateConsolidationStatus,
+  updateTenantProfile,
   updateWebhookEndpoint,
   updatePayoutStatus
 } from "./db.js";
@@ -198,15 +199,47 @@ const mergeOnchainAndProjectedUsdcAmount = ({ onchainAmount, projectedAmount }) 
   };
 };
 
+const buildAvailableAndPendingUsdcAmount = ({ onchainAmount, projectedAmount }) => {
+  const normalizedProjectedAmount = projectedAmount === null ? 0n : projectedAmount;
+  const hasOnchainAmount = onchainAmount !== null;
+  const availableAmount = hasOnchainAmount ? onchainAmount : 0n;
+  const pendingAmount =
+    normalizedProjectedAmount > availableAmount ? normalizedProjectedAmount - availableAmount : 0n;
+
+  let source = "none";
+  if (hasOnchainAmount) {
+    source = "onchain";
+  } else if (normalizedProjectedAmount > 0n) {
+    source = "projected";
+  }
+
+  return {
+    availableAmount,
+    projectedAmount: normalizedProjectedAmount,
+    pendingAmount,
+    source,
+    readStatus: hasOnchainAmount ? "ok" : "onchain_unavailable"
+  };
+};
+
 const getEffectiveNetworkUsdcBalance = async ({
   merchantId,
   accountId,
   network,
-  wallet = null
+  wallet = null,
+  strictOnchain = false
 }) => {
   const projectedAmount = getAvailableBalanceForNetwork(merchantId, accountId, network);
   const targetWallet = wallet || getWalletByNetwork(merchantId, accountId, network);
   if (!targetWallet) {
+    if (strictOnchain) {
+      return {
+        amount: 0n,
+        source: projectedAmount > 0n ? "onchain_unavailable" : "none",
+        projectedAmount,
+        onchainAmount: null
+      };
+    }
     return {
       amount: projectedAmount,
       source: projectedAmount > 0n ? "projected" : "none",
@@ -230,6 +263,14 @@ const getEffectiveNetworkUsdcBalance = async ({
     onchainAmount,
     projectedAmount
   });
+  if (strictOnchain) {
+    return {
+      amount: onchainAmount === null ? 0n : onchainAmount,
+      source: onchainAmount === null ? "onchain_unavailable" : "onchain",
+      projectedAmount,
+      onchainAmount
+    };
+  }
   return {
     amount: merged.amount,
     source: merged.source,
@@ -323,6 +364,7 @@ const buildOverviewResponse = async (merchantId, accountId) => {
   const projectedBalances = getBalances(merchantId, accountId);
   const policy = getPolicy(merchantId, accountId);
   const wallets = getWallets(merchantId, accountId);
+  const walletByNetwork = new Map(wallets.map((wallet) => [wallet.network, wallet]));
   const projectedByNetwork = new Map(
     projectedBalances.map((row) => [
       row.network,
@@ -341,47 +383,54 @@ const buildOverviewResponse = async (merchantId, accountId) => {
     totalBudgetMs: config.onchainReadTotalBudgetMs
   });
 
-  const mergedByNetwork = new Map();
-  wallets.forEach((wallet) => {
-    if (!mergedByNetwork.has(wallet.network)) {
-      const onchain = onchainByNetwork.get(wallet.network);
-      const projected = projectedByNetwork.get(wallet.network);
+  const networks = new Set([
+    ...walletByNetwork.keys(),
+    ...projectedByNetwork.keys(),
+    ...onchainByNetwork.keys()
+  ]);
+
+  const balances = [...networks]
+    .map((network) => {
+      const projected = projectedByNetwork.get(network);
+      const onchain = onchainByNetwork.get(network);
       const onchainAmount = onchain ? parseBaseUnitsSafe(onchain.amount) : null;
       const projectedAmount = projected ? parseBaseUnitsSafe(projected.amount) : null;
-      const merged = mergeOnchainAndProjectedUsdcAmount({
+      const available = buildAvailableAndPendingUsdcAmount({
         onchainAmount,
         projectedAmount
       });
-      let amount = merged.amount.toString();
-      let balanceSource = "none";
-      let updatedAt = nowIso();
-      balanceSource = merged.source;
 
-      if (balanceSource === "onchain") {
-        updatedAt = onchain?.asOf || projected?.updatedAt || nowIso();
-      } else if (balanceSource === "projected") {
-        updatedAt = projected?.updatedAt || onchain?.asOf || nowIso();
-      }
-      mergedByNetwork.set(wallet.network, {
-        network: wallet.network,
+      const updatedAt = onchain?.asOf || projected?.updatedAt || nowIso();
+      return {
+        network,
         asset: "USDC",
-        amount,
+        amount: available.availableAmount.toString(),
         decimals: 6,
-        usdValue: toDecimalUsdcString(amount),
-        balanceSource,
+        usdValue: toDecimalUsdcString(available.availableAmount),
+        projectedAmount: available.projectedAmount.toString(),
+        projectedUsdValue: toDecimalUsdcString(available.projectedAmount),
+        pendingAmount: available.pendingAmount.toString(),
+        pendingUsdValue: toDecimalUsdcString(available.pendingAmount),
+        onchainAmount: onchainAmount === null ? null : onchainAmount.toString(),
+        source: available.source,
+        readStatus: available.readStatus,
         updatedAt
-      });
-    }
-  });
+      };
+    })
+    .sort((left, right) => left.network.localeCompare(right.network));
 
-  const balances = [...mergedByNetwork.values()];
-  const unifiedUsd = balances.reduce((sum, row) => sum + BigInt(row.amount), 0n);
+  const availableBaseUnits = balances.reduce((sum, row) => sum + BigInt(row.amount), 0n);
+  const projectedBaseUnits = balances.reduce((sum, row) => sum + BigInt(row.projectedAmount), 0n);
+  const pendingBridgeBaseUnits = balances.reduce((sum, row) => sum + BigInt(row.pendingAmount), 0n);
 
   return {
     merchantId,
     accountId,
     asOf: nowIso(),
-    unifiedUsd: (Number(unifiedUsd) / 1_000_000).toFixed(2),
+    unifiedUsd: toDecimalUsdcString(availableBaseUnits),
+    availableUsd: toDecimalUsdcString(availableBaseUnits),
+    projectedUsd: toDecimalUsdcString(projectedBaseUnits),
+    pendingBridgeUsd: toDecimalUsdcString(pendingBridgeBaseUnits),
     policy,
     custody: {
       mode: "custodial",
@@ -391,15 +440,7 @@ const buildOverviewResponse = async (merchantId, accountId) => {
         address: wallet.address
       }))
     },
-    balances: balances.map((balance) => ({
-      network: balance.network,
-      asset: balance.asset,
-      amount: balance.amount,
-      decimals: 6,
-      usdValue: balance.usdValue,
-      source: balance.balanceSource,
-      updatedAt: balance.updatedAt
-    }))
+    balances
   };
 };
 
@@ -809,7 +850,8 @@ const executePayout = async ({
     merchantId,
     accountId,
     network,
-    wallet: sourceWallet
+    wallet: sourceWallet,
+    strictOnchain: config.realPayoutsEnabled
   });
   if (sourceBalanceInfo.amount < amount) {
     return {
@@ -1128,6 +1170,8 @@ const server = createServer(async (req, res) => {
           email: user.email,
           role: user.role
         },
+        merchantName: user.merchantName,
+        accountName: user.accountName,
         merchantId: user.merchantId,
         accountId: user.accountId,
         checklist: buildOnboardingChecklist(user.merchantId, user.accountId)
@@ -1195,6 +1239,13 @@ const server = createServer(async (req, res) => {
 
       return sendJson(res, 201, {
         token: session.token,
+        user: {
+          id: onboarding.adminUserId,
+          email: adminEmail,
+          role: "admin"
+        },
+        merchantName,
+        accountName: `${merchantName} Treasury`,
         merchantId: onboarding.merchantId,
         accountId: onboarding.accountId,
         apiKey: apiKey.token,
@@ -1216,6 +1267,72 @@ const server = createServer(async (req, res) => {
         return;
       }
       return sendJson(res, 200, buildTenantSettingsPayload(session.merchantId, session.accountId));
+    }
+
+    if (method === "PATCH" && pathname === "/v1/onboarding/profile") {
+      const session = requireSession(req, res);
+      if (!session) {
+        return;
+      }
+      if (session.role !== "admin" && session.role !== "finance") {
+        return sendJson(res, 403, { error: "Forbidden: only admin/finance can update profile" });
+      }
+
+      const body = await parseJsonBody(req);
+      const hasMerchantName = body.merchantName !== undefined;
+      const hasAccountName = body.accountName !== undefined;
+      const hasUserEmail = body.userEmail !== undefined;
+      if (!hasMerchantName && !hasAccountName && !hasUserEmail) {
+        return sendJson(res, 400, {
+          error: "Provide at least one editable field: merchantName, accountName, or userEmail"
+        });
+      }
+
+      const merchantName = hasMerchantName ? String(body.merchantName || "").trim() : undefined;
+      const accountName = hasAccountName ? String(body.accountName || "").trim() : undefined;
+      const userEmail = hasUserEmail ? String(body.userEmail || "").trim().toLowerCase() : undefined;
+
+      if (merchantName !== undefined && merchantName.length < 2) {
+        return sendJson(res, 400, { error: "merchantName must be at least 2 characters" });
+      }
+      if (accountName !== undefined && accountName.length < 2) {
+        return sendJson(res, 400, { error: "accountName must be at least 2 characters" });
+      }
+      if (userEmail !== undefined && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(userEmail)) {
+        return sendJson(res, 400, { error: "userEmail must be a valid email address" });
+      }
+
+      try {
+        const profile = updateTenantProfile({
+          merchantId: session.merchantId,
+          accountId: session.accountId,
+          actingUserId: session.userId,
+          merchantName,
+          accountName,
+          userEmail
+        });
+        if (!profile) {
+          return sendJson(res, 404, { error: "Merchant account not found" });
+        }
+        return sendJson(res, 200, {
+          merchantId: profile.merchantId,
+          accountId: profile.accountId,
+          merchantName: profile.merchantName,
+          accountName: profile.accountName,
+          user: profile.userEmail
+            ? {
+                email: profile.userEmail,
+                role: profile.userRole || session.role
+              }
+            : null
+        });
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        if (/UNIQUE constraint failed: merchant_users\.email/i.test(message)) {
+          return sendJson(res, 409, { error: "Email is already used by another user" });
+        }
+        return sendJson(res, 500, { error: "Failed to update profile" });
+      }
     }
 
     if (method === "POST" && pathname === "/v1/onboarding/webhooks") {
@@ -1616,6 +1733,20 @@ const server = createServer(async (req, res) => {
       });
     }
 
+    if (method === "GET" && pathname === "/v1/sdk/context") {
+      const key = requireApiKey(req, res);
+      if (!key) {
+        return;
+      }
+      const settings = buildTenantSettingsPayload(key.merchantId, key.accountId);
+      return sendJson(res, 200, {
+        merchantId: key.merchantId,
+        accountId: key.accountId,
+        merchantName: settings.merchantName || "",
+        accountName: settings.accountName || "",
+      });
+    }
+
     if (method === "POST" && pathname === "/v1/sdk/requirements/resolve") {
       const key = requireApiKey(req, res);
       if (!key) {
@@ -1811,8 +1942,9 @@ const server = createServer(async (req, res) => {
           merchantId: key.merchantId,
           accountId: key.accountId,
           asOf: overview.asOf,
-          availableUsd: overview.unifiedUsd,
-          pendingBridgeUsd: "0.00",
+          availableUsd: overview.availableUsd,
+          projectedUsd: overview.projectedUsd,
+          pendingBridgeUsd: overview.pendingBridgeUsd,
           balances: overview.balances
         });
       }
@@ -1960,7 +2092,8 @@ const server = createServer(async (req, res) => {
           merchantId: key.merchantId,
           accountId: key.accountId,
           network: sourceNetwork,
-          wallet: sourceWallet
+          wallet: sourceWallet,
+          strictOnchain: config.realConsolidationBridgeEnabled
         });
         if (sourceBalanceInfo.amount < amount) {
           return sendJson(res, 400, {
@@ -2255,10 +2388,16 @@ server.listen(config.port, () => {
   console.log(`Health: http://localhost:${config.port}/health`);
   console.log(`Frontend redirect: ${config.webUrl}`);
   console.log(`Chain catalog entries: ${listChainCatalog().length}`);
-  console.log("Demo logins:");
-  getDemoMerchants().forEach((merchant) => {
+  const loginIdentities = listWorkspaceLoginIdentities();
+  if (!loginIdentities.length) {
+    console.log("Workspace logins: none found. Create one via POST /v1/onboarding/start.");
+    return;
+  }
+  console.log("Workspace logins (from current DB):");
+  loginIdentities.forEach((identity) => {
     console.log(
-      `- ${merchant.merchantName}: email=${merchant.email} password=${merchant.password} merchantId=${merchant.merchantId} accountId=${merchant.accountId}`
+      `- ${identity.merchantName}: email=${identity.email} role=${identity.role} merchantId=${identity.merchantId} accountId=${identity.accountId}`
     );
   });
+  console.log("Password values are intentionally not logged.");
 });

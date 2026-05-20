@@ -16,7 +16,6 @@
     "test:integration": "node --test \"tests/integration/**/*.test.js\"",
     "test:unit": "node --test \"tests/unit/**/*.test.js\"",
     "db:reset": "node scripts/reset-db.js",
-    "db:seed": "node scripts/seed-demo.js",
     "demo:quick": "node scripts/demo-quick.js",
     "demo:webhook:service": "node scripts/demo-webhook-service.js",
     "tokens:generate": "node scripts/generate-platform-tokens.js"

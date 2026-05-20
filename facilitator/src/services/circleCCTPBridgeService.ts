@@ -41,7 +41,7 @@ export class CircleCCTPBridgeService implements IBridgeService {
     });
     
     // Initialize adapter if private key is available
-    const bridgeKey = process.env.BRIDGE_EVM_PRIVATE_KEY || process.env.EVM_PRIVATE_KEY;
+    const bridgeKey = process.env.FACILITATOR_EVM_PRIVATE_KEY;
     if (bridgeKey) {
       this.adapter = createViemAdapterFromPrivateKey({
         privateKey: bridgeKey as `0x${string}`,
@@ -133,7 +133,9 @@ export class CircleCCTPBridgeService implements IBridgeService {
     const humanAmount = this.toHumanReadableUSDC(amount);
 
     if (!this.adapter) {
-      throw new Error("EVM_PRIVATE_KEY not configured. Cannot bridge without adapter.");
+      throw new Error(
+        "FACILITATOR_EVM_PRIVATE_KEY not configured. Cannot bridge without adapter."
+      );
     }
 
     const sourceChainName = this.mapNetworkToChainName(sourceChain);
@@ -273,7 +275,7 @@ export class CircleCCTPBridgeService implements IBridgeService {
    * Uses pending nonce so it reflects in-flight transactions.
    */
   private async logCurrentNonce(chain: Network): Promise<void> {
-    const rpcUrl = this.config.rpcUrls?.[chain] || this.chainRpcMap[chain] || process.env.EVM_RPC_URL;
+    const rpcUrl = this.config.rpcUrls?.[chain] || this.chainRpcMap[chain] || this.config.defaultRpcUrl;
     const facilitatorAddress = this.config.facilitatorAddress as `0x${string}` | undefined;
 
     if (!rpcUrl || !facilitatorAddress) {
@@ -354,7 +356,7 @@ export class CircleCCTPBridgeService implements IBridgeService {
     console.log(`[CCTP] Waiting for source transaction confirmation: ${chain}, TX: ${txHash}`);
 
     // Get RPC URL for the source chain
-    const rpcUrl = this.config.rpcUrls?.[chain] || this.chainRpcMap[chain] || process.env.EVM_RPC_URL;
+    const rpcUrl = this.config.rpcUrls?.[chain] || this.chainRpcMap[chain] || this.config.defaultRpcUrl;
     
     if (!rpcUrl) {
       console.warn(`[CCTP] No RPC URL found for ${chain}, skipping confirmation wait`);
@@ -389,5 +391,3 @@ export class CircleCCTPBridgeService implements IBridgeService {
     return this.kit.getSupportedChains().map(c => c.chain);
   }
 }
-
-

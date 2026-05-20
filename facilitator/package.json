@@ -12,13 +12,14 @@
     "lint": "eslint src --ext .ts",
     "test:merchant": "tsx src/merchant-server.ts",
     "test:merchant-os-demo": "tsx src/merchant-server-merchant-os-demo.ts",
+    "test:accept-payment-merchant-os": "tsx scripts/pay-merchant-os-testnet.ts",
+    "test:accept-payment-existing-merchant-os": "tsx scripts/pay-existing-merchant-testnet.ts",
+    "test:bridge-merchant-os": "tsx scripts/manual-bridge-merchant-os.ts",
     "test:merchant-same-chain": "tsx src/merchant-server-same-chain.ts",
     "example:client": "tsx src/client-example.ts",
     "demo:cctp": "tsx src/integration_demo/usdc_cctp.ts",
     "test:testnets": "tsx scripts/testnet-coverage.ts",
-    "diagnose:domain": "tsx scripts/diagnose-domain.ts",
-    "deploy:revenue-registry": "node scripts/deploy-revenue-registry.js",
-    "verify:revenue-registry": "node scripts/verify-revenue-registry.js"
+    "diagnose:domain": "tsx scripts/diagnose-domain.ts"
   },
   "dependencies": {
     "@circle-fin/adapter-viem-v2": "^1.2.0",

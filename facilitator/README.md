@@ -39,9 +39,12 @@ cp .env.template .env
 ```
 
 Required variables:
-- `EVM_PRIVATE_KEY`: Private key for EVM facilitator wallet
-- `EVM_RPC_URL`: RPC endpoint for EVM chains
+- `FACILITATOR_EVM_PRIVATE_KEY`: Private key for EVM facilitator wallet
 - `DEPLOY_ERC4337_WITH_EIP6492` (optional): `true` to enable ERC-4337 smart wallet deployment
+
+Non-sensitive RPC defaults:
+- Set in `facilitator/config/runtime-config.json` (`evmRpcUrl`, `rpcOverridesByNetwork`)
+- Use `.env` only when overriding with keyed/private provider URLs.
 
 ### 3. Run
 
@@ -77,7 +80,7 @@ npm start
 ```bash
 npm install
 cp env.template .env
-# edit .env to set EVM_PRIVATE_KEY, EVM_RPC_URL, etc.
+# edit .env to set FACILITATOR_EVM_PRIVATE_KEY and tokens/secrets.
 npm run dev
 ```
 
@@ -716,4 +719,3 @@ npm run lint
 ## License
 
 MIT
-
