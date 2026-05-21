@@ -12,10 +12,11 @@ const RB_API_ID = String(process.env.RB_API_ID || "").trim();
 const RB_SETTLEMENT_MODE_OVERRIDE = String(process.env.RB_SETTLEMENT_MODE_OVERRIDE || "")
   .trim()
   .toLowerCase();
-const RB_MAX_PAYMENT_OPTIONS = Number.parseInt(process.env.RB_MAX_PAYMENT_OPTIONS || "8", 10);
 const MERCHANT_PORT = Number.parseInt(process.env.PORT || "4021", 10);
 const PROTECTED_ROUTE_METHOD = "GET";
 const PROTECTED_ROUTE_PATH = "/api/premium";
+const SANDBOX_DEFAULT_MAX_PAYMENT_OPTIONS = 32;
+const LIVE_DEFAULT_MAX_PAYMENT_OPTIONS = 8;
 
 const PLATFORM_BY_ENV = {
   sandbox: {
@@ -31,6 +32,12 @@ const PLATFORM_BY_ENV = {
 } as const;
 
 const platform = PLATFORM_BY_ENV[RB_ENV as keyof typeof PLATFORM_BY_ENV] || PLATFORM_BY_ENV.sandbox;
+const defaultMaxPaymentOptions =
+  RB_ENV === "live" ? LIVE_DEFAULT_MAX_PAYMENT_OPTIONS : SANDBOX_DEFAULT_MAX_PAYMENT_OPTIONS;
+const RB_MAX_PAYMENT_OPTIONS = Number.parseInt(
+  process.env.RB_MAX_PAYMENT_OPTIONS || String(defaultMaxPaymentOptions),
+  10,
+);
 
 if (!RB_API_KEY) {
   console.error("RB_API_KEY is required");
@@ -82,8 +89,11 @@ const start = async () => {
       : undefined,
     paywallAppName: "RailBridge Merchant OS Demo Merchant",
     paywallTestnet: platform.paywallTestnet,
+    sourceNetworkFilter: platform.paywallTestnet ? "testnet_only" : "all",
     autoRefreshMs: 30_000,
-    maxRequirementOptions: Number.isFinite(RB_MAX_PAYMENT_OPTIONS) ? RB_MAX_PAYMENT_OPTIONS : 8,
+    maxRequirementOptions: Number.isFinite(RB_MAX_PAYMENT_OPTIONS)
+      ? RB_MAX_PAYMENT_OPTIONS
+      : defaultMaxPaymentOptions,
     logPrefix: "[merchant-os-demo]",
   });
 
@@ -126,7 +136,12 @@ const start = async () => {
         RB_SETTLEMENT_MODE_OVERRIDE || "auto (use product settlement policy)"
       }`
     );
-    console.log(`Max payment options per challenge: ${Number.isFinite(RB_MAX_PAYMENT_OPTIONS) ? RB_MAX_PAYMENT_OPTIONS : 8}`);
+    console.log(
+      `Max payment options per challenge: ${Number.isFinite(RB_MAX_PAYMENT_OPTIONS) ? RB_MAX_PAYMENT_OPTIONS : defaultMaxPaymentOptions}`
+    );
+    console.log(
+      `Source network filter: ${platform.paywallTestnet ? "testnet_only (sandbox)" : "all"}`
+    );
     console.log("Integration mode: abstracted (merchant does not directly call facilitator verify/settle)");
   });
 

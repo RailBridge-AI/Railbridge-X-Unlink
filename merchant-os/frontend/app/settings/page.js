@@ -1,10 +1,49 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import PlatformShell from "../../components/console/PlatformShell";
 import SyntaxCodeBlock from "../../components/console/SyntaxCodeBlock";
+import {
+  getNetworkInfo,
+  isTestnetNetwork,
+  shouldPreferTestnetsInUi
+} from "../../lib/assetDisplay";
 import { apiWithSession } from "../../lib/platformClient";
 import { useAuthGuard } from "../../lib/useAuthGuard";
+
+const SAME_CHAIN_POLICY_NETWORK = "same_chain";
+const SAME_CHAIN_POLICY_LABEL = "Same as payment source chain (stay on source)";
+
+const PolicyNetworkOptionIcon = ({ network, displayName }) => {
+  if (network === SAME_CHAIN_POLICY_NETWORK) {
+    return (
+      <span className="inline-flex h-5 w-5 items-center justify-center rounded-full border border-slate-300 bg-slate-100 text-[10px] font-semibold text-slate-700">
+        ↔
+      </span>
+    );
+  }
+
+  const networkInfo = getNetworkInfo(network);
+  if (networkInfo.logo) {
+    return (
+      <img
+        src={networkInfo.logo}
+        alt=""
+        className="h-5 w-5 rounded-full object-contain"
+      />
+    );
+  }
+
+  const initials = String(displayName || network || "N")
+    .trim()
+    .slice(0, 2)
+    .toUpperCase();
+  return (
+    <span className="inline-flex h-5 w-5 items-center justify-center rounded-full border border-slate-300 bg-slate-100 text-[10px] font-semibold text-slate-700">
+      {initials}
+    </span>
+  );
+};
 
 const EXPRESS_WEBHOOK_SNIPPET = `import express from "express";
 import { verifyWebhook } from "@railbridge/sdk";
@@ -77,6 +116,12 @@ export default function SettingsPage() {
   const [editingWebhookId, setEditingWebhookId] = useState("");
   const [editWebhookUrl, setEditWebhookUrl] = useState("");
   const [busyWebhookId, setBusyWebhookId] = useState("");
+  const [treasuryPreferredNetwork, setTreasuryPreferredNetwork] = useState("");
+  const [treasuryAutoBridgeEnabled, setTreasuryAutoBridgeEnabled] = useState(true);
+  const [policyBusy, setPolicyBusy] = useState(false);
+  const [showTestnetsOnly, setShowTestnetsOnly] = useState(false);
+  const [policyDropdownOpen, setPolicyDropdownOpen] = useState(false);
+  const policyDropdownRef = useRef(null);
   const currentConsolePrefix = auth?.apiKey ? String(auth.apiKey).slice(0, 16) : "";
 
   const loadSettings = async (currentAuth) => {
@@ -100,10 +145,98 @@ export default function SettingsPage() {
     }
     const params = new URLSearchParams(window.location.search || "");
     const panel = String(params.get("panel") || "").trim().toLowerCase();
-    if (panel === "api_keys" || panel === "webhooks") {
+    if (panel === "api_keys" || panel === "webhooks" || panel === "treasury") {
       setSettingsPanel(panel);
     }
   }, []);
+
+  useEffect(() => {
+    setShowTestnetsOnly(shouldPreferTestnetsInUi());
+  }, []);
+
+  useEffect(() => {
+    if (!settings) {
+      return;
+    }
+    if (settings.policy?.preferredNetwork) {
+      setTreasuryPreferredNetwork(String(settings.policy.preferredNetwork));
+    }
+    setTreasuryAutoBridgeEnabled(Boolean(settings.policy?.autoBridgeEnabled ?? true));
+  }, [settings]);
+
+  const policyChainOptions = useMemo(() => {
+    const chains = Array.isArray(settings?.chains) ? settings.chains : [];
+    const activeChains = chains.filter((chain) => chain?.network && chain.status !== "paused");
+    const visibleChains = showTestnetsOnly
+      ? activeChains.filter((chain) => isTestnetNetwork(chain.network))
+      : activeChains;
+    const sortedChains = [...visibleChains].sort((left, right) => {
+      const leftName = String(left.displayName || getNetworkInfo(left.network).name || left.network);
+      const rightName = String(right.displayName || getNetworkInfo(right.network).name || right.network);
+      return leftName.localeCompare(rightName);
+    });
+    return [
+      {
+        network: SAME_CHAIN_POLICY_NETWORK,
+        displayName: SAME_CHAIN_POLICY_LABEL
+      },
+      ...sortedChains
+    ];
+  }, [settings, showTestnetsOnly]);
+
+  const selectedPolicyOption = useMemo(() => {
+    if (!policyChainOptions.length) {
+      return null;
+    }
+    return (
+      policyChainOptions.find((chain) => chain.network === treasuryPreferredNetwork) ||
+      policyChainOptions[0]
+    );
+  }, [policyChainOptions, treasuryPreferredNetwork]);
+
+  useEffect(() => {
+    if (!policyChainOptions.length) {
+      return;
+    }
+    if (!treasuryPreferredNetwork) {
+      setTreasuryPreferredNetwork(policyChainOptions[0].network);
+      return;
+    }
+    const exists = policyChainOptions.some((chain) => chain.network === treasuryPreferredNetwork);
+    if (!exists) {
+      setTreasuryPreferredNetwork(policyChainOptions[0].network);
+    }
+  }, [policyChainOptions, treasuryPreferredNetwork]);
+
+  useEffect(() => {
+    if (!policyDropdownOpen) {
+      return;
+    }
+
+    const handlePointerDown = (event) => {
+      if (!policyDropdownRef.current) {
+        return;
+      }
+      if (!policyDropdownRef.current.contains(event.target)) {
+        setPolicyDropdownOpen(false);
+      }
+    };
+
+    const handleEscape = (event) => {
+      if (event.key === "Escape") {
+        setPolicyDropdownOpen(false);
+      }
+    };
+
+    document.addEventListener("mousedown", handlePointerDown);
+    document.addEventListener("touchstart", handlePointerDown, { passive: true });
+    window.addEventListener("keydown", handleEscape);
+    return () => {
+      document.removeEventListener("mousedown", handlePointerDown);
+      document.removeEventListener("touchstart", handlePointerDown);
+      window.removeEventListener("keydown", handleEscape);
+    };
+  }, [policyDropdownOpen]);
 
   const copyText = async (id, value) => {
     try {
@@ -359,8 +492,40 @@ export default function SettingsPage() {
     }
   };
 
+  const saveTreasuryPolicy = async (event) => {
+    event.preventDefault();
+    if (!auth) {
+      return;
+    }
+    if (!treasuryPreferredNetwork) {
+      setError("Choose a preferred treasury network first.");
+      return;
+    }
+    setError("");
+    setMessage("");
+    setPolicyBusy(true);
+    try {
+      await apiWithSession({
+        token: auth.token,
+        path: "/v1/onboarding/policy",
+        method: "PATCH",
+        body: {
+          preferredNetwork: treasuryPreferredNetwork,
+          autoBridgeEnabled: treasuryAutoBridgeEnabled
+        }
+      });
+      setMessage("Treasury policy updated.");
+      await loadSettings(auth);
+    } catch (nextError) {
+      setError(nextError.message || "Failed to update treasury policy");
+    } finally {
+      setPolicyBusy(false);
+    }
+  };
+
   const isApiKeysPanel = settingsPanel === "api_keys";
   const isWebhooksPanel = settingsPanel === "webhooks";
+  const isTreasuryPanel = settingsPanel === "treasury";
 
   return (
     <PlatformShell title="Settings" auth={auth} onLogout={logout}>
@@ -420,6 +585,17 @@ export default function SettingsPage() {
               }`}
             >
               Webhooks
+            </button>
+            <button
+              type="button"
+              onClick={() => setSettingsPanel("treasury")}
+              className={`rounded-xl border px-3 py-2 text-left text-sm font-medium transition ${
+                isTreasuryPanel
+                  ? "border-slate-200 bg-white text-rail-800 shadow-sm"
+                  : "border-transparent bg-transparent text-slate-700 hover:border-slate-200 hover:bg-white"
+              }`}
+            >
+              Treasury
             </button>
           </div>
         </section>
@@ -511,7 +687,7 @@ export default function SettingsPage() {
                 ))}
               </ul>
             </>
-          ) : (
+          ) : isWebhooksPanel ? (
             <>
               <h3 className="text-base font-semibold">Webhooks</h3>
               <p className="mt-1 text-xs text-slate-500">
@@ -682,6 +858,100 @@ export default function SettingsPage() {
                   </button>
                 </div>
               </div>
+            </>
+          ) : (
+            <>
+              <h3 className="text-base font-semibold">Treasury Policy</h3>
+              <p className="mt-1 text-xs text-slate-500">
+                Set the default destination network for cross-chain products when no destination is specified.
+              </p>
+              <p className="mt-1 text-xs text-slate-500">
+                Product default is now: accept any supported chain and keep funds on the source chain.
+              </p>
+              <p className="mt-1 text-xs text-slate-500">
+                Choose "{SAME_CHAIN_POLICY_LABEL}" if you want cross-chain products without explicit destination to stay on source chain.
+              </p>
+              <form className="mt-2 grid gap-2" onSubmit={saveTreasuryPolicy}>
+                <label className="grid gap-1 text-xs text-slate-600">
+                  Preferred treasury network
+                  <div className="relative" ref={policyDropdownRef}>
+                    <button
+                      type="button"
+                      className="flex w-full items-center justify-between rounded-xl border border-slate-300 bg-white px-3 py-2 text-left text-sm"
+                      onClick={() => setPolicyDropdownOpen((open) => !open)}
+                      disabled={!policyChainOptions.length}
+                    >
+                      {selectedPolicyOption ? (
+                        <span className="inline-flex items-center gap-2">
+                          <PolicyNetworkOptionIcon
+                            network={selectedPolicyOption.network}
+                            displayName={selectedPolicyOption.displayName}
+                          />
+                          <span>{selectedPolicyOption.displayName}</span>
+                        </span>
+                      ) : (
+                        <span className="text-slate-500">Select network</span>
+                      )}
+                      <span className="text-slate-500">{policyDropdownOpen ? "▴" : "▾"}</span>
+                    </button>
+                    {policyDropdownOpen ? (
+                      <div className="absolute z-30 mt-1 max-h-64 w-full overflow-auto rounded-xl border border-slate-300 bg-white p-1 shadow-xl">
+                        {policyChainOptions.map((chain) => {
+                          const isSelected = chain.network === treasuryPreferredNetwork;
+                          return (
+                            <button
+                              key={`policy-network-option-${chain.network}`}
+                              type="button"
+                              className={`flex w-full items-center justify-between rounded-lg px-2 py-1.5 text-left text-sm ${
+                                isSelected
+                                  ? "bg-rail-50 text-rail-800"
+                                  : "text-slate-700 hover:bg-slate-100"
+                              }`}
+                              onClick={() => {
+                                setTreasuryPreferredNetwork(chain.network);
+                                setPolicyDropdownOpen(false);
+                              }}
+                            >
+                              <span className="inline-flex items-center gap-2">
+                                <PolicyNetworkOptionIcon
+                                  network={chain.network}
+                                  displayName={chain.displayName}
+                                />
+                                <span>{chain.displayName}</span>
+                              </span>
+                              {isSelected ? <span className="text-xs font-semibold">Selected</span> : null}
+                            </button>
+                          );
+                        })}
+                      </div>
+                    ) : null}
+                  </div>
+                </label>
+                <label className="mt-1 inline-flex items-center gap-2 text-xs text-slate-600">
+                  <input
+                    type="checkbox"
+                    checked={treasuryAutoBridgeEnabled}
+                    onChange={(event) => setTreasuryAutoBridgeEnabled(event.target.checked)}
+                  />
+                  Auto bridge enabled
+                </label>
+                <button
+                  className="rounded-xl border border-rail-700 bg-gradient-to-br from-rail-700 to-rail-800 px-3 py-2 text-sm font-semibold text-white transition hover:brightness-105 disabled:opacity-60"
+                  disabled={policyBusy || !policyChainOptions.length}
+                >
+                  {policyBusy ? "Saving..." : "Save treasury policy"}
+                </button>
+              </form>
+              {showTestnetsOnly ? (
+                <p className="mt-2 text-[11px] text-slate-500">
+                  Local demo mode: showing testnets first.
+                </p>
+              ) : null}
+              {!policyChainOptions.length ? (
+                <p className="mt-2 rounded border border-amber-200 bg-amber-50 px-2 py-1 text-xs text-amber-800">
+                  No active chain available. Ensure chain catalog sync is running.
+                </p>
+              ) : null}
             </>
           )}
         </section>

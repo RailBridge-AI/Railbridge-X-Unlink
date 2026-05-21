@@ -1,4 +1,5 @@
 import {
+  getPolicy,
   getTenantProfile,
   getTimeline,
   listApiKeys,
@@ -63,6 +64,7 @@ export const buildOnboardingChecklist = (merchantId, accountId) => {
 
 export const buildTenantSettingsPayload = (merchantId, accountId) => {
   const profile = getTenantProfile(merchantId, accountId);
+  const policy = getPolicy(merchantId, accountId);
   return {
     merchantId,
     accountId,
@@ -77,6 +79,7 @@ export const buildTenantSettingsPayload = (merchantId, accountId) => {
     apiKeys: listApiKeys(merchantId, accountId),
     webhooks: listWebhookEndpoints(merchantId, accountId),
     chains: listChainCatalog(),
+    policy: policy || null,
     checklist: buildOnboardingChecklist(merchantId, accountId)
   };
 };

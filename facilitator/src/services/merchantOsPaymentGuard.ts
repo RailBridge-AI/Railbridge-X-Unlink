@@ -37,6 +37,7 @@ const PREFERRED_REQUIREMENT_NETWORKS: Array<`${string}:${string}`> = [
 
 const SUPPORTED_SETTLEMENT_MODES = new Set(["same_chain", "cross_chain"]);
 const FACILITATOR_SUPPORTED_ENDPOINT = "/supported";
+const FACILITATOR_CHAINS_ENDPOINT = "/chains";
 
 export type MerchantOsPaymentGuardConfig = {
   facilitatorUrl: string;
@@ -53,6 +54,7 @@ export type MerchantOsPaymentGuardConfig = {
   paywallTestnet?: boolean;
   autoRefreshMs?: number;
   supportedSourceNetworks?: Array<`${string}:${string}`>;
+  sourceNetworkFilter?: "all" | "testnet_only" | "mainnet_only";
   maxRequirementOptions?: number;
   logPrefix?: string;
 };
@@ -196,6 +198,40 @@ const fetchFacilitatorSupportedNetworks = async (
   }
 };
 
+type FacilitatorChainRecord = {
+  network: `${string}:${string}`;
+  isTestnet: boolean;
+};
+
+const fetchFacilitatorChains = async (
+  facilitatorUrl: string,
+): Promise<FacilitatorChainRecord[]> => {
+  try {
+    const response = await fetch(`${facilitatorUrl}${FACILITATOR_CHAINS_ENDPOINT}`);
+    if (!response.ok) {
+      return [];
+    }
+    const body = (await response.json().catch(() => ({}))) as {
+      items?: Array<{ network?: string; isTestnet?: unknown; status?: unknown }>;
+    };
+    if (!Array.isArray(body.items)) {
+      return [];
+    }
+    return body.items
+      .filter(
+        (item): item is { network: `${string}:${string}`; isTestnet?: unknown; status?: unknown } =>
+          typeof item?.network === "string" && item.network.includes(":"),
+      )
+      .filter((item) => String(item.status || "active").toLowerCase() !== "paused")
+      .map((item) => ({
+        network: item.network,
+        isTestnet: Boolean(item.isTestnet),
+      }));
+  } catch {
+    return [];
+  }
+};
+
 const clampMaxRequirementOptions = (value: number | undefined) => {
   if (!Number.isFinite(value)) {
     return DEFAULT_MAX_REQUIREMENT_OPTIONS;
@@ -242,13 +278,41 @@ export const createMerchantOsPaymentGuard = async (
     : null;
   const logPrefix = config.logPrefix || "[railbridge-sdk]";
   const maxRequirementOptions = clampMaxRequirementOptions(config.maxRequirementOptions);
+  const sourceNetworkFilter = config.sourceNetworkFilter || "all";
 
   const routes: Record<string, any> = {};
   let currentRouteInfo: RouteInfo | null = null;
-  const supportedSourceNetworks =
+  const fetchedSupportedNetworks =
     config.supportedSourceNetworks && config.supportedSourceNetworks.length
       ? config.supportedSourceNetworks
       : await fetchFacilitatorSupportedNetworks(facilitatorUrl);
+  const facilitatorChains = await fetchFacilitatorChains(facilitatorUrl);
+  const filteredSourceNetworkSet =
+    sourceNetworkFilter === "all"
+      ? null
+      : new Set(
+          facilitatorChains
+            .filter((chain) =>
+              sourceNetworkFilter === "testnet_only" ? chain.isTestnet : !chain.isTestnet,
+            )
+            .map((chain) => chain.network),
+        );
+  const supportedSourceNetworks =
+    filteredSourceNetworkSet && filteredSourceNetworkSet.size
+      ? fetchedSupportedNetworks.filter((network) => filteredSourceNetworkSet.has(network))
+      : fetchedSupportedNetworks;
+  if (filteredSourceNetworkSet && !filteredSourceNetworkSet.size) {
+    console.warn(`${logPrefix} unable to enforce source network filter`, {
+      sourceNetworkFilter,
+      reason: "facilitator /chains metadata unavailable",
+    });
+  } else if (filteredSourceNetworkSet && supportedSourceNetworks.length !== fetchedSupportedNetworks.length) {
+    console.info(`${logPrefix} source network filter applied`, {
+      sourceNetworkFilter,
+      before: fetchedSupportedNetworks.length,
+      after: supportedSourceNetworks.length,
+    });
+  }
   const supportedSourceNetworkSet = new Set(supportedSourceNetworks);
 
   const facilitatorClient = new LoggingFacilitatorClient({

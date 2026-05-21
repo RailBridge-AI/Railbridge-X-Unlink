@@ -117,7 +117,7 @@ const cfg = {
   verifySettlement: parseBoolean(existingMerchantPaymentConfig.verifySettlement, true),
   verifyTimeoutMs: parseIntValue(existingMerchantPaymentConfig.verifyTimeoutMs, 45000),
   clientPrivateKey: String(process.env.CLIENT_PRIVATE_KEY || "").trim() as `0x${string}`,
-  verifyApiKey: String(process.env.RB_VERIFY_API_KEY || "").trim(),
+  merchantApiKey: String(process.env.RB_API_KEY || "").trim(),
 };
 
 const isJsonObject = (value: unknown): value is Record<string, unknown> =>
@@ -282,7 +282,7 @@ const getSettlementIds = async (): Promise<Set<string>> => {
   const timeline = await requestJson<{ items: SettlementItem[] }>({
     url: `${cfg.merchantOsUrl}/v1/merchants/${resolvedContext.merchantId}/settlements`,
     headers: {
-      "x-railbridge-api-key": cfg.verifyApiKey,
+      "x-railbridge-api-key": cfg.merchantApiKey,
     },
   });
   const items = Array.isArray(timeline.items) ? timeline.items : [];
@@ -295,7 +295,7 @@ const waitForSettlement = async (beforeIds: Set<string>): Promise<SettlementItem
     const timeline = await requestJson<{ items: SettlementItem[] }>({
       url: `${cfg.merchantOsUrl}/v1/merchants/${resolvedContext.merchantId}/settlements`,
       headers: {
-        "x-railbridge-api-key": cfg.verifyApiKey,
+        "x-railbridge-api-key": cfg.merchantApiKey,
       },
     });
     const items = Array.isArray(timeline.items) ? timeline.items : [];
@@ -318,16 +318,16 @@ const main = async () => {
   await waitForHealth(cfg.facilitatorUrl, 15_000);
   await waitForHealth(cfg.merchantUrl, 15_000);
 
-  if (cfg.verifySettlement && !cfg.verifyApiKey) {
-    console.warn("RB_VERIFY_API_KEY is not set; settlement verification will be skipped.");
+  if (cfg.verifySettlement && !cfg.merchantApiKey) {
+    console.warn("RB_API_KEY is not set; settlement verification will be skipped.");
   }
 
-  const shouldVerify = cfg.verifySettlement && Boolean(cfg.verifyApiKey);
+  const shouldVerify = cfg.verifySettlement && Boolean(cfg.merchantApiKey);
 
   if (shouldVerify) {
-    resolvedContext = await resolveSdkContext(cfg.verifyApiKey);
+    resolvedContext = await resolveSdkContext(cfg.merchantApiKey);
     const merchantOsRoute = await resolveRouteFromMerchantOs({
-      apiKey: cfg.verifyApiKey,
+      apiKey: cfg.merchantApiKey,
       merchantId: resolvedContext.merchantId,
     });
     if (merchantOsRoute) {
@@ -354,7 +354,7 @@ const main = async () => {
 
   if (!shouldVerify) {
     console.log(
-      "Skipped Merchant OS settlement verification. Set RB_VERIFY_API_KEY to enable it.",
+      "Skipped Merchant OS settlement verification. Set RB_API_KEY to enable it.",
     );
     return;
   }

@@ -248,7 +248,7 @@ export default function OnboardingPage() {
               </span>
             </div>
             <p className="mt-1 text-xs text-slate-500">
-              Define method, path, and USDC price. RailBridge defaults to accepting from any supported network and auto-settlement.
+              Define method, path, and USDC price. RailBridge defaults to accepting from any supported network and keeping funds on the source chain.
             </p>
             <Link className="mt-2 inline-flex rounded-lg border border-slate-300 bg-white px-2.5 py-1.5 text-xs hover:bg-slate-100" href="/products">
               Open Products

@@ -56,6 +56,7 @@ import {
   revokeApiKeyById,
   setChainCatalogStatus,
   touchApiKeyUsed,
+  upsertPolicy,
   updateApiKeyMetadata,
   updateApiProduct,
   updateConsolidationStatus,
@@ -1269,6 +1270,50 @@ const server = createServer(async (req, res) => {
       return sendJson(res, 200, buildTenantSettingsPayload(session.merchantId, session.accountId));
     }
 
+    if (method === "PATCH" && pathname === "/v1/onboarding/policy") {
+      const session = requireSession(req, res);
+      if (!session) {
+        return;
+      }
+      if (session.role !== "admin" && session.role !== "finance") {
+        return sendJson(res, 403, { error: "Forbidden: only admin/finance can update treasury policy" });
+      }
+
+      const body = await parseJsonBody(req);
+      const currentPolicy = getPolicy(session.merchantId, session.accountId);
+      const nextPreferredNetwork =
+        body.preferredNetwork !== undefined
+          ? String(body.preferredNetwork || "").trim()
+          : String(currentPolicy?.preferredNetwork || "").trim();
+      if (!nextPreferredNetwork) {
+        return sendJson(res, 400, { error: "preferredNetwork is required" });
+      }
+
+      if (nextPreferredNetwork !== "same_chain") {
+        const targetChain = getChainCatalogByNetwork(nextPreferredNetwork);
+        if (!targetChain) {
+          return sendJson(res, 400, { error: "preferredNetwork is not in the active chain catalog" });
+        }
+        if (targetChain.status === "paused") {
+          return sendJson(res, 400, { error: "preferredNetwork is paused by operations" });
+        }
+      }
+
+      const nextAutoBridgeEnabled =
+        body.autoBridgeEnabled !== undefined
+          ? Boolean(body.autoBridgeEnabled)
+          : Boolean(currentPolicy?.autoBridgeEnabled ?? true);
+      const updatedPolicy = upsertPolicy(session.merchantId, session.accountId, {
+        preferredNetwork: nextPreferredNetwork,
+        autoBridgeEnabled: nextAutoBridgeEnabled
+      });
+
+      return sendJson(res, 200, {
+        success: true,
+        policy: updatedPolicy
+      });
+    }
+
     if (method === "PATCH" && pathname === "/v1/onboarding/profile") {
       const session = requireSession(req, res);
       if (!session) {
@@ -1566,9 +1611,9 @@ const server = createServer(async (req, res) => {
       let destinationNetwork = body.destinationNetwork ? String(body.destinationNetwork).trim() : null;
       const settlementModeInput = String(body.settlementMode || "").trim().toLowerCase();
       const settlementMode =
-        settlementModeInput === "same_chain"
-          ? "same_chain"
-          : "cross_chain";
+        settlementModeInput === "cross_chain"
+          ? "cross_chain"
+          : "same_chain";
       if (settlementMode === "same_chain") {
         destinationNetwork = null;
       }
@@ -2005,9 +2050,9 @@ const server = createServer(async (req, res) => {
 
         const settlementModeInput = String(body.settlementMode || "").trim().toLowerCase();
         const settlementMode =
-          settlementModeInput === "same_chain"
-            ? "same_chain"
-            : "cross_chain";
+          settlementModeInput === "cross_chain"
+            ? "cross_chain"
+            : "same_chain";
         let destinationNetwork = body.destinationNetwork ? String(body.destinationNetwork).trim() : null;
         if (settlementMode === "same_chain") {
           destinationNetwork = null;

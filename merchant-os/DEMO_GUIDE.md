@@ -440,7 +440,7 @@ npm --prefix facilitator run test:accept-payment-existing-merchant-os
 Optional settlement verification in split mode:
 
 ```bash
-RB_VERIFY_API_KEY=<merchant_api_key> \
+RB_API_KEY=<merchant_api_key> \
 npm --prefix facilitator run test:accept-payment-existing-merchant-os
 ```
 

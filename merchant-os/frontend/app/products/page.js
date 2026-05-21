@@ -22,7 +22,7 @@ const defaultForm = {
   amountUsdc: "0.01",
   sourceNetwork: SOURCE_NETWORK_ANY,
   destinationNetwork: "",
-  settlementMode: "cross_chain"
+  settlementMode: "same_chain"
 };
 
 const isSourceAny = (network) => String(network || "").trim().toLowerCase() === SOURCE_NETWORK_ANY;
@@ -77,7 +77,7 @@ export default function ProductsPage() {
     amountUsdc: "",
     sourceNetwork: SOURCE_NETWORK_ANY,
     destinationNetwork: "",
-    settlementMode: "cross_chain",
+    settlementMode: "same_chain",
     enabled: true
   });
   const [editAdvancedRouting, setEditAdvancedRouting] = useState(false);
@@ -151,7 +151,7 @@ export default function ProductsPage() {
     }
 
     const sourceNetwork = advancedRouting ? form.sourceNetwork : SOURCE_NETWORK_ANY;
-    const settlementMode = advancedRouting ? form.settlementMode : "cross_chain";
+    const settlementMode = advancedRouting ? form.settlementMode : "same_chain";
     const destinationNetwork =
       settlementMode === "cross_chain" && advancedRouting ? form.destinationNetwork || null : null;
 
@@ -186,7 +186,7 @@ export default function ProductsPage() {
   const startEdit = (item) => {
     const hasCustomRouting =
       !isSourceAny(item.sourceNetwork) ||
-      item.settlementMode === "same_chain" ||
+      item.settlementMode === "cross_chain" ||
       Boolean(item.destinationNetwork);
     setEditingProductId(item.id);
     setEditAdvancedRouting(hasCustomRouting);
@@ -198,7 +198,7 @@ export default function ProductsPage() {
       amountUsdc: baseUnitsToUsdcInput(item.amount),
       sourceNetwork: item.sourceNetwork || SOURCE_NETWORK_ANY,
       destinationNetwork: item.destinationNetwork || "",
-      settlementMode: item.settlementMode || "cross_chain",
+      settlementMode: item.settlementMode || "same_chain",
       enabled: Boolean(item.enabled)
     });
   };
@@ -213,7 +213,7 @@ export default function ProductsPage() {
       amountUsdc: "",
       sourceNetwork: SOURCE_NETWORK_ANY,
       destinationNetwork: "",
-      settlementMode: "cross_chain",
+      settlementMode: "same_chain",
       enabled: true
     });
     setEditAdvancedRouting(false);
@@ -228,11 +228,10 @@ export default function ProductsPage() {
     setActionBusy(true);
     try {
       const sourceNetwork = editAdvancedRouting ? editForm.sourceNetwork : SOURCE_NETWORK_ANY;
-      const settlementMode = editAdvancedRouting ? editForm.settlementMode : "cross_chain";
-      const destinationNetwork =
-        settlementMode === "cross_chain" && editAdvancedRouting
-          ? editForm.destinationNetwork || null
-          : null;
+      const settlementMode = editAdvancedRouting
+        ? editForm.settlementMode
+        : editForm.settlementMode || "same_chain";
+      const destinationNetwork = settlementMode === "cross_chain" ? editForm.destinationNetwork || null : null;
 
       await apiWithMerchantKey({
         apiKey: auth.apiKey,
@@ -294,7 +293,7 @@ export default function ProductsPage() {
       <form className="grid gap-2 rounded-2xl border border-slate-200 bg-slate-50 p-3.5" onSubmit={createProduct}>
         <p className="text-base font-semibold">Create Product</p>
         <p className="text-xs text-slate-500">
-          Simplicity default: accept USDC from any active supported network and auto-settle to your treasury policy.
+          Simplicity default: accept USDC from any active supported network and keep funds on the source chain.
         </p>
 
         <input
@@ -383,8 +382,8 @@ export default function ProductsPage() {
                   }))
                 }
               >
-                <option value="cross_chain">Auto-move to treasury network</option>
                 <option value="same_chain">Keep funds where payment arrives</option>
+                <option value="cross_chain">Auto-move to treasury network</option>
               </select>
             </label>
 
@@ -536,8 +535,8 @@ export default function ProductsPage() {
                           }))
                         }
                       >
-                        <option value="cross_chain">Auto-move to treasury network</option>
                         <option value="same_chain">Keep funds where payment arrives</option>
+                        <option value="cross_chain">Auto-move to treasury network</option>
                       </select>
                     </label>
                     <label className="grid gap-1 text-xs text-slate-600">

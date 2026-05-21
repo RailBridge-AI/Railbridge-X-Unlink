@@ -121,10 +121,19 @@ export const resolvePaymentRequirementsForTenant = ({
 
   let payTo = null;
   let crossChain = null;
+  const policyPreferredNetwork = String(getPolicy(merchantId, accountId)?.preferredNetwork || "").trim();
+  const usePolicySameChainDefault =
+    effectiveSettlementMode === "cross_chain" &&
+    !apiProduct.destinationNetwork &&
+    policyPreferredNetwork === "same_chain";
   if (effectiveSettlementMode === "cross_chain") {
+    if (usePolicySameChainDefault) {
+      payTo = null;
+      crossChain = null;
+    } else {
     const destinationNetwork =
       apiProduct.destinationNetwork ||
-      getPolicy(merchantId, accountId)?.preferredNetwork ||
+      policyPreferredNetwork ||
       sourceCandidates[0]?.network;
     if (!destinationNetwork) {
       return {
@@ -169,7 +178,9 @@ export const resolvePaymentRequirementsForTenant = ({
       destinationAsset,
       destinationPayTo: destinationWallet.address
     };
+    }
   }
+  const shouldRouteViaFacilitator = effectiveSettlementMode === "cross_chain" && Boolean(crossChain) && Boolean(payTo);
 
   const description = apiProduct.description || `${apiProduct.apiName} (${apiProduct.method} ${apiProduct.path})`;
   const requirements = sourceCandidates.map((candidate) => {
@@ -193,7 +204,7 @@ export const resolvePaymentRequirementsForTenant = ({
           accountId
         }
       },
-      payTo: effectiveSettlementMode === "cross_chain" ? payTo : candidate.wallet.address,
+      payTo: shouldRouteViaFacilitator ? payTo : candidate.wallet.address,
       extra: {
         apiId: apiProduct.apiId,
         apiName: apiProduct.apiName,
@@ -218,7 +229,7 @@ export const resolvePaymentRequirementsForTenant = ({
     payload: {
       merchantId,
       accountId,
-      settlementMode: effectiveSettlementMode,
+      settlementMode: shouldRouteViaFacilitator ? "cross_chain" : "same_chain",
       apiProduct,
       requirement: requirements[0],
       requirements,
