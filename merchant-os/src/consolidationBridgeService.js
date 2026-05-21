@@ -25,8 +25,14 @@ const TRANSIENT_ERROR_PATTERNS = [
   "gateway"
 ];
 const EXTRA_RPC_URLS_BY_CAIP2 = {
+  "eip155:84532": [
+    "https://sepolia.base.org",
+    "https://base-sepolia-rpc.publicnode.com",
+    "https://base-sepolia.drpc.org"
+  ],
   "eip155:421614": [
     "https://arbitrum-sepolia-rpc.publicnode.com",
+    "https://sepolia-rollup.arbitrum.io/rpc",
     "https://arbitrum-sepolia.drpc.org"
   ],
   "eip155:11155111": [
@@ -169,9 +175,117 @@ const pushUnique = (set, items) => {
 
 const transportRetryDelay = ({ count }) => Math.min(2000, 350 * (count + 1));
 
-const toCaip2 = (chain) => {
-  const id = chain && Number.isInteger(chain.id) ? chain.id : null;
-  return id === null ? null : `eip155:${id}`;
+export const resolveBridgeKitChainCaip2 = (chain) => {
+  const chainId =
+    chain && Number.isInteger(chain.chainId)
+      ? chain.chainId
+      : chain && Number.isInteger(chain.id)
+        ? chain.id
+        : null;
+  return chainId === null ? null : `eip155:${chainId}`;
+};
+
+/** RPC URLs advertised by Circle Bridge Kit for a chain (`rpcEndpoints` on getSupportedChains()). */
+export const extractBridgeKitRpcUrls = (chain) => {
+  const urls = new Set();
+  pushUnique(urls, chain?.rpcEndpoints);
+  pushUnique(urls, chain?.rpcUrls?.default?.http);
+  pushUnique(urls, chain?.rpcUrls?.public?.http);
+  return Array.from(urls);
+};
+
+/**
+ * Merge RPC candidates for bridge transports.
+ * Priority: Bridge Kit endpoints first, then runtime/catalog overrides, then local fallbacks.
+ */
+export const collectRpcUrlsForBridgeChain = (chain, rpcMaps = {}, options = {}) => {
+  const ordered = [];
+  const seen = new Set();
+  const append = (candidates) => {
+    (Array.isArray(candidates) ? candidates : []).forEach((candidate) => {
+      const url = String(candidate || "").trim();
+      if (!url.startsWith("http://") && !url.startsWith("https://")) {
+        return;
+      }
+      if (seen.has(url)) {
+        return;
+      }
+      seen.add(url);
+      ordered.push(url);
+    });
+  };
+
+  const caip2 = resolveBridgeKitChainCaip2(chain);
+  const rpcUrlsByNetwork = rpcMaps.rpcUrlsByNetwork || {};
+  const kitRpc =
+    options.bridgeKitRpcUrls ||
+    extractBridgeKitRpcUrls(chain);
+
+  append(kitRpc);
+  append(caip2 ? rpcUrlsByNetwork[caip2] : null);
+  append(caip2 ? EXTRA_RPC_URLS_BY_CAIP2[caip2] : null);
+
+  return ordered;
+};
+
+const normalizeLookupKey = (value) => String(value || "").trim().toLowerCase();
+
+const parseBigIntLike = (value) => {
+  if (typeof value === "bigint") {
+    return value;
+  }
+  if (typeof value === "number" && Number.isFinite(value) && Number.isInteger(value)) {
+    return BigInt(value);
+  }
+  if (typeof value === "string" && /^\d+$/.test(value.trim())) {
+    return BigInt(value.trim());
+  }
+  return null;
+};
+
+export const parseEstimatedGasFeeWei = (fees) => {
+  if (!fees || typeof fees !== "object") {
+    return null;
+  }
+  const fromFee = parseBigIntLike(fees.fee);
+  if (fromFee !== null && fromFee >= 0n) {
+    return fromFee;
+  }
+  const gas = parseBigIntLike(fees.gas);
+  const gasPrice = parseBigIntLike(fees.gasPrice);
+  if (gas !== null && gasPrice !== null && gas >= 0n && gasPrice >= 0n) {
+    return gas * gasPrice;
+  }
+  return null;
+};
+
+export const buildBridgeKitGasEstimateMap = ({ gasFees, resolveNetwork }) => {
+  const feesByNetwork = new Map();
+
+  (Array.isArray(gasFees) ? gasFees : []).forEach((entry) => {
+    const network = resolveNetwork?.(entry?.blockchain);
+    const feeWei = parseEstimatedGasFeeWei(entry?.fees);
+    if (!network || feeWei === null || feeWei < 0n) {
+      return;
+    }
+
+    const current = feesByNetwork.get(network) || {
+      network,
+      estimatedFeeWei: 0n,
+      tokenSymbol: String(entry?.token || "").trim() || null,
+      stepNames: []
+    };
+    current.estimatedFeeWei += feeWei;
+    if (typeof entry?.name === "string" && entry.name.trim()) {
+      current.stepNames.push(entry.name.trim());
+    }
+    if (!current.tokenSymbol && typeof entry?.token === "string" && entry.token.trim()) {
+      current.tokenSymbol = entry.token.trim();
+    }
+    feesByNetwork.set(network, current);
+  });
+
+  return feesByNetwork;
 };
 
 export class ConsolidationBridgeError extends Error {
@@ -186,6 +300,9 @@ export class ConsolidationBridgeService {
   constructor() {
     this.kit = new BridgeKit();
     this.chainNameByNetwork = new Map();
+    this.networkByChainLookup = new Map();
+    this.bridgeKitChainByNetwork = new Map();
+    this.bridgeKitRpcUrlsByNetwork = new Map();
     this.rpcTimeoutMs = Math.max(
       1000,
       Number(config.consolidationBridgeRpcTimeoutMs || DEFAULT_RPC_TIMEOUT_MS)
@@ -202,6 +319,7 @@ export class ConsolidationBridgeService {
       0,
       Number(config.consolidationBridgeRetryBackoffMs || DEFAULT_RETRY_BACKOFF_MS)
     );
+    this.bridgeLocks = new Map();
 
     const supportedEvmChains = this.kit.getSupportedChains({ chainType: "evm" });
     supportedEvmChains.forEach((chain) => {
@@ -209,7 +327,20 @@ export class ConsolidationBridgeService {
         return;
       }
       const caip2 = `eip155:${chain.chainId}`;
-      this.chainNameByNetwork.set(caip2, String(chain.chain));
+      const chainName = String(chain.chain || "").trim();
+      const displayName = String(chain.name || "").trim();
+      const kitRpcUrls = extractBridgeKitRpcUrls(chain);
+      this.bridgeKitChainByNetwork.set(caip2, chain);
+      if (kitRpcUrls.length) {
+        this.bridgeKitRpcUrlsByNetwork.set(caip2, kitRpcUrls);
+      }
+      this.chainNameByNetwork.set(caip2, chainName);
+      if (chainName) {
+        this.networkByChainLookup.set(normalizeLookupKey(chainName), caip2);
+      }
+      if (displayName) {
+        this.networkByChainLookup.set(normalizeLookupKey(displayName), caip2);
+      }
     });
   }
 
@@ -217,21 +348,47 @@ export class ConsolidationBridgeService {
     return this.chainNameByNetwork.has(network);
   }
 
-  rpcUrlsForChain(chain) {
-    const urls = new Set();
-    const caip2 = toCaip2(chain);
-    pushUnique(urls, caip2 ? config.rpcUrlsByNetwork?.[caip2] : null);
-    if (caip2 && typeof config.rpcByNetwork?.[caip2] === "string") {
-      urls.add(config.rpcByNetwork[caip2].trim());
+  getBridgeKitChain(network) {
+    return this.bridgeKitChainByNetwork.get(network) || null;
+  }
+
+  getBridgeKitRpcUrls(network) {
+    const cached = this.bridgeKitRpcUrlsByNetwork.get(network);
+    if (cached?.length) {
+      return [...cached];
     }
-    pushUnique(urls, caip2 ? EXTRA_RPC_URLS_BY_CAIP2[caip2] : null);
-    pushUnique(urls, chain?.rpcUrls?.default?.http);
-    pushUnique(urls, chain?.rpcUrls?.public?.http);
-    return Array.from(urls);
+    return extractBridgeKitRpcUrls(this.getBridgeKitChain(network));
+  }
+
+  rpcUrlsForNetwork(network) {
+    const chain = this.getBridgeKitChain(network);
+    return collectRpcUrlsForBridgeChain(chain || {}, {
+      rpcUrlsByNetwork: config.rpcUrlsByNetwork,
+      rpcByNetwork: config.rpcByNetwork
+    }, {
+      bridgeKitRpcUrls: this.getBridgeKitRpcUrls(network)
+    });
+  }
+
+  rpcUrlsForChain(chain) {
+    const caip2 = resolveBridgeKitChainCaip2(chain);
+    return collectRpcUrlsForBridgeChain(chain, {
+      rpcUrlsByNetwork: config.rpcUrlsByNetwork,
+      rpcByNetwork: config.rpcByNetwork
+    }, {
+      bridgeKitRpcUrls: caip2 ? this.getBridgeKitRpcUrls(caip2) : extractBridgeKitRpcUrls(chain)
+    });
   }
 
   transportForChain(chain) {
     const urls = this.rpcUrlsForChain(chain);
+    const caip2 = resolveBridgeKitChainCaip2(chain);
+    if (!urls.length) {
+      console.warn("[merchant-os] consolidation bridge has no RPC URLs for chain", {
+        caip2,
+        chainName: chain?.chain || chain?.name || null
+      });
+    }
     const buildHttp = (url) =>
       http(url, {
         timeout: this.rpcTimeoutMs,
@@ -248,11 +405,9 @@ export class ConsolidationBridgeService {
     if (urls.length === 1) {
       return buildHttp(urls[0]);
     }
-    return http(undefined, {
-      timeout: this.rpcTimeoutMs,
-      retryCount: this.rpcRetryCount,
-      retryDelay: transportRetryDelay
-    });
+    throw new Error(
+      `No RPC URLs configured for bridge chain ${caip2 || chain?.chain || "unknown"}`
+    );
   }
 
   createAdapter(privateKey) {
@@ -272,48 +427,30 @@ export class ConsolidationBridgeService {
     });
   }
 
-  async runBridgeWithRetry({ bridgeParams, retryContext }) {
-    let result = await this.kit.bridge(bridgeParams);
-    let lastRetryError = null;
+  resolveNetworkForBlockchain(blockchain) {
+    const fromChainId = blockchain && Number.isInteger(blockchain.chainId)
+      ? `eip155:${blockchain.chainId}`
+      : null;
+    if (fromChainId && this.chainNameByNetwork.has(fromChainId)) {
+      return fromChainId;
+    }
 
-    for (let attempt = 1; result?.state === "error" && attempt <= this.retryAttempts; attempt += 1) {
-      const shouldRetry = isLikelyTransientError(result, lastRetryError || "");
-      if (!shouldRetry) {
-        break;
-      }
-
-      if (attempt > 1) {
-        await sleep(this.retryBackoffMs * attempt);
-      }
-      try {
-        result = await this.kit.retry(result, retryContext);
-      } catch (error) {
-        const message = error instanceof Error ? error.message : String(error);
-        lastRetryError = message;
-        const lowered = message.toLowerCase();
-        const blockedByUserAction =
-          lowered.includes("requires user action") ||
-          lowered.includes("not supported") ||
-          lowered.includes("not retryable");
-        if (blockedByUserAction) {
-          break;
-        }
+    const lookupCandidates = [
+      normalizeLookupKey(blockchain?.chain),
+      normalizeLookupKey(blockchain?.name),
+      normalizeLookupKey(blockchain?.title)
+    ].filter(Boolean);
+    for (const candidate of lookupCandidates) {
+      const network = this.networkByChainLookup.get(candidate);
+      if (network) {
+        return network;
       }
     }
 
-    if (result?.state === "error" && isLikelyTransientError(result, lastRetryError || "")) {
-      await sleep(this.retryBackoffMs);
-      const rerun = await this.kit.bridge(bridgeParams);
-      if (rerun?.state !== "error") {
-        return { result: rerun, lastRetryError };
-      }
-      result = rerun;
-    }
-
-    return { result, lastRetryError };
+    return null;
   }
 
-  async bridge({
+  buildBridgeContext({
     sourceNetwork,
     destinationNetwork,
     destinationAddress,
@@ -353,66 +490,184 @@ export class ConsolidationBridgeService {
     const destinationAdapter = this.createAdapter(normalizedDestinationPrivateKey);
     const sourceSignerAddress = privateKeyToAccount(normalizedSourcePrivateKey).address;
     const destinationSignerAddress = privateKeyToAccount(normalizedDestinationPrivateKey).address;
-
-    const bridgeParams = {
-      from: {
-        adapter: sourceAdapter,
-        chain: fromChain
-      },
-      to: {
-        adapter: destinationAdapter,
-        chain: toChain,
-        recipientAddress: recipient
-      },
-      amount: toHumanReadableUsdc(amount)
-    };
-    const retryContext = {
-      from: {
-        adapter: sourceAdapter,
-        chain: fromChain
-      },
-      to: {
-        adapter: destinationAdapter,
-        chain: toChain
-      }
-    };
-    const { result, lastRetryError } = await this.runBridgeWithRetry({
-      bridgeParams,
-      retryContext
-    });
-
-    if (result?.state === "error") {
-      const { stepName, detail } = describeFailedStep(result);
-      const failedStep = getFailedStep(result);
-      const hashes = parseBridgeTxHashes(result);
-      const retrySuffix = lastRetryError ? ` | retry: ${lastRetryError}` : "";
-      throw new ConsolidationBridgeError(`Bridge failed at ${stepName}: ${detail}${retrySuffix}`, {
-        stepName,
-        detail,
-        sourceTxHash: hashes.bridgeTxHash || failedStep?.txHash || null,
-        bridgeTxHash: hashes.bridgeTxHash || failedStep?.txHash || null,
-        destinationTxHash: hashes.destinationTxHash || null,
-        failedStepTxHash: failedStep?.txHash || null,
-        failedStepExplorerUrl: failedStep?.explorerUrl || null
-      });
-    }
-
-    const { bridgeTxHash, destinationTxHash } = parseBridgeTxHashes(result);
-    if (!bridgeTxHash) {
-      throw new ConsolidationBridgeError("Bridge did not return burn transaction hash", {
-        sourceTxHash: null,
-        bridgeTxHash: null,
-        destinationTxHash: destinationTxHash || null
-      });
-    }
+    const amountHuman = toHumanReadableUsdc(amount);
 
     return {
-      sourceTxHash: bridgeTxHash,
-      bridgeTxHash,
-      destinationTxHash,
-      messageId: parseMessageId(result),
+      sourceNetwork,
+      destinationNetwork,
+      recipient,
+      amountHuman,
+      fromChain,
+      toChain,
+      sourceAdapter,
+      destinationAdapter,
       sourceSignerAddress,
       destinationSignerAddress
     };
+  }
+
+  async estimateGasRequirements(params) {
+    const context = this.buildBridgeContext(params);
+    const estimate = await this.kit.estimate({
+      from: {
+        adapter: context.sourceAdapter,
+        chain: context.fromChain
+      },
+      to: {
+        adapter: context.destinationAdapter,
+        chain: context.toChain,
+        recipientAddress: context.recipient
+      },
+      amount: context.amountHuman
+    });
+
+    const feesByNetwork = buildBridgeKitGasEstimateMap({
+      gasFees: estimate?.gasFees,
+      resolveNetwork: (blockchain) => this.resolveNetworkForBlockchain(blockchain)
+    });
+
+    return {
+      sourceNetwork: feesByNetwork.get(context.sourceNetwork) || null,
+      destinationNetwork: feesByNetwork.get(context.destinationNetwork) || null,
+      byNetwork: Array.from(feesByNetwork.values()),
+      sourceSignerAddress: context.sourceSignerAddress,
+      destinationSignerAddress: context.destinationSignerAddress,
+      estimate
+    };
+  }
+
+  async runBridgeWithRetry({ bridgeParams, retryContext }) {
+    let result = await this.kit.bridge(bridgeParams);
+    let lastRetryError = null;
+
+    for (let attempt = 1; result?.state === "error" && attempt <= this.retryAttempts; attempt += 1) {
+      const shouldRetry = isLikelyTransientError(result, lastRetryError || "");
+      if (!shouldRetry) {
+        break;
+      }
+
+      if (attempt > 1) {
+        await sleep(this.retryBackoffMs * attempt);
+      }
+      try {
+        result = await this.kit.retry(result, retryContext);
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        lastRetryError = message;
+        const lowered = message.toLowerCase();
+        const blockedByUserAction =
+          lowered.includes("requires user action") ||
+          lowered.includes("not supported") ||
+          lowered.includes("not retryable");
+        if (blockedByUserAction) {
+          break;
+        }
+      }
+    }
+
+    return { result, lastRetryError };
+  }
+
+  async withBridgeLock(lockKey, operation) {
+    const previous = this.bridgeLocks.get(lockKey) || Promise.resolve();
+    let release = null;
+    const current = new Promise((resolve) => {
+      release = resolve;
+    });
+    this.bridgeLocks.set(lockKey, current);
+    await previous.catch(() => {});
+    try {
+      return await operation();
+    } finally {
+      release();
+      if (this.bridgeLocks.get(lockKey) === current) {
+        this.bridgeLocks.delete(lockKey);
+      }
+    }
+  }
+
+  async bridge({
+    sourceNetwork,
+    destinationNetwork,
+    destinationAddress,
+    amount,
+    asset,
+    sourcePrivateKey,
+    destinationPrivateKey
+  }) {
+    const context = this.buildBridgeContext({
+      sourceNetwork,
+      destinationNetwork,
+      destinationAddress,
+      amount,
+      asset,
+      sourcePrivateKey,
+      destinationPrivateKey
+    });
+
+    const lockKey = `${context.sourceSignerAddress.toLowerCase()}::${context.destinationSignerAddress.toLowerCase()}`;
+
+    return this.withBridgeLock(lockKey, async () => {
+      const bridgeParams = {
+        from: {
+          adapter: context.sourceAdapter,
+          chain: context.fromChain
+        },
+        to: {
+          adapter: context.destinationAdapter,
+          chain: context.toChain,
+          recipientAddress: context.recipient
+        },
+        amount: context.amountHuman
+      };
+      const retryContext = {
+        from: {
+          adapter: context.sourceAdapter,
+          chain: context.fromChain
+        },
+        to: {
+          adapter: context.destinationAdapter,
+          chain: context.toChain
+        }
+      };
+      const { result, lastRetryError } = await this.runBridgeWithRetry({
+        bridgeParams,
+        retryContext
+      });
+
+      if (result?.state === "error") {
+        const { stepName, detail } = describeFailedStep(result);
+        const failedStep = getFailedStep(result);
+        const hashes = parseBridgeTxHashes(result);
+        const retrySuffix = lastRetryError ? ` | retry: ${lastRetryError}` : "";
+        throw new ConsolidationBridgeError(`Bridge failed at ${stepName}: ${detail}${retrySuffix}`, {
+          stepName,
+          detail,
+          sourceTxHash: hashes.bridgeTxHash || failedStep?.txHash || null,
+          bridgeTxHash: hashes.bridgeTxHash || failedStep?.txHash || null,
+          destinationTxHash: hashes.destinationTxHash || null,
+          failedStepTxHash: failedStep?.txHash || null,
+          failedStepExplorerUrl: failedStep?.explorerUrl || null
+        });
+      }
+
+      const { bridgeTxHash, destinationTxHash } = parseBridgeTxHashes(result);
+      if (!bridgeTxHash) {
+        throw new ConsolidationBridgeError("Bridge did not return burn transaction hash", {
+          sourceTxHash: null,
+          bridgeTxHash: null,
+          destinationTxHash: destinationTxHash || null
+        });
+      }
+
+      return {
+        sourceTxHash: bridgeTxHash,
+        bridgeTxHash,
+        destinationTxHash,
+        messageId: parseMessageId(result),
+        sourceSignerAddress: context.sourceSignerAddress,
+        destinationSignerAddress: context.destinationSignerAddress
+      };
+    });
   }
 }

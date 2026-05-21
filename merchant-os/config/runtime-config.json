@@ -32,6 +32,11 @@
   "gasSponsorTopupWei": "300000000000000",
   "gasSponsorReceiptTimeoutMs": 120000,
   "rpcOverridesByNetwork": {
+    "eip155:84532": [
+      "https://sepolia.base.org",
+      "https://base-sepolia-rpc.publicnode.com",
+      "https://base-sepolia.drpc.org"
+    ],
     "eip155:421614": [
       "https://arbitrum-sepolia-rpc.publicnode.com",
       "https://sepolia-rollup.arbitrum.io/rpc",

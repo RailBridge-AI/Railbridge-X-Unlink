@@ -1,4 +1,4 @@
-import { createHmac } from "node:crypto";
+import { createHmac, timingSafeEqual } from "node:crypto";
 import { nowIso } from "./utils.js";
 import {
   insertWebhookDelivery,
@@ -14,7 +14,13 @@ const signPayload = (secret, payload) =>
 export const verifyWebhookSignature = ({ secret, timestamp, payload, signature }) => {
   const signedPayload = `${timestamp}.${payload}`;
   const expected = signPayload(secret, signedPayload);
-  return expected === String(signature || "").trim();
+  const actual = String(signature || "").trim();
+  const expectedBuffer = Buffer.from(expected, "utf8");
+  const actualBuffer = Buffer.from(actual, "utf8");
+  if (expectedBuffer.length !== actualBuffer.length) {
+    return false;
+  }
+  return timingSafeEqual(expectedBuffer, actualBuffer);
 };
 
 const postWebhook = async ({ endpoint, eventType, eventId, payload }) => {
@@ -113,7 +119,12 @@ export const sendWebhookTestEvent = async ({ merchantId, accountId }) => {
           }
         }
       });
-      markWebhookTestResult(endpoint.id, ok ? "ok" : "failed");
+      markWebhookTestResult(
+        endpoint.merchantId,
+        endpoint.accountId,
+        endpoint.id,
+        ok ? "ok" : "failed"
+      );
       return ok;
     })
   );

@@ -7,7 +7,7 @@
     "routeMethod": "GET",
     "routePath": "/api/premium",
     "sourceNetwork": "eip155:84532",
-    "preferredPayNetwork": "",
+    "preferredPayNetworks": ["eip155:84532", "eip155:421614"],
     "verifySettlement": true,
     "verifyTimeoutMs": 45000
   }

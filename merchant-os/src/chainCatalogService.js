@@ -46,6 +46,10 @@ export class ChainCatalogService {
     evmChains.forEach((chain) => {
       const usdcAddress = String(chain.usdcAddress || "").trim();
       if (!/^0x[a-fA-F0-9]{40}$/.test(usdcAddress)) {
+        console.warn("[merchant-os] skipping chain with invalid/missing USDC address", {
+          chainId: chain?.chainId,
+          name: chain?.name || chain?.chain || "unknown"
+        });
         return;
       }
       const network = `eip155:${chain.chainId}`;
@@ -88,7 +92,13 @@ export class ChainCatalogService {
   }
 
   start() {
-    this.syncNow();
+    try {
+      this.syncNow();
+    } catch (error) {
+      console.warn("[merchant-os] initial chain catalog sync failed", {
+        error: error instanceof Error ? error.message : String(error)
+      });
+    }
     if (this.timer) {
       clearInterval(this.timer);
     }

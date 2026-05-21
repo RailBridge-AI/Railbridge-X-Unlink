@@ -3,7 +3,7 @@ import { URL } from "node:url";
 import { fileURLToPath } from "node:url";
 import { dirname, join, resolve, sep } from "node:path";
 import { createReadStream, existsSync, statSync } from "node:fs";
-import { createHash } from "node:crypto";
+import { createHash, timingSafeEqual as cryptoTimingSafeEqual } from "node:crypto";
 import { privateKeyToAccount } from "viem/accounts";
 import { config } from "./config.js";
 import {
@@ -15,16 +15,20 @@ import { ConsolidationBridgeError, ConsolidationBridgeService } from "./consolid
 import { GasSponsorService } from "./gasSponsorService.js";
 import { transferUsdcOnchain, UsdcTransferError } from "./usdcTransferService.js";
 import {
+  acquireTenantMutationDbLock,
   authenticatePlatformUser,
   countActiveApiKeys,
   countActiveApiKeysByRole,
   createApiKey,
   createApiProduct,
   createConsolidation,
+  deletePayoutAddressBookEntry,
+  deleteRevokedApiKeyById,
   createWebhookEndpoint,
   deleteApiProduct,
   deleteWebhookEndpoint,
   findApiKeyByToken,
+  findPayoutAddressBookEntryByNetworkAddress,
   getApiProductByApiId,
   getChainCatalogByNetwork,
   getChainCatalogRuntimeMaps,
@@ -37,29 +41,36 @@ import {
   getBalances,
   getConsolidation,
   getCustodyPrivateKeyByReference,
+  getPayoutAddressBookEntryById,
   getWebhookEndpointById,
   hasSettlementLifecycleEvent,
   getPayoutRequest,
   getPolicy,
   getSession,
+  queryTimeline,
   getTimeline,
   getWalletByNetwork,
   getWallets,
   hasSettlementEvent,
   initializeDatabase,
   insertSettlementEvent,
+  listPayoutAddressBookEntries,
   listWorkspaceLoginIdentities,
   listApiProducts,
   listChainCatalog,
   onboardMerchantAccount,
   recomputeBalances,
+  releaseTenantMutationDbLock,
   revokeApiKeyById,
   setChainCatalogStatus,
   touchApiKeyUsed,
+  touchPayoutAddressBookEntryUsedByNetworkAddress,
   upsertPolicy,
+  upsertPayoutAddressBookEntry,
   updateApiKeyMetadata,
   updateApiProduct,
   updateConsolidationStatus,
+  updatePayoutAddressBookEntry,
   updateTenantProfile,
   updateWebhookEndpoint,
   updatePayoutStatus
@@ -90,7 +101,19 @@ import {
 
 const MERCHANT_ROUTE = /^\/v1\/merchants\/([^/]+)\/(balances|settlements|products|consolidations|payouts|settings)$/;
 const MERCHANT_PRODUCTS_ITEM_ROUTE = /^\/v1\/merchants\/([^/]+)\/products\/([^/]+)$/;
+const MERCHANT_CONSOLIDATIONS_ESTIMATE_ROUTE = /^\/v1\/merchants\/([^/]+)\/consolidations\/estimate$/;
+const MERCHANT_CONSOLIDATION_ITEM_ROUTE = /^\/v1\/merchants\/([^/]+)\/consolidations\/([^/]+)$/;
+const MERCHANT_PAYOUT_ADDRESS_BOOK_ROUTE = /^\/v1\/merchants\/([^/]+)\/payout-addresses$/;
+const MERCHANT_PAYOUT_ADDRESS_BOOK_ITEM_ROUTE = /^\/v1\/merchants\/([^/]+)\/payout-addresses\/([^/]+)$/;
 const ONBOARDING_WEBHOOK_ITEM_ROUTE = /^\/v1\/onboarding\/webhooks\/(?!test$)([^/]+)$/;
+const MAX_JSON_BODY_BYTES = 1_000_000;
+const TENANT_MUTATION_LOCKS = new Set();
+const IS_PRODUCTION_MODE = String(process.env.NODE_ENV || "").trim().toLowerCase() === "production";
+const LOGIN_RATE_LIMIT_WINDOW_MS = 15 * 60 * 1000;
+const MAX_LOGIN_ATTEMPTS_PER_WINDOW = 8;
+const API_KEY_TOUCH_DEBOUNCE_MS = 60 * 1000;
+const loginAttemptBuckets = new Map();
+const apiKeyLastTouchedAtMs = new Map();
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -282,7 +305,14 @@ const getEffectiveNetworkUsdcBalance = async ({
 
 const parseJsonBody = async (req) => {
   const chunks = [];
+  let totalBytes = 0;
   for await (const chunk of req) {
+    totalBytes += Buffer.byteLength(chunk);
+    if (totalBytes > MAX_JSON_BODY_BYTES) {
+      const error = new Error("Request body too large");
+      error.statusCode = 413;
+      throw error;
+    }
     chunks.push(chunk);
   }
 
@@ -294,7 +324,9 @@ const parseJsonBody = async (req) => {
   try {
     return JSON.parse(rawBody);
   } catch {
-    throw new Error("Invalid JSON body");
+    const error = new Error("Invalid JSON body");
+    error.statusCode = 400;
+    throw error;
   }
 };
 
@@ -317,6 +349,90 @@ const getBearerToken = (req) => {
   return token.trim();
 };
 
+const timingSafeEqual = (left, right) => {
+  if (typeof left !== "string" || typeof right !== "string") {
+    return false;
+  }
+  const a = Buffer.from(left, "utf8");
+  const b = Buffer.from(right, "utf8");
+  if (a.length !== b.length) {
+    return false;
+  }
+  return cryptoTimingSafeEqual(a, b);
+};
+
+const getRequestIp = (req) => {
+  const forwardedFor = String(req.headers["x-forwarded-for"] || "").trim();
+  if (forwardedFor) {
+    return forwardedFor.split(",")[0].trim();
+  }
+  const realIp = String(req.headers["x-real-ip"] || "").trim();
+  if (realIp) {
+    return realIp;
+  }
+  return String(req.socket?.remoteAddress || "unknown");
+};
+
+const buildLoginRateLimitKey = (req, email) => `${getRequestIp(req)}::${String(email || "").trim().toLowerCase()}`;
+
+const checkLoginRateLimit = (key) => {
+  const now = Date.now();
+  const bucket = loginAttemptBuckets.get(key);
+  if (!bucket) {
+    return { allowed: true, retryAfterSeconds: 0 };
+  }
+  if (now - bucket.windowStartedAtMs >= LOGIN_RATE_LIMIT_WINDOW_MS) {
+    loginAttemptBuckets.delete(key);
+    return { allowed: true, retryAfterSeconds: 0 };
+  }
+  if (bucket.count < MAX_LOGIN_ATTEMPTS_PER_WINDOW) {
+    return { allowed: true, retryAfterSeconds: 0 };
+  }
+  const retryAfterSeconds = Math.max(
+    1,
+    Math.ceil((LOGIN_RATE_LIMIT_WINDOW_MS - (now - bucket.windowStartedAtMs)) / 1000)
+  );
+  return { allowed: false, retryAfterSeconds };
+};
+
+const recordFailedLoginAttempt = (key) => {
+  const now = Date.now();
+  const current = loginAttemptBuckets.get(key);
+  if (!current || now - current.windowStartedAtMs >= LOGIN_RATE_LIMIT_WINDOW_MS) {
+    loginAttemptBuckets.set(key, { count: 1, windowStartedAtMs: now });
+    return;
+  }
+  loginAttemptBuckets.set(key, {
+    count: current.count + 1,
+    windowStartedAtMs: current.windowStartedAtMs
+  });
+};
+
+const clearLoginAttempts = (key) => {
+  loginAttemptBuckets.delete(key);
+};
+
+const maybeTouchApiKeyUsed = (keyId) => {
+  const now = Date.now();
+  const lastTouchedAt = apiKeyLastTouchedAtMs.get(keyId) || 0;
+  if (now - lastTouchedAt < API_KEY_TOUCH_DEBOUNCE_MS) {
+    return;
+  }
+  apiKeyLastTouchedAtMs.set(keyId, now);
+  touchApiKeyUsed(keyId);
+};
+
+const isStrongPassword = (value) => {
+  const password = String(value || "");
+  return (
+    password.length >= 12 &&
+    /[A-Z]/.test(password) &&
+    /[a-z]/.test(password) &&
+    /[0-9]/.test(password) &&
+    /[^A-Za-z0-9]/.test(password)
+  );
+};
+
 const requireSession = (req, res) => {
   const token = getBearerToken(req);
   const session = getSession(token);
@@ -330,17 +446,79 @@ const requireSession = (req, res) => {
 const requireApiKey = (req, res) => {
   const headerValue = req.headers["x-railbridge-api-key"];
   const token = typeof headerValue === "string" ? headerValue.trim() : "";
-  if (!token) {
-    sendJson(res, 401, { error: "Missing x-railbridge-api-key" });
+  if (token) {
+    const key = findApiKeyByToken(token);
+    if (!key) {
+      sendJson(res, 401, { error: "Invalid API key" });
+      return null;
+    }
+    maybeTouchApiKeyUsed(key.id);
+    return key;
+  }
+
+  const sessionToken = getBearerToken(req);
+  const session = getSession(sessionToken);
+  if (session) {
+    return {
+      id: `session:${session.userId}`,
+      merchantId: session.merchantId,
+      accountId: session.accountId,
+      role: session.role,
+      status: "active"
+    };
+  }
+
+  sendJson(res, 401, { error: "Missing x-railbridge-api-key or valid Bearer session token" });
+  return null;
+};
+
+const requireRole = (res, key, allowedRoles = []) => {
+  if (allowedRoles.includes(key.role)) {
+    return true;
+  }
+  sendJson(res, 403, {
+    error: `Forbidden: requires one of [${allowedRoles.join(", ")}]`
+  });
+  return false;
+};
+
+const isAllowedWebhookUrl = (value) => {
+  try {
+    const parsed = new URL(String(value || "").trim());
+    if (parsed.protocol === "https:") {
+      return true;
+    }
+    if (parsed.protocol !== "http:") {
+      return false;
+    }
+    if (IS_PRODUCTION_MODE) {
+      return false;
+    }
+    const host = String(parsed.hostname || "").toLowerCase();
+    return host === "localhost" || host === "127.0.0.1" || host === "::1";
+  } catch {
+    return false;
+  }
+};
+
+const acquireTenantMutationLock = (lockKey) => {
+  if (TENANT_MUTATION_LOCKS.has(lockKey)) {
     return null;
   }
-  const key = findApiKeyByToken(token);
-  if (!key) {
-    sendJson(res, 401, { error: "Invalid API key" });
+  const dbLock = acquireTenantMutationDbLock(lockKey, 120000);
+  if (!dbLock) {
     return null;
   }
-  touchApiKeyUsed(key.id);
-  return key;
+  TENANT_MUTATION_LOCKS.add(lockKey);
+  return { lockKey, dbLock };
+};
+
+const releaseTenantMutationLock = (lockHandle) => {
+  if (!lockHandle) {
+    return;
+  }
+  TENANT_MUTATION_LOCKS.delete(lockHandle.lockKey);
+  releaseTenantMutationDbLock(lockHandle.dbLock);
 };
 
 const requireTenant = (res, session, merchantId, accountId) => {
@@ -360,7 +538,68 @@ const ensureAccountExists = (res, merchantId, accountId) => {
   return wallets;
 };
 
-const buildOverviewResponse = async (merchantId, accountId) => {
+const BALANCES_ONCHAIN_MODES = new Set(["skip", "priority", "all"]);
+const TIMELINE_FILTER_TO_ITEM_TYPES = {
+  treasury: ["consolidation"],
+  payment: ["settlement"],
+  payouts: ["payout"]
+};
+
+const parseBalancesOnchainMode = (searchParams) => {
+  const raw = String(searchParams?.get("onchain") || "priority")
+    .trim()
+    .toLowerCase();
+  return BALANCES_ONCHAIN_MODES.has(raw) ? raw : "priority";
+};
+
+const parseIsoDateBoundary = (rawValue, mode) => {
+  const value = String(rawValue || "").trim();
+  if (!value) {
+    return "";
+  }
+  if (/^\d{4}-\d{2}-\d{2}$/.test(value)) {
+    return mode === "start" ? `${value}T00:00:00.000Z` : `${value}T23:59:59.999Z`;
+  }
+  const parsed = new Date(value);
+  if (Number.isNaN(parsed.getTime())) {
+    return "";
+  }
+  return parsed.toISOString();
+};
+
+const parseTimelineQuery = (searchParams) => {
+  const pageRaw = Number.parseInt(String(searchParams?.get("page") || "1"), 10);
+  const pageSizeRaw = Number.parseInt(String(searchParams?.get("pageSize") || "20"), 10);
+  const page = Number.isNaN(pageRaw) ? 1 : Math.max(1, pageRaw);
+  const pageSize = Number.isNaN(pageSizeRaw) ? 20 : Math.max(1, Math.min(pageSizeRaw, 100));
+
+  const typeRaw = String(searchParams?.get("type") || "")
+    .split(",")
+    .map((item) => item.trim().toLowerCase())
+    .filter(Boolean);
+  const itemTypeSet = new Set();
+  typeRaw.forEach((type) => {
+    const mapped = TIMELINE_FILTER_TO_ITEM_TYPES[type];
+    if (mapped) {
+      mapped.forEach((itemType) => itemTypeSet.add(itemType));
+    }
+  });
+
+  const createdFrom = parseIsoDateBoundary(searchParams?.get("dateFrom"), "start");
+  const createdTo = parseIsoDateBoundary(searchParams?.get("dateTo"), "end");
+  return {
+    page,
+    pageSize,
+    itemTypes: [...itemTypeSet],
+    createdFrom,
+    createdTo
+  };
+};
+
+const buildOverviewResponse = async (merchantId, accountId, options = {}) => {
+  const onchainMode = BALANCES_ONCHAIN_MODES.has(options.onchainMode)
+    ? options.onchainMode
+    : "priority";
   const runtimeMaps = resolveRuntimeChainMaps();
   const projectedBalances = getBalances(merchantId, accountId);
   const policy = getPolicy(merchantId, accountId);
@@ -375,14 +614,34 @@ const buildOverviewResponse = async (merchantId, accountId) => {
       }
     ])
   );
-  const onchainByNetwork = await fetchOnchainUsdcBalancesByNetwork({
-    wallets,
-    rpcByNetwork: runtimeMaps.rpcByNetwork,
-    rpcUrlsByNetwork: runtimeMaps.rpcUrlsByNetwork,
-    usdcTokenByNetwork: runtimeMaps.usdcTokenByNetwork,
-    timeoutMs: config.onchainReadTimeoutMs,
-    totalBudgetMs: config.onchainReadTotalBudgetMs
-  });
+  const walletsForOnchain =
+    onchainMode === "skip"
+      ? []
+      : onchainMode === "priority"
+        ? wallets.filter((wallet) => {
+            const projected = projectedByNetwork.get(wallet.network);
+            try {
+              return projected && parseBaseUnitsSafe(projected.amount) > 0n;
+            } catch {
+              return false;
+            }
+          })
+        : wallets;
+  const onchainBudgetMs =
+    onchainMode === "all"
+      ? config.onchainReadTotalBudgetMs
+      : Math.min(config.onchainReadTotalBudgetMs, 2500);
+  const onchainByNetwork =
+    walletsForOnchain.length > 0
+      ? await fetchOnchainUsdcBalancesByNetwork({
+          wallets: walletsForOnchain,
+          rpcByNetwork: runtimeMaps.rpcByNetwork,
+          rpcUrlsByNetwork: runtimeMaps.rpcUrlsByNetwork,
+          usdcTokenByNetwork: runtimeMaps.usdcTokenByNetwork,
+          timeoutMs: config.onchainReadTimeoutMs,
+          totalBudgetMs: onchainBudgetMs
+        })
+      : new Map();
 
   const networks = new Set([
     ...walletByNetwork.keys(),
@@ -428,6 +687,7 @@ const buildOverviewResponse = async (merchantId, accountId) => {
     merchantId,
     accountId,
     asOf: nowIso(),
+    onchainMode,
     unifiedUsd: toDecimalUsdcString(availableBaseUnits),
     availableUsd: toDecimalUsdcString(availableBaseUnits),
     projectedUsd: toDecimalUsdcString(projectedBaseUnits),
@@ -447,32 +707,23 @@ const buildOverviewResponse = async (merchantId, accountId) => {
 
 const validateIngestToken = (req) => {
   const headerToken = req.headers["x-merchant-os-ingest-token"];
-  if (typeof headerToken === "string" && headerToken === config.ingestToken) {
+  if (typeof headerToken === "string" && timingSafeEqual(headerToken, config.ingestToken)) {
     return true;
   }
-  const internalHeader = req.headers["x-merchant-os-internal-token"];
-  if (
-    typeof internalHeader === "string" &&
-    (internalHeader === config.ingestToken || internalHeader === config.internalToken)
-  ) {
-    return true;
-  }
-
-  const bearer = getBearerToken(req);
-  return Boolean(bearer && (bearer === config.ingestToken || bearer === config.internalToken));
+  return false;
 };
 
 const validateInternalToken = (req) => {
   const headerToken = req.headers["x-merchant-os-internal-token"];
-  if (typeof headerToken === "string" && headerToken === config.internalToken) {
+  if (typeof headerToken === "string" && timingSafeEqual(headerToken, config.internalToken)) {
     return true;
   }
   const ingestToken = req.headers["x-merchant-os-ingest-token"];
-  if (typeof ingestToken === "string" && ingestToken === config.internalToken) {
+  if (typeof ingestToken === "string" && timingSafeEqual(ingestToken, config.internalToken)) {
     return true;
   }
   const bearer = getBearerToken(req);
-  return Boolean(bearer && bearer === config.internalToken);
+  return Boolean(bearer && timingSafeEqual(bearer, config.internalToken));
 };
 
 const consolidationBridgeService = new ConsolidationBridgeService();
@@ -544,6 +795,417 @@ const resolveGasEstimatorProfile = (role) => {
   };
 };
 
+const resolveBridgeGasBufferBps = () => {
+  const rawBufferBps = Number(config.gasEstimatorBufferBps || 18000);
+  return Math.max(10000, Number.isFinite(rawBufferBps) ? rawBufferBps : 18000);
+};
+
+const buildBridgeKitGasRequirement = ({ network, role, estimateEntry }) => {
+  const bufferBps = resolveBridgeGasBufferBps();
+  const estimatedFeeWei = BigInt(estimateEntry?.estimatedFeeWei || "0");
+  let requiredWei = (estimatedFeeWei * BigInt(bufferBps)) / 10000n;
+  if (requiredWei < MIN_BRIDGE_NATIVE_BALANCE_WEI) {
+    requiredWei = MIN_BRIDGE_NATIVE_BALANCE_WEI;
+  }
+
+  return {
+    mode: "bridge_kit_estimate",
+    network,
+    role,
+    requiredWei,
+    gasPriceWei: null,
+    gasUnits: null,
+    bufferBps,
+    estimatedFeeWei,
+    stepNames: Array.isArray(estimateEntry?.stepNames) ? estimateEntry.stepNames : [],
+    tokenSymbol: estimateEntry?.tokenSymbol || null
+  };
+};
+
+const parseNonNegativeUsdcToBaseUnits = (value) => {
+  const text = String(value ?? "").trim();
+  if (!text) {
+    return 0n;
+  }
+  if (!/^[0-9]+(?:\.[0-9]{1,6})?$/.test(text)) {
+    return 0n;
+  }
+  const [wholeRaw, fracRaw = ""] = text.split(".");
+  return BigInt(wholeRaw) * 1_000_000n + BigInt(fracRaw.padEnd(6, "0"));
+};
+
+const buildBridgeGasStatus = ({ network, role, currentWei, gasRequirement }) => {
+  const minimumWei = gasRequirement?.requiredWei || MIN_BRIDGE_NATIVE_BALANCE_WEI;
+  const availableWei = BigInt(currentWei || "0");
+  const shortfallWei = availableWei < minimumWei ? minimumWei - availableWei : 0n;
+  const estimatorEstimatedFeeWei = gasRequirement?.estimatedFeeWei || null;
+  const estimatorStepNames = Array.isArray(gasRequirement?.stepNames) ? gasRequirement.stepNames : [];
+
+  return {
+    network,
+    role,
+    sufficient: availableWei >= minimumWei,
+    availableWei: availableWei.toString(),
+    availableNative: formatNativeAmount(availableWei),
+    requiredWei: minimumWei.toString(),
+    requiredNative: formatNativeAmount(minimumWei),
+    shortfallWei: shortfallWei.toString(),
+    shortfallNative: formatNativeAmount(shortfallWei),
+    estimatorMode: gasRequirement?.mode || "static_fallback",
+    estimatorEstimatedFeeWei: estimatorEstimatedFeeWei ? estimatorEstimatedFeeWei.toString() : null,
+    estimatorEstimatedFeeNative: estimatorEstimatedFeeWei ? formatNativeAmount(estimatorEstimatedFeeWei) : null,
+    estimatorStepNames,
+    tokenSymbol: gasRequirement?.tokenSymbol || null
+  };
+};
+
+const buildConsolidationEstimateRecommendation = ({
+  amountBaseUnits,
+  protocolFeeBaseUnits,
+  sourceGasStatus,
+  destinationGasStatus,
+  executionMode
+}) => {
+  if (executionMode !== "real") {
+    return {
+      level: "info",
+      code: "simulation_mode",
+      summary: "Estimate preview is limited in simulation mode.",
+      details: "Enable the real Circle Bridge Kit flow to see gas sufficiency and cost estimates."
+    };
+  }
+
+  if (!sourceGasStatus?.sufficient || !destinationGasStatus?.sufficient) {
+    return {
+      level: "caution",
+      code: "gas_topup_likely",
+      summary: "One or more bridge wallets will likely need native gas top-up.",
+      details:
+        "RailBridge can attempt sponsor top-up on submit, but the bridge cannot start until both source and destination wallets are above the estimated native gas threshold."
+    };
+  }
+
+  if (amountBaseUnits < 1_000_000n) {
+    return {
+      level: "warning",
+      code: "tiny_transfer",
+      summary: "This transfer amount is very small for a cross-chain move.",
+      details:
+        "The bridge is technically allowed, but moving less than 1 USDC is usually not worthwhile once gas overhead and operational complexity are considered."
+    };
+  }
+
+  if (protocolFeeBaseUnits > 0n && protocolFeeBaseUnits * 5n >= amountBaseUnits) {
+    return {
+      level: "caution",
+      code: "fees_high_relative_to_amount",
+      summary: "Bridge fees are high relative to the transfer amount.",
+      details:
+        "This transfer will work, but the amount is small compared with the current protocol fee estimate. A larger transfer size may be more efficient."
+    };
+  }
+
+  return {
+    level: "good",
+    code: "healthy_transfer",
+    summary: "This bridge amount looks reasonable for the current route.",
+    details:
+      "Circle Bridge Kit cost estimation succeeded and both wallets appear to have enough native gas for the transfer."
+  };
+};
+
+const buildConsolidationEstimatePreview = async ({
+  merchantId,
+  accountId,
+  sourceNetwork,
+  destinationNetwork,
+  normalizedAsset,
+  amount
+}) => {
+  const sourceWallet = getWalletByNetwork(merchantId, accountId, sourceNetwork);
+  if (!sourceWallet) {
+    return { ok: false, statusCode: 400, payload: { error: "source network wallet not found" } };
+  }
+  const destinationWallet = getWalletByNetwork(merchantId, accountId, destinationNetwork);
+  if (!destinationWallet) {
+    return { ok: false, statusCode: 400, payload: { error: "destination network wallet not found" } };
+  }
+
+  const sourceBalanceInfo = await getEffectiveNetworkUsdcBalance({
+    merchantId,
+    accountId,
+    network: sourceNetwork,
+    wallet: sourceWallet,
+    strictOnchain: config.realConsolidationBridgeEnabled
+  });
+  if (sourceBalanceInfo.amount < amount) {
+    return {
+      ok: false,
+      statusCode: 400,
+      payload: {
+        error: "insufficient source balance",
+        available: sourceBalanceInfo.amount.toString(),
+        availableSource: sourceBalanceInfo.source,
+        availableProjected: sourceBalanceInfo.projectedAmount.toString(),
+        availableOnchain: sourceBalanceInfo.onchainAmount === null ? null : sourceBalanceInfo.onchainAmount.toString()
+      }
+    };
+  }
+
+  const basePayload = {
+    sourceNetwork,
+    destinationNetwork,
+    asset: normalizedAsset,
+    amount: amount.toString(),
+    amountUsdc: toDecimalUsdcString(amount),
+    executionMode: config.realConsolidationBridgeEnabled ? "real" : "simulation",
+    note: "Estimate only. No funds move and no gas top-up is triggered during this preview.",
+    sourceBalance: {
+      availableBaseUnits: sourceBalanceInfo.amount.toString(),
+      availableUsdc: toDecimalUsdcString(sourceBalanceInfo.amount.toString()),
+      source: sourceBalanceInfo.source,
+      availableProjectedBaseUnits: sourceBalanceInfo.projectedAmount.toString(),
+      availableOnchainBaseUnits:
+        sourceBalanceInfo.onchainAmount === null ? null : sourceBalanceInfo.onchainAmount.toString()
+    }
+  };
+
+  if (!config.realConsolidationBridgeEnabled) {
+    return {
+      ok: true,
+      statusCode: 200,
+      payload: {
+        ...basePayload,
+        gasFees: [],
+        protocolFees: [],
+        recommendation: buildConsolidationEstimateRecommendation({
+          amountBaseUnits: amount,
+          protocolFeeBaseUnits: 0n,
+          sourceGasStatus: null,
+          destinationGasStatus: null,
+          executionMode: "simulation"
+        })
+      }
+    };
+  }
+
+  const sourcePrivateKey = getCustodyPrivateKeyByReference(
+    merchantId,
+    accountId,
+    sourceWallet.keyReference
+  );
+  if (!sourcePrivateKey) {
+    return {
+      ok: false,
+      statusCode: 500,
+      payload: { error: `Missing custody key for source wallet reference: ${sourceWallet.keyReference}` }
+    };
+  }
+
+  const destinationPrivateKey =
+    getCustodyPrivateKeyByReference(merchantId, accountId, destinationWallet.keyReference) ||
+    sourcePrivateKey;
+  if (!destinationPrivateKey) {
+    return {
+      ok: false,
+      statusCode: 500,
+      payload: { error: `Missing custody key for destination wallet reference: ${destinationWallet.keyReference}` }
+    };
+  }
+
+  const [sourceNativeBalance, destinationNativeBalance] = await Promise.all([
+    fetchOnchainNativeBalance({
+      network: sourceNetwork,
+      address: sourceWallet.address,
+      rpcByNetwork: config.rpcByNetwork,
+      rpcUrlsByNetwork: config.rpcUrlsByNetwork,
+      timeoutMs: config.onchainReadTimeoutMs
+    }),
+    fetchOnchainNativeBalance({
+      network: destinationNetwork,
+      address: destinationWallet.address,
+      rpcByNetwork: config.rpcByNetwork,
+      rpcUrlsByNetwork: config.rpcUrlsByNetwork,
+      timeoutMs: config.onchainReadTimeoutMs
+    })
+  ]);
+
+  if (!sourceNativeBalance) {
+    return {
+      ok: false,
+      statusCode: 400,
+      payload: {
+        error: "unable to verify source-network native gas balance",
+        network: sourceNetwork,
+        address: sourceWallet.address
+      }
+    };
+  }
+  if (!destinationNativeBalance) {
+    return {
+      ok: false,
+      statusCode: 400,
+      payload: {
+        error: "unable to verify destination-network native gas balance",
+        network: destinationNetwork,
+        address: destinationWallet.address
+      }
+    };
+  }
+
+  if (!consolidationBridgeService.supportsNetwork(sourceNetwork)) {
+    return {
+      ok: false,
+      statusCode: 400,
+      payload: { error: `source network not supported by Bridge Kit: ${sourceNetwork}` }
+    };
+  }
+  if (!consolidationBridgeService.supportsNetwork(destinationNetwork)) {
+    return {
+      ok: false,
+      statusCode: 400,
+      payload: { error: `destination network not supported by Bridge Kit: ${destinationNetwork}` }
+    };
+  }
+
+  const onchainSourceMap = await fetchOnchainUsdcBalancesByNetwork({
+    wallets: [sourceWallet],
+    rpcByNetwork: config.rpcByNetwork,
+    rpcUrlsByNetwork: config.rpcUrlsByNetwork,
+    usdcTokenByNetwork: config.usdcTokenByNetwork,
+    timeoutMs: config.onchainReadTimeoutMs,
+    totalBudgetMs: Math.max(config.onchainReadTimeoutMs, config.onchainReadTotalBudgetMs)
+  });
+  const onchainSource = onchainSourceMap.get(sourceNetwork);
+  if (!onchainSource) {
+    return {
+      ok: false,
+      statusCode: 400,
+      payload: {
+        error: "unable to verify source-network onchain USDC balance",
+        network: sourceNetwork,
+        address: sourceWallet.address,
+        hint: "increase MERCHANT_OS_ONCHAIN_TIMEOUT_MS and retry"
+      }
+    };
+  }
+  const onchainSourceAmount = BigInt(onchainSource.amount);
+  if (onchainSourceAmount < amount) {
+    return {
+      ok: false,
+      statusCode: 400,
+      payload: {
+        error: "insufficient source onchain USDC balance",
+        network: sourceNetwork,
+        address: sourceWallet.address,
+        requested: amount.toString(),
+        availableOnchain: onchainSourceAmount.toString()
+      }
+    };
+  }
+
+  const [fallbackSourceGasRequirement, fallbackDestinationGasRequirement] = await Promise.all([
+    estimateRequiredBridgeGas({
+      network: sourceNetwork,
+      role: "source"
+    }),
+    estimateRequiredBridgeGas({
+      network: destinationNetwork,
+      role: "destination"
+    })
+  ]);
+
+  let sourceGasRequirement = fallbackSourceGasRequirement;
+  let destinationGasRequirement = fallbackDestinationGasRequirement;
+  let protocolFees = [];
+  let bridgeKitEstimateStatus = "fallback";
+  let bridgeKitEstimateError = null;
+
+  try {
+    const bridgeKitEstimate = await consolidationBridgeService.estimateGasRequirements({
+      sourceNetwork,
+      destinationNetwork,
+      destinationAddress: destinationWallet.address,
+      amount: amount.toString(),
+      asset: normalizedAsset,
+      sourcePrivateKey,
+      destinationPrivateKey
+    });
+
+    if (bridgeKitEstimate?.sourceNetwork?.estimatedFeeWei !== undefined) {
+      sourceGasRequirement = buildBridgeKitGasRequirement({
+        network: sourceNetwork,
+        role: "source",
+        estimateEntry: bridgeKitEstimate.sourceNetwork
+      });
+    }
+    if (bridgeKitEstimate?.destinationNetwork?.estimatedFeeWei !== undefined) {
+      destinationGasRequirement = buildBridgeKitGasRequirement({
+        network: destinationNetwork,
+        role: "destination",
+        estimateEntry: bridgeKitEstimate.destinationNetwork
+      });
+    }
+
+    protocolFees = (Array.isArray(bridgeKitEstimate?.estimate?.fees) ? bridgeKitEstimate.estimate.fees : []).map(
+      (item) => ({
+        type: item?.type || "provider",
+        token: item?.token || "USDC",
+        amount: item?.amount ?? null
+      })
+    );
+    bridgeKitEstimateStatus = "ok";
+  } catch (error) {
+    bridgeKitEstimateError = error instanceof Error ? error.message : String(error);
+  }
+
+  const sourceGasStatus = buildBridgeGasStatus({
+    network: sourceNetwork,
+    role: "source",
+    currentWei: BigInt(sourceNativeBalance.amount),
+    gasRequirement: sourceGasRequirement
+  });
+  const destinationGasStatus = buildBridgeGasStatus({
+    network: destinationNetwork,
+    role: "destination",
+    currentWei: BigInt(destinationNativeBalance.amount),
+    gasRequirement: destinationGasRequirement
+  });
+
+  const protocolFeeBaseUnits = protocolFees.reduce((total, item) => {
+    if (String(item.token || "").toUpperCase() !== "USDC") {
+      return total;
+    }
+    return total + parseNonNegativeUsdcToBaseUnits(item.amount);
+  }, 0n);
+
+  return {
+    ok: true,
+    statusCode: 200,
+    payload: {
+      ...basePayload,
+      bridgeKitEstimateStatus,
+      bridgeKitEstimateError,
+      gasFees: [sourceGasStatus, destinationGasStatus],
+      protocolFees,
+      recommendation: buildConsolidationEstimateRecommendation({
+        amountBaseUnits: amount,
+        protocolFeeBaseUnits,
+        sourceGasStatus,
+        destinationGasStatus,
+        executionMode: "real"
+      }),
+      sponsorPolicy: {
+        autoTopupEnabled: config.gasSponsorAutoTopupEnabled,
+        minBridgeNativeBalanceWei: config.minBridgeNativeBalanceWei.toString(),
+        minBridgeNativeBalance: formatNativeAmount(config.minBridgeNativeBalanceWei),
+        gasSponsorTopupWei: config.gasSponsorTopupWei.toString(),
+        gasSponsorTopupNative: formatNativeAmount(config.gasSponsorTopupWei)
+      }
+    }
+  };
+};
+
 const estimateRequiredBridgeGas = async ({
   network,
   role
@@ -610,6 +1272,8 @@ const ensureNetworkGasForBridge = async ({
   const estimatorGasPriceWei = gasRequirement?.gasPriceWei || null;
   const estimatorGasUnits = gasRequirement?.gasUnits || null;
   const estimatorBufferBps = gasRequirement?.bufferBps || null;
+  const estimatorEstimatedFeeWei = gasRequirement?.estimatedFeeWei || null;
+  const estimatorStepNames = Array.isArray(gasRequirement?.stepNames) ? gasRequirement.stepNames : null;
 
   if (currentWei >= minimumWei) {
     return {
@@ -619,6 +1283,8 @@ const ensureNetworkGasForBridge = async ({
       requiredWei: minimumWei,
       requiredNative: formatNativeAmount(minimumWei),
       estimatorMode,
+      estimatorEstimatedFeeWei: estimatorEstimatedFeeWei ? estimatorEstimatedFeeWei.toString() : null,
+      estimatorStepNames,
       toppedUp: false
     };
   }
@@ -637,6 +1303,8 @@ const ensureNetworkGasForBridge = async ({
       estimatorGasPriceWei: estimatorGasPriceWei ? estimatorGasPriceWei.toString() : null,
       estimatorGasUnits: estimatorGasUnits ? estimatorGasUnits.toString() : null,
       estimatorBufferBps,
+      estimatorEstimatedFeeWei: estimatorEstimatedFeeWei ? estimatorEstimatedFeeWei.toString() : null,
+      estimatorStepNames,
       gasSponsorAutoTopupEnabled: false
     };
   }
@@ -713,7 +1381,9 @@ const ensureNetworkGasForBridge = async ({
         minimumWei: minimumWei.toString(),
         availableWei: updatedWei.toString(),
         minimumNative: formatNativeAmount(minimumWei),
-        availableNative: formatNativeAmount(updatedWei)
+        availableNative: formatNativeAmount(updatedWei),
+        estimatorEstimatedFeeWei: estimatorEstimatedFeeWei ? estimatorEstimatedFeeWei.toString() : null,
+        estimatorStepNames
       };
     }
 
@@ -724,6 +1394,8 @@ const ensureNetworkGasForBridge = async ({
       requiredWei: minimumWei,
       requiredNative: formatNativeAmount(minimumWei),
       estimatorMode,
+      estimatorEstimatedFeeWei: estimatorEstimatedFeeWei ? estimatorEstimatedFeeWei.toString() : null,
+      estimatorStepNames,
       toppedUp: true,
       topUpTxHash: topUp?.txHash || null,
       topUpAmountWei: topUp?.amountWei || topUpAmountWei.toString()
@@ -796,6 +1468,14 @@ const runConsolidationBridgeAsync = ({
         failReason: null
       });
       recomputeBalances(merchantId, accountId);
+      const consolidation = getConsolidation(consolidationId);
+      await publishTenantWebhookEvent({
+        merchantId,
+        accountId,
+        eventType: "consolidation.confirmed",
+        eventId: `evt_${consolidationId}_confirmed`,
+        data: consolidation
+      });
       console.info("[merchant-os] consolidation bridge confirmed", {
         consolidationId,
         sourceNetwork,
@@ -818,6 +1498,16 @@ const runConsolidationBridgeAsync = ({
         bridgeTxHash,
         destinationTxHash
       });
+      const consolidation = getConsolidation(consolidationId);
+      await publishTenantWebhookEvent({
+        merchantId,
+        accountId,
+        eventType: "consolidation.failed",
+        eventId: `evt_${consolidationId}_failed`,
+        data: consolidation
+      });
+      const sourceRpcUrls = consolidationBridgeService.rpcUrlsForNetwork(sourceNetwork);
+      const destinationRpcUrls = consolidationBridgeService.rpcUrlsForNetwork(destinationNetwork);
       console.warn("[merchant-os] consolidation bridge failed", {
         consolidationId,
         sourceNetwork,
@@ -826,7 +1516,9 @@ const runConsolidationBridgeAsync = ({
         sourceTxHash,
         bridgeTxHash,
         destinationTxHash,
-        failedStepExplorerUrl: details.failedStepExplorerUrl || null
+        failedStepExplorerUrl: details.failedStepExplorerUrl || null,
+        sourceRpcUrlCount: sourceRpcUrls.length,
+        destinationRpcUrlCount: destinationRpcUrls.length
       });
     }
   })();
@@ -1103,6 +1795,10 @@ const server = createServer(async (req, res) => {
     }
 
     if (method === "GET" && pathname === "/v1/chains") {
+      const key = requireApiKey(req, res);
+      if (!key) {
+        return;
+      }
       return sendJson(res, 200, {
         items: listChainCatalog()
       });
@@ -1143,10 +1839,21 @@ const server = createServer(async (req, res) => {
         return sendJson(res, 400, { error: "email and password are required" });
       }
 
+      const loginRateLimitKey = buildLoginRateLimitKey(req, email);
+      const limitState = checkLoginRateLimit(loginRateLimitKey);
+      if (!limitState.allowed) {
+        return sendJson(res, 429, {
+          error: "Too many login attempts. Try again later.",
+          retryAfterSeconds: limitState.retryAfterSeconds
+        });
+      }
+
       const user = authenticatePlatformUser(email, password);
       if (!user) {
+        recordFailedLoginAttempt(loginRateLimitKey);
         return sendJson(res, 401, { error: "Invalid credentials" });
       }
+      clearLoginAttempts(loginRateLimitKey);
 
       const session = createSession({
         userId: user.id,
@@ -1154,18 +1861,10 @@ const server = createServer(async (req, res) => {
         accountId: user.accountId,
         role: user.role
       });
-      const apiKey = createApiKey({
-        merchantId: user.merchantId,
-        accountId: user.accountId,
-        name: `Console session ${new Date().toISOString()}`,
-        role: user.role,
-        createdByUserId: user.id
-      });
 
       return sendJson(res, 200, {
         token: session.token,
         expiresAt: session.expiresAt,
-        apiKey: apiKey.token,
         user: {
           id: user.id,
           email: user.email,
@@ -1192,6 +1891,12 @@ const server = createServer(async (req, res) => {
       if (!merchantName || !adminEmail || !adminPassword) {
         return sendJson(res, 400, {
           error: "merchantName, adminEmail, and adminPassword are required"
+        });
+      }
+      if (!isStrongPassword(adminPassword)) {
+        return sendJson(res, 400, {
+          error:
+            "adminPassword must be at least 12 characters and include uppercase, lowercase, number, and symbol"
         });
       }
 
@@ -1385,15 +2090,23 @@ const server = createServer(async (req, res) => {
       if (!session) {
         return;
       }
+      if (session.role !== "admin" && session.role !== "finance") {
+        return sendJson(res, 403, { error: "Forbidden: only admin/finance can manage webhooks" });
+      }
       const body = await parseJsonBody(req);
       const url = String(body.url || "").trim();
-      if (!/^https?:\/\//.test(url)) {
-        return sendJson(res, 400, { error: "url must be an http(s) endpoint" });
+      const signingSecret = String(body.signingSecret || "").trim();
+      if (!isAllowedWebhookUrl(url)) {
+        return sendJson(res, 400, { error: "url must be https (or localhost http for local development)" });
+      }
+      if (!/^whsec_[A-Za-z0-9_-]{24,}$/.test(signingSecret)) {
+        return sendJson(res, 400, { error: "signingSecret must start with whsec_ and be at least 24 chars" });
       }
       const endpoint = createWebhookEndpoint({
         merchantId: session.merchantId,
         accountId: session.accountId,
-        url
+        url,
+        signingSecret
       });
       return sendJson(res, 201, endpoint);
     }
@@ -1421,8 +2134,8 @@ const server = createServer(async (req, res) => {
         const patch = {};
         if (body.url !== undefined) {
           const url = String(body.url || "").trim();
-          if (!/^https?:\/\//.test(url)) {
-            return sendJson(res, 400, { error: "url must be an http(s) endpoint" });
+          if (!isAllowedWebhookUrl(url)) {
+            return sendJson(res, 400, { error: "url must be https (or localhost http for local development)" });
           }
           patch.url = url;
         }
@@ -1556,6 +2269,17 @@ const server = createServer(async (req, res) => {
         return sendJson(res, 200, revoked);
       }
 
+      if (method === "DELETE" && !operation) {
+        if (existing.status === "active") {
+          return sendJson(res, 400, { error: "active API keys cannot be deleted; revoke first" });
+        }
+        const deleted = deleteRevokedApiKeyById(session.merchantId, session.accountId, keyId);
+        if (!deleted) {
+          return sendJson(res, 404, { error: "API key not found" });
+        }
+        return sendJson(res, 200, deleted);
+      }
+
       return sendJson(res, 405, { error: "Method not allowed" });
     }
 
@@ -1563,6 +2287,9 @@ const server = createServer(async (req, res) => {
       const session = requireSession(req, res);
       if (!session) {
         return;
+      }
+      if (session.role !== "admin" && session.role !== "finance") {
+        return sendJson(res, 403, { error: "Forbidden: only admin/finance can manage webhooks" });
       }
       const result = await sendWebhookTestEvent({
         merchantId: session.merchantId,
@@ -1575,6 +2302,9 @@ const server = createServer(async (req, res) => {
       const session = requireSession(req, res);
       if (!session) {
         return;
+      }
+      if (session.role !== "admin" && session.role !== "finance") {
+        return sendJson(res, 403, { error: "Forbidden: only admin/finance can manage products" });
       }
 
       const body = await parseJsonBody(req);
@@ -1828,6 +2558,12 @@ const server = createServer(async (req, res) => {
       const body = await parseJsonBody(req);
       const merchantId = String(body.merchantId || "").trim();
       const accountId = String(body.accountId || "").trim();
+      if (!merchantId || !accountId) {
+        return sendJson(res, 400, { error: "merchantId and accountId are required" });
+      }
+      if (!ensureAccountExists(res, merchantId, accountId)) {
+        return;
+      }
       const apiProductId = body.apiProductId ? String(body.apiProductId).trim() : "";
       const apiId = body.apiId ? String(body.apiId).trim() : "";
       const routeMethod = normalizeHttpMethod(body.method || "GET");
@@ -1969,6 +2705,199 @@ const server = createServer(async (req, res) => {
       return sendJson(res, 200, updated);
     }
 
+    const merchantPayoutAddressBookItemMatch = pathname.match(MERCHANT_PAYOUT_ADDRESS_BOOK_ITEM_ROUTE);
+    if (merchantPayoutAddressBookItemMatch && (method === "PUT" || method === "DELETE")) {
+      const merchantId = decodeURIComponent(merchantPayoutAddressBookItemMatch[1]);
+      const entryId = decodeURIComponent(merchantPayoutAddressBookItemMatch[2]);
+      const key = requireApiKey(req, res);
+      if (!key) {
+        return;
+      }
+      if (key.merchantId !== merchantId) {
+        return sendJson(res, 403, { error: "Forbidden: merchant mismatch" });
+      }
+
+      const existing = getPayoutAddressBookEntryById(key.merchantId, key.accountId, entryId);
+      if (!existing) {
+        return sendJson(res, 404, { error: "Saved payout address not found" });
+      }
+
+      if (method === "DELETE") {
+        const deleted = deletePayoutAddressBookEntry(key.merchantId, key.accountId, entryId);
+        return sendJson(res, 200, {
+          success: true,
+          deleted
+        });
+      }
+
+      const body = await parseJsonBody(req);
+      const patch = {};
+      if (body.label !== undefined) {
+        const label = String(body.label || "").trim();
+        if (label.length < 2) {
+          return sendJson(res, 400, { error: "label must be at least 2 characters" });
+        }
+        patch.label = label;
+      }
+      if (body.network !== undefined) {
+        const network = String(body.network || "").trim();
+        if (!network) {
+          return sendJson(res, 400, { error: "network is required" });
+        }
+        patch.network = network;
+      }
+      if (body.address !== undefined) {
+        const address = normalizeEvmAddress(body.address);
+        if (!address) {
+          return sendJson(res, 400, { error: "address must be a valid EVM address" });
+        }
+        patch.address = address;
+      }
+      if (!Object.keys(patch).length) {
+        return sendJson(res, 400, { error: "Provide at least one editable field: label, network, or address" });
+      }
+
+      const nextNetwork = patch.network || existing.network;
+      const nextAddress = patch.address || existing.address;
+      const duplicate = findPayoutAddressBookEntryByNetworkAddress(
+        key.merchantId,
+        key.accountId,
+        nextNetwork,
+        nextAddress
+      );
+      if (duplicate && duplicate.id !== existing.id) {
+        return sendJson(res, 409, {
+          error: "A saved address already exists for this network and wallet address"
+        });
+      }
+
+      const updated = updatePayoutAddressBookEntry(key.merchantId, key.accountId, entryId, patch);
+      return sendJson(res, 200, updated);
+    }
+
+    const merchantPayoutAddressBookMatch = pathname.match(MERCHANT_PAYOUT_ADDRESS_BOOK_ROUTE);
+    if (merchantPayoutAddressBookMatch) {
+      const merchantId = decodeURIComponent(merchantPayoutAddressBookMatch[1]);
+      const key = requireApiKey(req, res);
+      if (!key) {
+        return;
+      }
+      if (key.merchantId !== merchantId) {
+        return sendJson(res, 403, { error: "Forbidden: merchant mismatch" });
+      }
+
+      if (method === "GET") {
+        return sendJson(res, 200, {
+          merchantId: key.merchantId,
+          accountId: key.accountId,
+          items: listPayoutAddressBookEntries(key.merchantId, key.accountId)
+        });
+      }
+
+      if (method === "POST") {
+        const body = await parseJsonBody(req);
+        const label = String(body.label || "").trim();
+        const network = String(body.network || "").trim();
+        const address = normalizeEvmAddress(body.address);
+        if (label.length < 2) {
+          return sendJson(res, 400, { error: "label must be at least 2 characters" });
+        }
+        if (!network) {
+          return sendJson(res, 400, { error: "network is required" });
+        }
+        if (!address) {
+          return sendJson(res, 400, { error: "address must be a valid EVM address" });
+        }
+
+        const entry = upsertPayoutAddressBookEntry({
+          merchantId: key.merchantId,
+          accountId: key.accountId,
+          label,
+          network,
+          address
+        });
+        return sendJson(res, 201, entry);
+      }
+
+      return sendJson(res, 405, { error: "Method not allowed" });
+    }
+
+    const merchantConsolidationEstimateMatch = pathname.match(MERCHANT_CONSOLIDATIONS_ESTIMATE_ROUTE);
+    if (merchantConsolidationEstimateMatch) {
+      const merchantId = decodeURIComponent(merchantConsolidationEstimateMatch[1]);
+      const key = requireApiKey(req, res);
+      if (!key) {
+        return;
+      }
+      if (key.merchantId !== merchantId) {
+        return sendJson(res, 403, { error: "Forbidden: merchant mismatch" });
+      }
+      if (method !== "POST") {
+        return sendJson(res, 405, { error: "Method not allowed" });
+      }
+
+      const body = await parseJsonBody(req);
+      const sourceNetwork = String(body.sourceNetwork || "").trim();
+      const destinationNetwork = String(body.destinationNetwork || "").trim();
+      const normalizedAsset = normalizeUsdcAsset(body.asset || "USDC");
+
+      if (!sourceNetwork || !destinationNetwork) {
+        return sendJson(res, 400, { error: "sourceNetwork and destinationNetwork are required" });
+      }
+      if (sourceNetwork === destinationNetwork) {
+        return sendJson(res, 400, { error: "sourceNetwork and destinationNetwork must differ" });
+      }
+      if (!normalizedAsset) {
+        return sendJson(res, 400, { error: "USDC-only: unsupported asset" });
+      }
+
+      let amount;
+      try {
+        if (body.amountUsdc !== undefined && body.amountUsdc !== null && String(body.amountUsdc).trim() !== "") {
+          amount = parsePositiveUsdcToBaseUnits(body.amountUsdc, "amountUsdc");
+        } else {
+          amount = parsePositiveBigInt(body.amount, "amount");
+        }
+      } catch (error) {
+        return sendJson(res, 400, { error: error instanceof Error ? error.message : "Invalid amount" });
+      }
+
+      const estimate = await buildConsolidationEstimatePreview({
+        merchantId: key.merchantId,
+        accountId: key.accountId,
+        sourceNetwork,
+        destinationNetwork,
+        normalizedAsset,
+        amount
+      });
+      return sendJson(res, estimate.statusCode, estimate.payload);
+    }
+
+    const merchantConsolidationItemMatch = pathname.match(MERCHANT_CONSOLIDATION_ITEM_ROUTE);
+    if (merchantConsolidationItemMatch) {
+      const merchantId = decodeURIComponent(merchantConsolidationItemMatch[1]);
+      const consolidationId = decodeURIComponent(merchantConsolidationItemMatch[2]);
+      const key = requireApiKey(req, res);
+      if (!key) {
+        return;
+      }
+      if (key.merchantId !== merchantId) {
+        return sendJson(res, 403, { error: "Forbidden: merchant mismatch" });
+      }
+      if (method !== "GET") {
+        return sendJson(res, 405, { error: "Method not allowed" });
+      }
+
+      const consolidation = getConsolidation(consolidationId);
+      if (!consolidation) {
+        return sendJson(res, 404, { error: "Consolidation not found" });
+      }
+      if (consolidation.merchantId !== key.merchantId || consolidation.accountId !== key.accountId) {
+        return sendJson(res, 404, { error: "Consolidation not found" });
+      }
+      return sendJson(res, 200, consolidation);
+    }
+
     const merchantMatch = pathname.match(MERCHANT_ROUTE);
     if (merchantMatch) {
       const merchantId = decodeURIComponent(merchantMatch[1]);
@@ -1982,11 +2911,15 @@ const server = createServer(async (req, res) => {
       }
 
       if (method === "GET" && action === "balances") {
-        const overview = await buildOverviewResponse(key.merchantId, key.accountId);
+        const onchainMode = parseBalancesOnchainMode(requestUrl.searchParams);
+        const overview = await buildOverviewResponse(key.merchantId, key.accountId, {
+          onchainMode
+        });
         return sendJson(res, 200, {
           merchantId: key.merchantId,
           accountId: key.accountId,
           asOf: overview.asOf,
+          onchainMode: overview.onchainMode,
           availableUsd: overview.availableUsd,
           projectedUsd: overview.projectedUsd,
           pendingBridgeUsd: overview.pendingBridgeUsd,
@@ -1995,11 +2928,26 @@ const server = createServer(async (req, res) => {
       }
 
       if (method === "GET" && action === "settlements") {
+        const timelineQuery = parseTimelineQuery(requestUrl.searchParams);
+        const timeline = queryTimeline(key.merchantId, key.accountId, timelineQuery);
         return sendJson(res, 200, {
           merchantId: key.merchantId,
           accountId: key.accountId,
           asOf: nowIso(),
-          items: getTimeline(key.merchantId, key.accountId, 200)
+          items: timeline.items,
+          pagination: {
+            page: timeline.page,
+            pageSize: timeline.pageSize,
+            total: timeline.total,
+            totalPages: timeline.totalPages,
+            hasNextPage: timeline.hasNextPage,
+            hasPreviousPage: timeline.hasPreviousPage
+          },
+          filters: {
+            type: timelineQuery.itemTypes,
+            dateFrom: timelineQuery.createdFrom || null,
+            dateTo: timelineQuery.createdTo || null
+          }
         });
       }
 
@@ -2012,6 +2960,9 @@ const server = createServer(async (req, res) => {
       }
 
       if (action === "products" && method === "POST") {
+        if (!requireRole(res, key, ["admin", "finance"])) {
+          return;
+        }
         const body = await parseJsonBody(req);
         const apiId = String(body.apiId || "").trim();
         const apiName = String(body.apiName || "").trim();
@@ -2098,6 +3049,16 @@ const server = createServer(async (req, res) => {
       }
 
       if (action === "consolidations" && method === "POST") {
+        if (!requireRole(res, key, ["admin", "finance"])) {
+          return;
+        }
+        const lockHandle = acquireTenantMutationLock(`consolidation:${key.merchantId}:${key.accountId}`);
+        if (!lockHandle) {
+          return sendJson(res, 409, {
+            error: "Another consolidation request is already in progress for this account"
+          });
+        }
+        try {
         const body = await parseJsonBody(req);
         const sourceNetwork = String(body.sourceNetwork || "").trim();
         const destinationNetwork = String(body.destinationNetwork || "").trim();
@@ -2154,6 +3115,26 @@ const server = createServer(async (req, res) => {
         let destinationPrivateKey = null;
 
         if (config.realConsolidationBridgeEnabled) {
+          sourcePrivateKey = getCustodyPrivateKeyByReference(
+            key.merchantId,
+            key.accountId,
+            sourceWallet.keyReference
+          );
+          if (!sourcePrivateKey) {
+            return sendJson(res, 500, {
+              error: `Missing custody key for source wallet reference: ${sourceWallet.keyReference}`
+            });
+          }
+
+          destinationPrivateKey =
+            getCustodyPrivateKeyByReference(key.merchantId, key.accountId, destinationWallet.keyReference) ||
+            sourcePrivateKey;
+          if (!destinationPrivateKey) {
+            return sendJson(res, 500, {
+              error: `Missing custody key for destination wallet reference: ${destinationWallet.keyReference}`
+            });
+          }
+
           const [sourceNativeBalance, destinationNativeBalance] = await Promise.all([
             fetchOnchainNativeBalance({
               network: sourceNetwork,
@@ -2223,7 +3204,7 @@ const server = createServer(async (req, res) => {
             });
           }
 
-          const [sourceGasRequirement, destinationGasRequirement] = await Promise.all([
+          const [fallbackSourceGasRequirement, fallbackDestinationGasRequirement] = await Promise.all([
             estimateRequiredBridgeGas({
               network: sourceNetwork,
               role: "source"
@@ -2233,6 +3214,55 @@ const server = createServer(async (req, res) => {
               role: "destination"
             })
           ]);
+
+          let sourceGasRequirement = fallbackSourceGasRequirement;
+          let destinationGasRequirement = fallbackDestinationGasRequirement;
+
+          try {
+            const bridgeKitEstimate = await consolidationBridgeService.estimateGasRequirements({
+              sourceNetwork,
+              destinationNetwork,
+              destinationAddress: destinationWallet.address,
+              amount: amount.toString(),
+              asset: normalizedAsset,
+              sourcePrivateKey,
+              destinationPrivateKey
+            });
+
+            if (bridgeKitEstimate?.sourceNetwork?.estimatedFeeWei !== undefined) {
+              sourceGasRequirement = buildBridgeKitGasRequirement({
+                network: sourceNetwork,
+                role: "source",
+                estimateEntry: bridgeKitEstimate.sourceNetwork
+              });
+            }
+            if (bridgeKitEstimate?.destinationNetwork?.estimatedFeeWei !== undefined) {
+              destinationGasRequirement = buildBridgeKitGasRequirement({
+                network: destinationNetwork,
+                role: "destination",
+                estimateEntry: bridgeKitEstimate.destinationNetwork
+              });
+            }
+
+            console.info("[merchant-os] consolidation bridge gas estimate resolved", {
+              sourceNetwork,
+              destinationNetwork,
+              sourceEstimatorMode: sourceGasRequirement.mode,
+              sourceEstimatedFeeWei:
+                sourceGasRequirement.estimatedFeeWei?.toString?.() || null,
+              sourceRequiredWei: sourceGasRequirement.requiredWei.toString(),
+              destinationEstimatorMode: destinationGasRequirement.mode,
+              destinationEstimatedFeeWei:
+                destinationGasRequirement.estimatedFeeWei?.toString?.() || null,
+              destinationRequiredWei: destinationGasRequirement.requiredWei.toString()
+            });
+          } catch (error) {
+            console.warn("[merchant-os] Bridge Kit estimate failed; falling back to legacy gas heuristic", {
+              sourceNetwork,
+              destinationNetwork,
+              error: error instanceof Error ? error.message : String(error)
+            });
+          }
 
           const sourceGasCheck = await ensureNetworkGasForBridge({
             network: sourceNetwork,
@@ -2285,26 +3315,6 @@ const server = createServer(async (req, res) => {
               destinationTopUpTxHash: destinationGasCheck.topUpTxHash || null
             });
           }
-
-          sourcePrivateKey = getCustodyPrivateKeyByReference(
-            key.merchantId,
-            key.accountId,
-            sourceWallet.keyReference
-          );
-          if (!sourcePrivateKey) {
-            return sendJson(res, 500, {
-              error: `Missing custody key for source wallet reference: ${sourceWallet.keyReference}`
-            });
-          }
-
-          destinationPrivateKey =
-            getCustodyPrivateKeyByReference(key.merchantId, key.accountId, destinationWallet.keyReference) ||
-            sourcePrivateKey;
-          if (!destinationPrivateKey) {
-            return sendJson(res, 500, {
-              error: `Missing custody key for destination wallet reference: ${destinationWallet.keyReference}`
-            });
-          }
         }
 
         const consolidationId = createConsolidation({
@@ -2316,6 +3326,14 @@ const server = createServer(async (req, res) => {
         });
 
         updateConsolidationStatus(consolidationId, "submitted");
+        const submittedConsolidation = getConsolidation(consolidationId);
+        await publishTenantWebhookEvent({
+          merchantId: key.merchantId,
+          accountId: key.accountId,
+          eventType: "consolidation.submitted",
+          eventId: `evt_${consolidationId}_submitted`,
+          data: submittedConsolidation
+        });
 
         if (config.realConsolidationBridgeEnabled) {
           runConsolidationBridgeAsync({
@@ -2335,19 +3353,49 @@ const server = createServer(async (req, res) => {
           recomputeBalances(key.merchantId, key.accountId);
         }
 
-        return sendJson(res, 202, getConsolidation(consolidationId));
+        const created = getConsolidation(consolidationId);
+        return sendJson(res, 202, {
+          ...created,
+          statusPath: `/v1/merchants/${encodeURIComponent(key.merchantId)}/consolidations/${encodeURIComponent(consolidationId)}`
+        });
+        } finally {
+          releaseTenantMutationLock(lockHandle);
+        }
       }
 
       if (action === "payouts" && method === "GET") {
+        const timelineQuery = parseTimelineQuery(requestUrl.searchParams);
+        const timeline = queryTimeline(key.merchantId, key.accountId, {
+          ...timelineQuery,
+          itemTypes: ["payout"]
+        });
         return sendJson(res, 200, {
           merchantId: key.merchantId,
           accountId: key.accountId,
           asOf: nowIso(),
-          items: getTimeline(key.merchantId, key.accountId, 200).filter((item) => item.itemType === "payout")
+          items: timeline.items,
+          pagination: {
+            page: timeline.page,
+            pageSize: timeline.pageSize,
+            total: timeline.total,
+            totalPages: timeline.totalPages,
+            hasNextPage: timeline.hasNextPage,
+            hasPreviousPage: timeline.hasPreviousPage
+          }
         });
       }
 
       if (action === "payouts" && method === "POST") {
+        if (!requireRole(res, key, ["admin", "finance"])) {
+          return;
+        }
+        const lockHandle = acquireTenantMutationLock(`payout:${key.merchantId}:${key.accountId}`);
+        if (!lockHandle) {
+          return sendJson(res, 409, {
+            error: "Another payout request is already in progress for this account"
+          });
+        }
+        try {
         const body = await parseJsonBody(req);
         const network = String(body.network || "").trim();
         const destinationAddress = String(body.destinationAddress || "").trim();
@@ -2384,7 +3432,17 @@ const server = createServer(async (req, res) => {
           return sendJson(res, result.statusCode, result.payload);
         }
 
+        touchPayoutAddressBookEntryUsedByNetworkAddress(
+          key.merchantId,
+          key.accountId,
+          network,
+          destinationAddress
+        );
+
         return sendJson(res, result.statusCode, result.payout);
+        } finally {
+          releaseTenantMutationLock(lockHandle);
+        }
       }
 
       if (action === "settings" && method === "GET") {
@@ -2411,7 +3469,8 @@ const server = createServer(async (req, res) => {
 
     // Redirect browser routes to the Next.js frontend app.
     if (method === "GET" && !pathname.startsWith("/v1/")) {
-      const destination = `${config.webUrl}${pathname}${requestUrl.search || ""}`;
+      const normalizedPathname = `/${String(pathname || "").replace(/^\/+/, "")}`;
+      const destination = `${config.webUrl}${normalizedPathname}${requestUrl.search || ""}`;
       res.writeHead(302, { location: destination });
       res.end();
       return;
@@ -2419,8 +3478,19 @@ const server = createServer(async (req, res) => {
 
     return sendJson(res, 404, { error: "Not found" });
   } catch (error) {
+    const statusCode = Number(error?.statusCode || 0);
+    if (statusCode === 400 || statusCode === 413) {
+      return sendJson(res, statusCode, {
+        error: error.message
+      });
+    }
+    console.error("[merchant-os] unhandled request error", {
+      method,
+      pathname,
+      error: error instanceof Error ? error.message : String(error)
+    });
     return sendJson(res, 500, {
-      error: error instanceof Error ? error.message : "Internal server error"
+      error: "Internal server error"
     });
   }
 });
@@ -2438,11 +3508,6 @@ server.listen(config.port, () => {
     console.log("Workspace logins: none found. Create one via POST /v1/onboarding/start.");
     return;
   }
-  console.log("Workspace logins (from current DB):");
-  loginIdentities.forEach((identity) => {
-    console.log(
-      `- ${identity.merchantName}: email=${identity.email} role=${identity.role} merchantId=${identity.merchantId} accountId=${identity.accountId}`
-    );
-  });
-  console.log("Password values are intentionally not logged.");
+  console.log(`Workspace logins: ${loginIdentities.length} active user(s).`);
+  console.log("Use /v1/onboarding/settings (authenticated) to view tenant-specific identity details.");
 });

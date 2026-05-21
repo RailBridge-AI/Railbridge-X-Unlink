@@ -13,6 +13,24 @@ import { useAuthGuard } from "../../lib/useAuthGuard";
 
 const SAME_CHAIN_POLICY_NETWORK = "same_chain";
 const SAME_CHAIN_POLICY_LABEL = "Same as payment source chain (stay on source)";
+const generateWebhookSigningSecret = () => {
+  const bytes = new Uint8Array(24);
+  window.crypto.getRandomValues(bytes);
+  const value = Array.from(bytes, (item) =>
+    String.fromCharCode(item)
+  ).join("");
+  return `whsec_${btoa(value).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/g, "")}`;
+};
+const maskSecretValue = (value) => {
+  const text = String(value || "").trim();
+  if (!text) {
+    return "";
+  }
+  if (text.length <= 10) {
+    return `${text.slice(0, 2)}...${text.slice(-2)}`;
+  }
+  return `${text.slice(0, 6)}...${text.slice(-4)}`;
+};
 
 const PolicyNetworkOptionIcon = ({ network, displayName }) => {
   if (network === SAME_CHAIN_POLICY_NETWORK) {
@@ -116,13 +134,24 @@ export default function SettingsPage() {
   const [editingWebhookId, setEditingWebhookId] = useState("");
   const [editWebhookUrl, setEditWebhookUrl] = useState("");
   const [busyWebhookId, setBusyWebhookId] = useState("");
+  const [apiKeyCreateBusy, setApiKeyCreateBusy] = useState(false);
+  const [webhookTestBusy, setWebhookTestBusy] = useState(false);
   const [treasuryPreferredNetwork, setTreasuryPreferredNetwork] = useState("");
   const [treasuryAutoBridgeEnabled, setTreasuryAutoBridgeEnabled] = useState(true);
   const [policyBusy, setPolicyBusy] = useState(false);
   const [showTestnetsOnly, setShowTestnetsOnly] = useState(false);
+  const [showRevokedApiKeys, setShowRevokedApiKeys] = useState(false);
   const [policyDropdownOpen, setPolicyDropdownOpen] = useState(false);
+  const [pendingRevokedApiKeyDelete, setPendingRevokedApiKeyDelete] = useState(null);
   const policyDropdownRef = useRef(null);
-  const currentConsolePrefix = auth?.apiKey ? String(auth.apiKey).slice(0, 16) : "";
+  const isCurrentConsoleKey = (item) => {
+    const currentApiKey = String(auth?.apiKey || "").trim();
+    const keyPrefix = String(item?.keyPrefix || "").trim();
+    if (!currentApiKey || !keyPrefix) {
+      return false;
+    }
+    return currentApiKey.startsWith(keyPrefix);
+  };
 
   const loadSettings = async (currentAuth) => {
     const payload = await apiWithSession({
@@ -138,6 +167,22 @@ export default function SettingsPage() {
     }
     loadSettings(auth).catch((nextError) => setError(nextError.message || "Failed to load settings"));
   }, [auth]);
+
+  useEffect(() => {
+    if (!lastApiKeyToken) {
+      return;
+    }
+    const timer = setTimeout(() => setLastApiKeyToken(""), 5 * 60 * 1000);
+    return () => clearTimeout(timer);
+  }, [lastApiKeyToken]);
+
+  useEffect(() => {
+    if (!lastSecret) {
+      return;
+    }
+    const timer = setTimeout(() => setLastSecret(""), 5 * 60 * 1000);
+    return () => clearTimeout(timer);
+  }, [lastSecret]);
 
   useEffect(() => {
     if (typeof window === "undefined") {
@@ -256,13 +301,14 @@ export default function SettingsPage() {
     setError("");
     setMessage("");
     try {
-      const payload = await apiWithSession({
+      const signingSecret = generateWebhookSigningSecret();
+      await apiWithSession({
         token: auth.token,
         path: "/v1/onboarding/webhooks",
         method: "POST",
-        body: { url: webhookUrl }
+        body: { url: webhookUrl, signingSecret }
       });
-      setLastSecret(payload.signingSecret || "");
+      setLastSecret(signingSecret);
       setWebhookUrl("");
       setMessage("Webhook endpoint created.");
       await loadSettings(auth);
@@ -273,11 +319,12 @@ export default function SettingsPage() {
 
   const createApiKeyAction = async (event) => {
     event.preventDefault();
-    if (!auth) {
+    if (!auth || apiKeyCreateBusy) {
       return;
     }
     setError("");
     setMessage("");
+    setApiKeyCreateBusy(true);
     try {
       const payload = await apiWithSession({
         token: auth.token,
@@ -293,6 +340,8 @@ export default function SettingsPage() {
       await loadSettings(auth);
     } catch (nextError) {
       setError(nextError.message || "Failed to create API key");
+    } finally {
+      setApiKeyCreateBusy(false);
     }
   };
 
@@ -340,9 +389,9 @@ export default function SettingsPage() {
     if (!auth) {
       return;
     }
-    const isCurrentConsoleKey = item.keyPrefix === currentConsolePrefix;
+    const isCurrentConsoleKeyMatch = isCurrentConsoleKey(item);
     const confirmed = window.confirm(
-      isCurrentConsoleKey
+      isCurrentConsoleKeyMatch
         ? "This is the current console API key. Revoking it can break API-key based requests until you log in again. Revoke anyway?"
         : `Revoke API key "${item.name}"? This cannot be undone.`
     );
@@ -362,11 +411,11 @@ export default function SettingsPage() {
       if (editingKeyId === item.id) {
         cancelEditKey();
       }
-      await loadSettings(auth);
-      if (isCurrentConsoleKey) {
-        setMessage("Current console key revoked. Redirecting to login to refresh credentials.");
-        window.setTimeout(() => logout(), 900);
+      if (isCurrentConsoleKeyMatch) {
+        logout();
+        return;
       }
+      await loadSettings(auth);
     } catch (nextError) {
       setError(nextError.message || "Failed to revoke API key");
     } finally {
@@ -374,12 +423,51 @@ export default function SettingsPage() {
     }
   };
 
+  const openDeleteRevokedApiKeyModal = (item) => {
+    setPendingRevokedApiKeyDelete(item);
+  };
+
+  const closeDeleteRevokedApiKeyModal = () => {
+    if (busyKeyId && pendingRevokedApiKeyDelete?.id === busyKeyId) {
+      return;
+    }
+    setPendingRevokedApiKeyDelete(null);
+  };
+
+  const confirmDeleteRevokedApiKey = async () => {
+    if (!auth || !pendingRevokedApiKeyDelete) {
+      return;
+    }
+    const item = pendingRevokedApiKeyDelete;
+    setError("");
+    setMessage("");
+    setBusyKeyId(item.id);
+    try {
+      await apiWithSession({
+        token: auth.token,
+        path: `/v1/onboarding/api-keys/${item.id}`,
+        method: "DELETE"
+      });
+      if (editingKeyId === item.id) {
+        cancelEditKey();
+      }
+      setMessage("Revoked API key removed.");
+      setPendingRevokedApiKeyDelete(null);
+      await loadSettings(auth);
+    } catch (nextError) {
+      setError(nextError.message || "Failed to delete revoked API key");
+    } finally {
+      setBusyKeyId("");
+    }
+  };
+
   const testWebhooks = async () => {
-    if (!auth) {
+    if (!auth || webhookTestBusy) {
       return;
     }
     setError("");
     setMessage("");
+    setWebhookTestBusy(true);
     try {
       const payload = await apiWithSession({
         token: auth.token,
@@ -390,6 +478,8 @@ export default function SettingsPage() {
       await loadSettings(auth);
     } catch (nextError) {
       setError(nextError.message || "Failed to send webhook test");
+    } finally {
+      setWebhookTestBusy(false);
     }
   };
 
@@ -526,6 +616,11 @@ export default function SettingsPage() {
   const isApiKeysPanel = settingsPanel === "api_keys";
   const isWebhooksPanel = settingsPanel === "webhooks";
   const isTreasuryPanel = settingsPanel === "treasury";
+  const allApiKeys = Array.isArray(settings?.apiKeys) ? settings.apiKeys : [];
+  const revokedApiKeyCount = allApiKeys.filter((item) => item.status !== "active").length;
+  const visibleApiKeys = showRevokedApiKeys
+    ? allApiKeys
+    : allApiKeys.filter((item) => item.status === "active");
 
   return (
     <PlatformShell title="Settings" auth={auth} onLogout={logout}>
@@ -534,7 +629,7 @@ export default function SettingsPage() {
       {lastApiKeyToken ? (
         <div className="mt-2 rounded-xl border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800">
           <p>
-            Copy API key now: <span className="font-mono">{lastApiKeyToken}</span>
+            Copy API key now: <span className="font-mono">{maskSecretValue(lastApiKeyToken)}</span>
           </p>
           <button
             type="button"
@@ -548,7 +643,7 @@ export default function SettingsPage() {
       {lastSecret ? (
         <div className="mt-2 rounded-xl border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800">
           <p>
-            Copy webhook signing secret now: <span className="font-mono">{lastSecret}</span>
+            Copy webhook signing secret now: <span className="font-mono">{maskSecretValue(lastSecret)}</span>
           </p>
           <button
             type="button"
@@ -611,12 +706,34 @@ export default function SettingsPage() {
                   value={apiKeyName}
                   onChange={(event) => setApiKeyName(event.target.value)}
                 />
-                <button className="rounded-xl border border-rail-700 bg-gradient-to-br from-rail-700 to-rail-800 px-3 py-2 text-sm font-semibold text-white transition hover:brightness-105">
-                  Create API key
+                <button
+                  className="rounded-xl border border-rail-700 bg-gradient-to-br from-rail-700 to-rail-800 px-3 py-2 text-sm font-semibold text-white transition hover:brightness-105 disabled:opacity-60"
+                  disabled={apiKeyCreateBusy}
+                >
+                  {apiKeyCreateBusy ? "Creating..." : "Create API key"}
                 </button>
               </form>
+              <div className="mt-2 flex flex-wrap items-center justify-between gap-2 text-xs text-slate-500">
+                <p>
+                  Active keys are shown by default. Revoked keys stay in the audit trail but are hidden unless you expand them.
+                </p>
+                {revokedApiKeyCount ? (
+                  <button
+                    type="button"
+                    className="rounded border border-slate-300 bg-white px-2 py-1 font-medium text-slate-700 hover:bg-slate-100"
+                    onClick={() => setShowRevokedApiKeys((current) => !current)}
+                  >
+                    {showRevokedApiKeys ? "Hide revoked keys" : `Show revoked keys (${revokedApiKeyCount})`}
+                  </button>
+                ) : null}
+              </div>
               <ul className="mt-2 space-y-2 text-xs text-slate-600">
-                {(settings?.apiKeys || []).map((item) => (
+                {!visibleApiKeys.length ? (
+                  <li className="rounded border border-slate-200 bg-white p-2 text-slate-500">
+                    No active API keys right now. Create a new key to enable server-to-server access.
+                  </li>
+                ) : null}
+                {visibleApiKeys.map((item) => (
                   <li key={item.id} className="rounded border border-slate-200 bg-white p-2">
                     <div className="flex flex-wrap items-center gap-1.5">
                       <span className="font-semibold text-slate-800">{item.name}</span>
@@ -624,7 +741,7 @@ export default function SettingsPage() {
                       <span className={`rounded-full px-2 py-0.5 ${item.status === "active" ? "bg-emerald-100 text-emerald-700" : "bg-slate-200 text-slate-600"}`}>
                         {item.status === "active" ? "Active" : "Revoked"}
                       </span>
-                      {item.keyPrefix === currentConsolePrefix ? <span className="rounded-full bg-amber-100 px-2 py-0.5 text-amber-700">Current console key</span> : null}
+                      {isCurrentConsoleKey(item) ? <span className="rounded-full bg-amber-100 px-2 py-0.5 text-amber-700">Current console key</span> : null}
                     </div>
                     <p className="mt-1 font-mono">{item.keyPrefix}...</p>
 
@@ -681,6 +798,16 @@ export default function SettingsPage() {
                         >
                           {busyKeyId === item.id ? "Revoking..." : "Revoke"}
                         </button>
+                        {item.status !== "active" ? (
+                          <button
+                            type="button"
+                            className="rounded border border-rose-300 px-2 py-1 text-rose-700 hover:bg-rose-50 disabled:opacity-50"
+                            onClick={() => openDeleteRevokedApiKeyModal(item)}
+                            disabled={busyKeyId === item.id}
+                          >
+                            {busyKeyId === item.id ? "Deleting..." : "Delete"}
+                          </button>
+                        ) : null}
                       </div>
                     )}
                   </li>
@@ -701,8 +828,13 @@ export default function SettingsPage() {
                 <input className="rounded-xl border border-slate-300 bg-white px-3 py-2 text-sm" placeholder="https://api.yourcompany.com/webhooks/railbridge" value={webhookUrl} onChange={(event) => setWebhookUrl(event.target.value)} required />
                 <button className="rounded-xl border border-rail-700 bg-gradient-to-br from-rail-700 to-rail-800 px-3 py-2 text-sm font-semibold text-white transition hover:brightness-105">Add webhook</button>
               </form>
-              <button type="button" onClick={testWebhooks} className="mt-2 rounded-xl border border-slate-300 bg-white px-3 py-2 text-sm hover:bg-slate-100">
-                Send test event
+              <button
+                type="button"
+                onClick={testWebhooks}
+                className="mt-2 rounded-xl border border-slate-300 bg-white px-3 py-2 text-sm hover:bg-slate-100 disabled:opacity-60"
+                disabled={webhookTestBusy}
+              >
+                {webhookTestBusy ? "Sending test..." : "Send test event"}
               </button>
               <ul className="mt-2 space-y-2 text-xs text-slate-600">
                 {!(settings?.webhooks || []).length ? (
@@ -956,6 +1088,66 @@ export default function SettingsPage() {
           )}
         </section>
       </div>
+
+      {pendingRevokedApiKeyDelete ? (
+        <div className="fixed inset-0 z-[120] flex items-center justify-center overflow-y-auto bg-slate-950/60 p-4 backdrop-blur-sm sm:p-6 md:p-8">
+          <div className="mx-auto flex w-full max-w-[980px] max-h-[92vh] flex-col overflow-hidden rounded-[30px] border border-slate-200 bg-white shadow-2xl">
+            <div className="border-b border-slate-200 px-5 pb-4 pt-5">
+              <div className="flex items-start justify-between gap-3">
+                <div>
+                  <p className="text-xs font-semibold uppercase tracking-[0.14em] text-slate-500">API Key Management</p>
+                  <h4 className="mt-1 text-xl font-semibold text-slate-900">Delete revoked API key</h4>
+                </div>
+                <button
+                  type="button"
+                  onClick={closeDeleteRevokedApiKeyModal}
+                  className="rounded-lg border border-slate-300 px-3 py-1.5 text-xs font-medium text-slate-600 hover:bg-slate-100 disabled:opacity-50"
+                  disabled={busyKeyId === pendingRevokedApiKeyDelete.id}
+                >
+                  Close
+                </button>
+              </div>
+            </div>
+
+            <div className="flex-1 space-y-4 overflow-y-auto px-5 pb-5 pt-4">
+              <section className="rounded-2xl border border-rose-200 bg-rose-50 p-4">
+                <p className="text-sm font-semibold text-rose-800">This action is permanent</p>
+                <p className="mt-1 text-sm text-rose-700">
+                  Permanently delete revoked key{" "}
+                  <span className="font-semibold text-rose-900">
+                    &quot;{pendingRevokedApiKeyDelete.name}&quot;
+                  </span>
+                  . This removes it from key history and cannot be undone.
+                </p>
+                <div className="mt-3 rounded-xl border border-rose-200 bg-white px-3 py-2 text-xs text-rose-700">
+                  Keep revoked keys if you need historical audit visibility for past integrations or incidents.
+                </div>
+              </section>
+            </div>
+
+            <div className="border-t border-slate-200 bg-slate-50 px-5 py-4">
+              <div className="flex items-center justify-end gap-2">
+                <button
+                  type="button"
+                  className="rounded-xl border border-slate-300 bg-white px-3 py-2 text-sm font-medium text-slate-700 hover:bg-slate-100 disabled:opacity-50"
+                  onClick={closeDeleteRevokedApiKeyModal}
+                  disabled={busyKeyId === pendingRevokedApiKeyDelete.id}
+                >
+                  Cancel
+                </button>
+                <button
+                  type="button"
+                  className="rounded-xl border border-rose-300 bg-rose-600 px-3 py-2 text-sm font-semibold text-white hover:bg-rose-700 disabled:opacity-50"
+                  onClick={confirmDeleteRevokedApiKey}
+                  disabled={busyKeyId === pendingRevokedApiKeyDelete.id}
+                >
+                  {busyKeyId === pendingRevokedApiKeyDelete.id ? "Deleting..." : "Delete permanently"}
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      ) : null}
 
     </PlatformShell>
   );

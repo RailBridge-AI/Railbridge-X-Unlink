@@ -90,14 +90,18 @@ const resolveDbPath = (value) => {
   return resolve(rootDir, raw);
 };
 
-const parseJsonObjectEnv = (value, fallback = {}) => {
+const parseJsonObjectEnv = (value, fallback = {}, envName = "JSON_ENV") => {
   if (!value || typeof value !== "string") {
     return fallback;
   }
   try {
     const parsed = JSON.parse(value);
     return parsed && typeof parsed === "object" ? parsed : fallback;
-  } catch {
+  } catch (error) {
+    console.warn(
+      `[merchant-os] Invalid JSON in ${envName}; using fallback value.`,
+      error instanceof Error ? error.message : String(error)
+    );
     return fallback;
   }
 };
@@ -202,6 +206,7 @@ const runtimeConfigDefaults = {
   gasSponsorReceiptTimeoutMs: 120000,
   realConsolidationBridgeEnabled: true,
   realPayoutsEnabled: true,
+  allowSimulatedLedgerMutations: false,
   payoutTxTimeoutMs: 120000,
   consolidationBridgeTimeoutMs: 300000,
   consolidationBridgeRetryAttempts: 2,
@@ -257,7 +262,7 @@ const parseRpcOverridesFromEnv = () => {
 
   const rawJson = process.env.MERCHANT_OS_RPC_OVERRIDES_JSON;
   if (rawJson && rawJson.trim()) {
-    const parsed = parseJsonObjectEnv(rawJson, {});
+    const parsed = parseJsonObjectEnv(rawJson, {}, "MERCHANT_OS_RPC_OVERRIDES_JSON");
     Object.entries(parsed).forEach(([network, urls]) => {
       if (!/^eip155:[0-9]+$/.test(network)) {
         return;
@@ -301,8 +306,15 @@ const onboardingAllowlistDomains = new Set(
 
 const chainStatusOverrides = {
   ...toPlainObject(runtimeConfig.chainStatusOverrides),
-  ...parseJsonObjectEnv(process.env.MERCHANT_OS_CHAIN_STATUS_OVERRIDES_JSON, {})
+  ...parseJsonObjectEnv(
+    process.env.MERCHANT_OS_CHAIN_STATUS_OVERRIDES_JSON,
+    {},
+    "MERCHANT_OS_CHAIN_STATUS_OVERRIDES_JSON"
+  )
 };
+const nodeEnvNormalized = String(process.env.NODE_ENV || "").trim().toLowerCase();
+const isProductionEnv = nodeEnvNormalized === "production";
+const isTestEnv = nodeEnvNormalized === "test";
 
 const custodyMode = String(
   process.env.MERCHANT_OS_CUSTODY_MODE ?? runtimeConfig.custodyMode ?? "mpc"
@@ -385,6 +397,10 @@ export const config = {
     process.env.MERCHANT_OS_REAL_PAYOUTS_ENABLED,
     parseBooleanValue(runtimeConfig.realPayoutsEnabled, true)
   ),
+  allowSimulatedLedgerMutations: parseBooleanValue(
+    process.env.MERCHANT_OS_ALLOW_SIMULATED_LEDGER_MUTATIONS,
+    parseBooleanValue(runtimeConfig.allowSimulatedLedgerMutations, isTestEnv)
+  ),
   payoutTxTimeoutMs: parseIntValue(
     process.env.MERCHANT_OS_PAYOUT_TX_TIMEOUT_MS ??
       runtimeConfig.payoutTxTimeoutMs,
@@ -461,14 +477,35 @@ export const config = {
     const nextRpcByNetwork = maps.rpcByNetwork || {};
     const nextUsdcTokenByNetwork = maps.usdcTokenByNetwork || {};
 
+    const mergedRpcUrlsByNetwork = { ...nextRpcUrlsByNetwork };
+    Object.entries(runtimeRpcOverrides).forEach(([network, overrideUrls]) => {
+      const catalogUrls = Array.isArray(mergedRpcUrlsByNetwork[network])
+        ? mergedRpcUrlsByNetwork[network]
+        : [];
+      mergedRpcUrlsByNetwork[network] = [
+        ...new Set([...overrideUrls, ...catalogUrls].filter(Boolean))
+      ];
+    });
+    Object.entries(envRpcOverrides).forEach(([network, overrideUrls]) => {
+      const existing = Array.isArray(mergedRpcUrlsByNetwork[network])
+        ? mergedRpcUrlsByNetwork[network]
+        : [];
+      mergedRpcUrlsByNetwork[network] = [
+        ...new Set([...overrideUrls, ...existing].filter(Boolean))
+      ];
+    });
+
     Object.keys(this.rpcUrlsByNetwork).forEach((key) => delete this.rpcUrlsByNetwork[key]);
-    Object.keys(nextRpcUrlsByNetwork).forEach((key) => {
-      this.rpcUrlsByNetwork[key] = nextRpcUrlsByNetwork[key];
+    Object.keys(mergedRpcUrlsByNetwork).forEach((key) => {
+      this.rpcUrlsByNetwork[key] = mergedRpcUrlsByNetwork[key];
     });
 
     Object.keys(this.rpcByNetwork).forEach((key) => delete this.rpcByNetwork[key]);
-    Object.keys(nextRpcByNetwork).forEach((key) => {
-      this.rpcByNetwork[key] = nextRpcByNetwork[key];
+    Object.keys(this.rpcUrlsByNetwork).forEach((key) => {
+      const urls = this.rpcUrlsByNetwork[key];
+      if (Array.isArray(urls) && urls.length > 0) {
+        this.rpcByNetwork[key] = urls[0];
+      }
     });
 
     Object.keys(this.usdcTokenByNetwork).forEach((key) => delete this.usdcTokenByNetwork[key]);
@@ -486,3 +523,41 @@ export const config = {
     }
   }
 };
+
+const DEMO_INGEST_TOKEN = "merchant-os-demo-ingest";
+const usingDemoIngestToken =
+  config.ingestToken === DEMO_INGEST_TOKEN || config.internalToken === DEMO_INGEST_TOKEN;
+
+if (usingDemoIngestToken) {
+  const warning =
+    "[merchant-os] WARNING: ingest/internal token is using the public demo default. Set MERCHANT_OS_INGEST_TOKEN and MERCHANT_OS_INTERNAL_TOKEN before production use.";
+  if (config.realConsolidationBridgeEnabled || config.realPayoutsEnabled) {
+    console.error(
+      `${warning} Real bridging/payout mode is enabled, refusing to start for safety.`
+    );
+    process.exit(1);
+  }
+  console.warn(warning);
+}
+
+if (isProductionEnv && !String(config.adminToken || "").trim()) {
+  console.warn(
+    "[merchant-os] WARNING: MERCHANT_OS_ADMIN_TOKEN is empty. Admin routes will be disabled in production."
+  );
+}
+
+if (isProductionEnv && (!config.realConsolidationBridgeEnabled || !config.realPayoutsEnabled)) {
+  console.error(
+    "[merchant-os] FATAL: production mode requires realConsolidationBridgeEnabled=true and realPayoutsEnabled=true."
+  );
+  process.exit(1);
+}
+
+const simulationModeEnabled =
+  !config.realConsolidationBridgeEnabled || !config.realPayoutsEnabled;
+if (simulationModeEnabled && !config.allowSimulatedLedgerMutations) {
+  console.error(
+    "[merchant-os] FATAL: simulation ledger mutations are disabled. Set MERCHANT_OS_ALLOW_SIMULATED_LEDGER_MUTATIONS=true only for isolated test/demo environments."
+  );
+  process.exit(1);
+}

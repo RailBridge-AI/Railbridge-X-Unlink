@@ -10,7 +10,7 @@ import type {
   SettleResponse,
   VerifyResponse,
 } from "@x402/core/types";
-import type { RequestHandler } from "express";
+import type { Request, RequestHandler } from "express";
 import { CROSS_CHAIN, declareCrossChainExtension } from "../extensions/crossChain.js";
 
 const DEFAULT_SUPPORTED_NETWORKS: Array<`${string}:${string}`> = [
@@ -38,6 +38,7 @@ const PREFERRED_REQUIREMENT_NETWORKS: Array<`${string}:${string}`> = [
 const SUPPORTED_SETTLEMENT_MODES = new Set(["same_chain", "cross_chain"]);
 const FACILITATOR_SUPPORTED_ENDPOINT = "/supported";
 const FACILITATOR_CHAINS_ENDPOINT = "/chains";
+const DEFAULT_FETCH_TIMEOUT_MS = 8000;
 
 export type MerchantOsPaymentGuardConfig = {
   facilitatorUrl: string;
@@ -108,6 +109,39 @@ export type MerchantOsPaymentGuard = {
   stopAutoRefresh: () => void;
 };
 
+type RefreshReason = "startup" | "manual" | "request" | "interval";
+
+type RefreshOptions = {
+  reason?: RefreshReason;
+  continueOnError?: boolean;
+};
+
+const isValidPayTo = (value: unknown): value is `0x${string}` =>
+  typeof value === "string" && /^0x[a-fA-F0-9]{40}$/.test(value.trim());
+
+const isValidNetwork = (value: unknown): value is `${string}:${string}` =>
+  typeof value === "string" && /^[a-z0-9]+:[a-zA-Z0-9]+$/.test(value.trim());
+
+const isValidPrice = (value: unknown): value is RequirementPrice => {
+  if (!value || typeof value !== "object") {
+    return false;
+  }
+  const record = value as RequirementPrice;
+  if (typeof record.asset !== "string" || !record.asset.trim()) {
+    return false;
+  }
+  if (typeof record.amount !== "string" || !/^\d+(\.\d+)?$/.test(record.amount.trim())) {
+    return false;
+  }
+  return Number(record.amount) > 0;
+};
+
+const isValidRequirement = (value: Requirement): boolean =>
+  value?.scheme === "exact" &&
+  isValidNetwork(value.network) &&
+  isValidPayTo(value.payTo) &&
+  isValidPrice(value.price);
+
 class LoggingFacilitatorClient extends HTTPFacilitatorClient {
   private readonly logPrefix: string;
 
@@ -152,6 +186,15 @@ const normalizePath = (path: string) => {
   return value.startsWith("/") ? value : `/${value}`;
 };
 
+const normalizeRequestPath = (path: string) => {
+  const value = String(path || "").trim();
+  if (!value) {
+    return "/";
+  }
+  const withoutQuery = value.split("?")[0] || "/";
+  return withoutQuery.startsWith("/") ? withoutQuery : `/${withoutQuery}`;
+};
+
 const normalizeSettlementMode = (mode: string) => {
   const value = String(mode || "").trim().toLowerCase();
   if (!SUPPORTED_SETTLEMENT_MODES.has(value)) {
@@ -168,11 +211,24 @@ const ensureRequired = (value: string, fieldName: string) => {
   return trimmed;
 };
 
+const fetchWithTimeout = async (url: string, init?: RequestInit, timeoutMs = DEFAULT_FETCH_TIMEOUT_MS) => {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), Math.max(1000, timeoutMs));
+  try {
+    return await fetch(url, {
+      ...(init || {}),
+      signal: controller.signal,
+    });
+  } finally {
+    clearTimeout(timer);
+  }
+};
+
 const fetchFacilitatorSupportedNetworks = async (
   facilitatorUrl: string,
 ): Promise<Array<`${string}:${string}`>> => {
   try {
-    const response = await fetch(`${facilitatorUrl}${FACILITATOR_SUPPORTED_ENDPOINT}`);
+    const response = await fetchWithTimeout(`${facilitatorUrl}${FACILITATOR_SUPPORTED_ENDPOINT}`);
     if (!response.ok) {
       return [...DEFAULT_SUPPORTED_NETWORKS];
     }
@@ -207,7 +263,7 @@ const fetchFacilitatorChains = async (
   facilitatorUrl: string,
 ): Promise<FacilitatorChainRecord[]> => {
   try {
-    const response = await fetch(`${facilitatorUrl}${FACILITATOR_CHAINS_ENDPOINT}`);
+    const response = await fetchWithTimeout(`${facilitatorUrl}${FACILITATOR_CHAINS_ENDPOINT}`);
     if (!response.ok) {
       return [];
     }
@@ -302,16 +358,18 @@ export const createMerchantOsPaymentGuard = async (
       ? fetchedSupportedNetworks.filter((network) => filteredSourceNetworkSet.has(network))
       : fetchedSupportedNetworks;
   if (filteredSourceNetworkSet && !filteredSourceNetworkSet.size) {
-    console.warn(`${logPrefix} unable to enforce source network filter`, {
-      sourceNetworkFilter,
-      reason: "facilitator /chains metadata unavailable",
-    });
+    throw new Error(
+      `${logPrefix} unable to enforce source network filter: facilitator /chains metadata unavailable`,
+    );
   } else if (filteredSourceNetworkSet && supportedSourceNetworks.length !== fetchedSupportedNetworks.length) {
     console.info(`${logPrefix} source network filter applied`, {
       sourceNetworkFilter,
       before: fetchedSupportedNetworks.length,
       after: supportedSourceNetworks.length,
     });
+  }
+  if (!supportedSourceNetworks.length) {
+    throw new Error(`${logPrefix} no supported source networks available after initialization`);
   }
   const supportedSourceNetworkSet = new Set(supportedSourceNetworks);
 
@@ -335,9 +393,11 @@ export const createMerchantOsPaymentGuard = async (
     .build();
 
   const routeKey = `${routeMethod} ${routePath}`;
+  let refreshInFlight: Promise<RouteInfo> | null = null;
+  let lastResolvedSignature = "";
 
   const fetchResolvedRequirement = async (): Promise<MerchantOsResolvedRequirement> => {
-    const response = await fetch(`${merchantOsApiUrl}/v1/sdk/requirements/resolve`, {
+    const response = await fetchWithTimeout(`${merchantOsApiUrl}/v1/sdk/requirements/resolve`, {
       method: "POST",
       headers: {
         "content-type": "application/json",
@@ -350,7 +410,7 @@ export const createMerchantOsPaymentGuard = async (
         path: routePath,
         settlementModeOverride: settlementMode || undefined,
       }),
-    });
+    }, DEFAULT_FETCH_TIMEOUT_MS);
 
     const body = (await response.json().catch(() => ({}))) as {
       error?: string;
@@ -365,83 +425,165 @@ export const createMerchantOsPaymentGuard = async (
     return body as MerchantOsResolvedRequirement;
   };
 
-  const refreshRequirements = async (): Promise<RouteInfo> => {
-    const resolved = await fetchResolvedRequirement();
-    const requirementOptions =
-      Array.isArray(resolved.requirements) && resolved.requirements.length
-        ? resolved.requirements
-        : [resolved.requirement];
-    const supportedRequirements = requirementOptions.filter((requirement) =>
-      supportedSourceNetworkSet.has(requirement.network as `${string}:${string}`),
-    );
-
-    if (!supportedRequirements.length) {
-      const requestedNetworks = Array.from(
-        new Set(requirementOptions.map((requirement) => requirement.network)),
+  const refreshRequirementsInternal = async ({
+    reason = "manual",
+    continueOnError = false,
+  }: RefreshOptions = {}): Promise<RouteInfo> => {
+    try {
+      const resolved = await fetchResolvedRequirement();
+      const requirementOptions =
+        Array.isArray(resolved.requirements) && resolved.requirements.length
+          ? resolved.requirements
+          : [resolved.requirement];
+      const invalidRequirement = requirementOptions.find((requirement) => !isValidRequirement(requirement));
+      if (invalidRequirement) {
+        throw new Error("Merchant OS returned invalid requirement payload");
+      }
+      const supportedRequirements = requirementOptions.filter((requirement) =>
+        supportedSourceNetworkSet.has(requirement.network as `${string}:${string}`),
       );
-      throw new Error(
-        `No supported source networks after filtering. Requested=${requestedNetworks.join(",")} Supported=${Array.from(
-          supportedSourceNetworkSet,
-        ).join(",")}`,
-      );
-    }
 
-    const prioritizedRequirements = sortRequirementOptions(supportedRequirements);
-    const truncatedRequirements = prioritizedRequirements.slice(0, maxRequirementOptions);
-    if (truncatedRequirements.length < supportedRequirements.length) {
-      console.warn(`${logPrefix} requirement options truncated`, {
-        requested: supportedRequirements.length,
-        served: truncatedRequirements.length,
-        maxRequirementOptions,
-      });
-    }
+      if (!supportedRequirements.length) {
+        const requestedNetworks = Array.from(
+          new Set(requirementOptions.map((requirement) => requirement.network)),
+        );
+        throw new Error(
+          `No supported source networks after filtering. Requested=${requestedNetworks.join(",")} Supported=${Array.from(
+            supportedSourceNetworkSet,
+          ).join(",")}`,
+        );
+      }
 
-    const nextRoute: Record<string, unknown> = {
-      accepts: truncatedRequirements.map((requirement) => ({
-        scheme: requirement.scheme,
-        network: requirement.network,
-        price: requirement.price,
-        payTo: requirement.payTo,
-        merchantId: resolved.merchantId,
-        accountId: resolved.accountId,
-        extra: requirement.extra,
-      })),
-      description:
-        resolved.requirement.extra?.description ||
-        resolved.apiProduct?.description ||
-        resolved.apiProduct?.apiName ||
-        "RailBridge protected endpoint",
-      mimeType: "application/json",
-    };
+      const prioritizedRequirements = sortRequirementOptions(supportedRequirements);
+      const truncatedRequirements = prioritizedRequirements.slice(0, maxRequirementOptions);
+      if (truncatedRequirements.length < supportedRequirements.length) {
+        console.warn(`${logPrefix} requirement options truncated`, {
+          requested: supportedRequirements.length,
+          served: truncatedRequirements.length,
+          maxRequirementOptions,
+        });
+      }
 
-    if (resolved.crossChain) {
-      nextRoute.extensions = {
-        [CROSS_CHAIN]: declareCrossChainExtension({
-          destinationNetwork: resolved.crossChain.destinationNetwork,
-          destinationAsset: resolved.crossChain.destinationAsset,
-          destinationPayTo: resolved.crossChain.destinationPayTo,
-        }),
+      const nextRoute: Record<string, unknown> = {
+        accepts: truncatedRequirements.map((requirement) => ({
+          scheme: requirement.scheme,
+          network: requirement.network,
+          price: requirement.price,
+          payTo: requirement.payTo,
+          merchantId: resolved.merchantId,
+          accountId: resolved.accountId,
+          extra: requirement.extra,
+        })),
+        description:
+          resolved.requirement.extra?.description ||
+          resolved.apiProduct?.description ||
+          resolved.apiProduct?.apiName ||
+          "RailBridge protected endpoint",
+        mimeType: "application/json",
       };
+
+      if (resolved.crossChain) {
+        nextRoute.extensions = {
+          [CROSS_CHAIN]: declareCrossChainExtension({
+            destinationNetwork: resolved.crossChain.destinationNetwork,
+            destinationAsset: resolved.crossChain.destinationAsset,
+            destinationPayTo: resolved.crossChain.destinationPayTo,
+          }),
+        };
+      }
+
+      routes[routeKey] = nextRoute;
+
+      currentRouteInfo = {
+        routeKey,
+        payTo: resolved.requirement.payTo,
+        sourceNetworks: truncatedRequirements.map((requirement) => requirement.network),
+        crossChain: Boolean(resolved.crossChain),
+        settlementMode: resolved.settlementMode || settlementMode || "auto",
+      };
+
+      const nextSignature = JSON.stringify({
+        payTo: currentRouteInfo.payTo,
+        sourceNetworks: currentRouteInfo.sourceNetworks,
+        crossChain: currentRouteInfo.crossChain,
+        settlementMode: currentRouteInfo.settlementMode,
+        accepts: truncatedRequirements.map((requirement) => ({
+          scheme: requirement.scheme,
+          network: requirement.network,
+          payTo: requirement.payTo,
+          asset: requirement.price.asset,
+          amount: requirement.price.amount,
+        })),
+        extension: resolved.crossChain || null,
+      });
+
+      if (nextSignature !== lastResolvedSignature) {
+        lastResolvedSignature = nextSignature;
+        console.log(`${logPrefix} route requirements refreshed`, {
+          ...currentRouteInfo,
+          reason,
+        });
+      }
+
+      return currentRouteInfo;
+    } catch (error) {
+      if (continueOnError && currentRouteInfo) {
+        console.warn(`${logPrefix} route refresh failed, continuing with cached requirements`, {
+          reason,
+          error: error instanceof Error ? error.message : String(error),
+        });
+        return currentRouteInfo;
+      }
+      throw error;
     }
-
-    Object.keys(routes).forEach((key) => delete routes[key]);
-    routes[routeKey] = nextRoute;
-
-    currentRouteInfo = {
-      routeKey,
-      payTo: resolved.requirement.payTo,
-      sourceNetworks: truncatedRequirements.map((requirement) => requirement.network),
-      crossChain: Boolean(resolved.crossChain),
-      settlementMode: settlementMode || "auto",
-    };
-
-    console.log(`${logPrefix} route requirements refreshed`, currentRouteInfo);
-    return currentRouteInfo;
   };
 
-  await refreshRequirements();
+  const refreshRequirements = (): Promise<RouteInfo> => {
+    if (!refreshInFlight) {
+      refreshInFlight = refreshRequirementsInternal({
+        reason: "manual",
+      }).finally(() => {
+        refreshInFlight = null;
+      });
+    }
+    return refreshInFlight;
+  };
 
-  const middleware = paymentMiddleware(routes, resourceServer, undefined, paywall, true);
+  const refreshForProtectedRequest = (): Promise<RouteInfo> => {
+    if (!refreshInFlight) {
+      refreshInFlight = refreshRequirementsInternal({
+        reason: "request",
+        continueOnError: false,
+      }).finally(() => {
+        refreshInFlight = null;
+      });
+    }
+    return refreshInFlight;
+  };
+
+  await refreshRequirementsInternal({
+    reason: "startup",
+  });
+
+  const baseMiddleware = paymentMiddleware(routes, resourceServer, undefined, paywall, true);
+
+  const shouldRefreshForRequest = (req: Request) =>
+    normalizeMethod(req.method || "GET") === routeMethod &&
+    normalizeRequestPath(req.path || req.originalUrl || req.url || "") === routePath;
+
+  const middleware: RequestHandler = (req, res, next) => {
+    if (!shouldRefreshForRequest(req)) {
+      return baseMiddleware(req, res, next);
+    }
+
+    void refreshForProtectedRequest()
+      .then(() => {
+        baseMiddleware(req, res, next);
+      })
+      .catch((error) => {
+        next(error);
+      });
+  };
 
   let refreshTimer: NodeJS.Timeout | null = null;
 
@@ -451,11 +593,14 @@ export const createMerchantOsPaymentGuard = async (
     }
     const everyMs = Math.max(10_000, Number(config.autoRefreshMs || 30_000));
     refreshTimer = setInterval(() => {
-      refreshRequirements().catch((error) => {
-        console.warn(`${logPrefix} route refresh failed`, {
-          error: error instanceof Error ? error.message : String(error),
+      if (!refreshInFlight) {
+        refreshInFlight = refreshRequirementsInternal({
+          reason: "interval",
+          continueOnError: true,
+        }).finally(() => {
+          refreshInFlight = null;
         });
-      });
+      }
     }, everyMs);
     refreshTimer.unref();
   };

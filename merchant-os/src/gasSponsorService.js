@@ -65,8 +65,8 @@ export class GasSponsorService {
   constructor({ privateKey, rpcByNetwork, rpcUrlsByNetwork }) {
     this.rpcByNetwork = rpcByNetwork || {};
     this.rpcUrlsByNetwork = rpcUrlsByNetwork || {};
-    this.privateKey = normalizePrivateKey(privateKey);
-    this.account = this.privateKey ? privateKeyToAccount(this.privateKey) : null;
+    const normalizedPrivateKey = normalizePrivateKey(privateKey);
+    this.account = normalizedPrivateKey ? privateKeyToAccount(normalizedPrivateKey) : null;
   }
 
   isReady() {
@@ -139,6 +139,7 @@ export class GasSponsorService {
 
     let lastError = null;
     for (const rpcUrl of rpcUrls) {
+      let txHash = null;
       try {
         const chain = buildAdHocChain(chainId, rpcUrl);
         const transport = http(rpcUrl, { timeout: 12000, retryCount: 1 });
@@ -156,7 +157,7 @@ export class GasSponsorService {
           );
         }
 
-        const txHash = await walletClient.sendTransaction({
+        txHash = await walletClient.sendTransaction({
           account: this.account,
           to: targetAddress,
           value
@@ -176,6 +177,14 @@ export class GasSponsorService {
           network
         };
       } catch (error) {
+        if (txHash) {
+          const message = error instanceof Error ? error.message : String(error);
+          const receiptError = new Error(
+            `Gas top-up transaction broadcast but receipt confirmation failed (txHash=${txHash}): ${message}`
+          );
+          receiptError.txHash = txHash;
+          throw receiptError;
+        }
         lastError = error;
       }
     }

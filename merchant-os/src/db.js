@@ -200,7 +200,14 @@ const all = (sql) => {
   if (!output) {
     return [];
   }
-  return JSON.parse(output);
+  try {
+    return JSON.parse(output);
+  } catch (error) {
+    console.warn(
+      `[merchant-os][db] Failed to parse sqlite JSON output: ${error instanceof Error ? error.message : String(error)}`
+    );
+    return [];
+  }
 };
 
 const one = (sql) => {
@@ -219,7 +226,7 @@ const ensureColumn = (tableName, columnName, columnType) => {
 const runSchemaMigrations = () => {
   ensureColumn("merchants", "status", "TEXT NOT NULL DEFAULT 'active'");
   ensureColumn("merchants", "compliance_profile_json", "TEXT");
-  ensureColumn("merchant_users", "password_hash_algo", "TEXT NOT NULL DEFAULT 'legacy_plaintext'");
+  ensureColumn("merchant_users", "password_hash_algo", "TEXT NOT NULL DEFAULT 'pbkdf2_sha512'");
   ensureColumn("merchant_users", "status", "TEXT NOT NULL DEFAULT 'active'");
   ensureColumn("merchant_accounts", "status", "TEXT NOT NULL DEFAULT 'active'");
   ensureColumn("merchant_account_wallets", "signer_provider", "TEXT NOT NULL DEFAULT 'mpc'");
@@ -230,6 +237,19 @@ const runSchemaMigrations = () => {
   ensureColumn("treasury_settlement_events", "source_tx_hash", "TEXT");
   ensureColumn("treasury_settlement_events", "bridge_tx_hash", "TEXT");
   ensureColumn("treasury_settlement_events", "destination_tx_hash", "TEXT");
+  // Deduplicate legacy settlement rows before enforcing tenant tx/status uniqueness.
+  run(`
+    DELETE FROM treasury_settlement_events
+    WHERE rowid NOT IN (
+      SELECT MIN(rowid)
+      FROM treasury_settlement_events
+      GROUP BY merchant_id, account_id, tx_hash, status
+    );
+  `);
+  run(`
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_settlement_tenant_tx_status
+    ON treasury_settlement_events(merchant_id, account_id, tx_hash, status);
+  `);
   ensureColumn("treasury_settlement_events", "block_number", "INTEGER");
   ensureColumn("treasury_settlement_events", "log_index", "INTEGER");
   ensureColumn("treasury_settlement_events", "confirmations", "INTEGER NOT NULL DEFAULT 0");
@@ -243,6 +263,10 @@ const runSchemaMigrations = () => {
   run(`
     CREATE INDEX IF NOT EXISTS idx_settlement_source_tx
       ON treasury_settlement_events(source_network, source_tx_hash, log_index);
+  `);
+  run(`
+    CREATE INDEX IF NOT EXISTS idx_treasury_consolidations_tenant_created
+      ON treasury_consolidations(merchant_id, account_id, created_at DESC);
   `);
   run(`
     CREATE TABLE IF NOT EXISTS chain_catalog (
@@ -321,6 +345,24 @@ const runSchemaMigrations = () => {
       ON webhook_deliveries(event_id, event_type);
   `);
   run(`
+    CREATE TABLE IF NOT EXISTS payout_address_book_entries (
+      id TEXT PRIMARY KEY,
+      merchant_id TEXT NOT NULL REFERENCES merchants(id),
+      account_id TEXT NOT NULL REFERENCES merchant_accounts(id),
+      label TEXT NOT NULL,
+      network TEXT NOT NULL,
+      address TEXT NOT NULL,
+      last_used_at TEXT,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      UNIQUE(merchant_id, account_id, network, address)
+    );
+  `);
+  run(`
+    CREATE INDEX IF NOT EXISTS idx_payout_address_book_tenant
+      ON payout_address_book_entries(merchant_id, account_id, network, created_at);
+  `);
+  run(`
     CREATE TABLE IF NOT EXISTS bridge_jobs (
       id TEXT PRIMARY KEY,
       settlement_id TEXT NOT NULL,
@@ -346,6 +388,19 @@ const runSchemaMigrations = () => {
   run(`
     CREATE INDEX IF NOT EXISTS idx_bridge_jobs_status
       ON bridge_jobs(status, next_retry_at);
+  `);
+  run(`
+    CREATE TABLE IF NOT EXISTS tenant_mutation_locks (
+      lock_key TEXT PRIMARY KEY,
+      owner_token TEXT NOT NULL,
+      expires_at TEXT NOT NULL,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+  `);
+  run(`
+    CREATE INDEX IF NOT EXISTS idx_tenant_mutation_locks_expires
+      ON tenant_mutation_locks(expires_at);
   `);
 };
 
@@ -465,29 +520,17 @@ const updateWalletAddressByReference = (merchantId, accountId, keyReference, add
   `);
 };
 
-const tenantSeedPrivateKeyCache = new Map();
-
 const resolveSeedPrivateKeyForTenant = (merchantId, accountId) => {
-  const cacheKey = `${merchantId}:${accountId}`;
-  const cached = tenantSeedPrivateKeyCache.get(cacheKey);
-  if (cached) {
-    return cached;
-  }
-
   const existing = getFirstCustodyKeyRecordForTenant(merchantId, accountId);
   if (existing) {
-    const existingPrivateKey = decryptCustodyPrivateKey(existing, config.custodyMasterKey);
-    tenantSeedPrivateKeyCache.set(cacheKey, existingPrivateKey);
-    return existingPrivateKey;
+    return decryptCustodyPrivateKey(existing, config.custodyMasterKey);
   }
 
   if (sharedCustodyPrivateKey) {
-    tenantSeedPrivateKeyCache.set(cacheKey, sharedCustodyPrivateKey);
     return sharedCustodyPrivateKey;
   }
 
   const generated = generateCustodyWallet();
-  tenantSeedPrivateKeyCache.set(cacheKey, generated.privateKey);
   return generated.privateKey;
 };
 
@@ -591,7 +634,6 @@ const alignMpcWalletAddressesToTenantCustody = () => {
 
 export const initializeDatabase = () => {
   assertCustodyMasterKeyConfigured();
-  tenantSeedPrivateKeyCache.clear();
   ensureDbDirectory();
   run("PRAGMA journal_mode = WAL;");
   run("PRAGMA foreign_keys = ON;");
@@ -603,9 +645,6 @@ export const initializeDatabase = () => {
     backfillCustodyKeysForWallets();
   }
   alignMpcWalletAddressesToTenantCustody();
-
-  // Keep demo premium API aligned with configured source network (defaults to Arbitrum Sepolia).
-  alignDemoApiProductSourceNetwork();
 };
 
 export const resetDatabase = () => {
@@ -613,6 +652,8 @@ export const resetDatabase = () => {
     rmSync(config.dbPath);
   }
   initializeDatabase();
+  // Seed demo premium route only on explicit DB reset (not every API restart).
+  alignDemoApiProductSourceNetwork();
 };
 
 export const listWorkspaceLoginIdentities = () =>
@@ -782,42 +823,22 @@ export const onboardMerchantAccount = ({
   };
 };
 
-export const authenticateUser = (email, password) =>
-  one(`
-    SELECT
-      u.id,
-      u.merchant_id AS merchantId,
-      a.id AS accountId,
-      u.email,
-      u.role
-    FROM merchant_users u
-    JOIN merchant_accounts a ON a.merchant_id = u.merchant_id
-    WHERE u.email = ${sqlLiteral(email)}
-      AND u.password_hash = ${sqlLiteral(password)}
-    LIMIT 1;
-  `);
-
 export const authenticatePlatformUser = (email, password) => {
   const user = one(`
     SELECT
       u.id,
       u.merchant_id AS merchantId,
-      a.id AS accountId,
       m.name AS merchantName,
-      a.account_name AS accountName,
       u.email,
       u.role,
       u.password_hash AS passwordHash,
       u.password_hash_algo AS passwordHashAlgo,
       u.status
     FROM merchant_users u
-    JOIN merchant_accounts a ON a.merchant_id = u.merchant_id
     JOIN merchants m ON m.id = u.merchant_id
     WHERE lower(u.email) = ${sqlLiteral(String(email || "").trim().toLowerCase())}
       AND u.status = 'active'
-      AND a.status = 'active'
       AND m.status = 'active'
-    ORDER BY a.created_at ASC
     LIMIT 1;
   `);
 
@@ -847,12 +868,51 @@ export const authenticatePlatformUser = (email, password) => {
     return null;
   }
 
+  const activeAccounts = all(`
+    SELECT
+      id AS accountId,
+      account_name AS accountName,
+      created_at AS createdAt
+    FROM merchant_accounts
+    WHERE merchant_id = ${sqlLiteral(user.merchantId)}
+      AND status = 'active'
+    ORDER BY created_at ASC;
+  `);
+  if (!activeAccounts.length) {
+    return null;
+  }
+
+  let selectedAccount = activeAccounts[0];
+  if (activeAccounts.length > 1) {
+    const preferredAccount = one(`
+      SELECT
+        account_id AS accountId
+      FROM api_keys
+      WHERE merchant_id = ${sqlLiteral(user.merchantId)}
+        AND created_by_user_id = ${sqlLiteral(user.id)}
+        AND status = 'active'
+      ORDER BY
+        (last_used_at IS NULL) ASC,
+        last_used_at DESC,
+        created_at DESC
+      LIMIT 1;
+    `);
+    if (!preferredAccount?.accountId) {
+      return null;
+    }
+    selectedAccount =
+      activeAccounts.find((account) => account.accountId === preferredAccount.accountId) || null;
+    if (!selectedAccount) {
+      return null;
+    }
+  }
+
   return {
     id: user.id,
     merchantId: user.merchantId,
-    accountId: user.accountId,
+    accountId: selectedAccount.accountId,
     merchantName: user.merchantName,
-    accountName: user.accountName,
+    accountName: selectedAccount.accountName,
     email: user.email,
     role: user.role
   };
@@ -1138,6 +1198,19 @@ export const listApiKeys = (merchantId, accountId) =>
     ORDER BY created_at DESC;
   `);
 
+export const revokeActiveConsoleSessionApiKeys = (merchantId, accountId, userId) => {
+  run(`
+    UPDATE api_keys
+    SET status = 'revoked',
+        updated_at = ${sqlLiteral(nowIso())}
+    WHERE merchant_id = ${sqlLiteral(merchantId)}
+      AND account_id = ${sqlLiteral(accountId)}
+      AND created_by_user_id = ${sqlLiteral(userId)}
+      AND status = 'active'
+      AND name LIKE 'Console session %';
+  `);
+};
+
 export const findApiKeyByToken = (token) => {
   const normalized = String(token || "").trim();
   if (!normalized) {
@@ -1160,10 +1233,11 @@ export const findApiKeyByToken = (token) => {
 };
 
 export const touchApiKeyUsed = (id) => {
+  const timestamp = nowIso();
   run(`
     UPDATE api_keys
-    SET last_used_at = ${sqlLiteral(nowIso())},
-        updated_at = ${sqlLiteral(nowIso())}
+    SET last_used_at = ${sqlLiteral(timestamp)},
+        updated_at = ${sqlLiteral(timestamp)}
     WHERE id = ${sqlLiteral(id)};
   `);
 };
@@ -1223,6 +1297,25 @@ export const revokeApiKeyById = (merchantId, accountId, keyId) => {
   return getApiKeyById(merchantId, accountId, keyId);
 };
 
+export const deleteRevokedApiKeyById = (merchantId, accountId, keyId) => {
+  const existing = getApiKeyById(merchantId, accountId, keyId);
+  if (!existing || existing.status === "active") {
+    return null;
+  }
+  run(`
+    DELETE FROM api_keys
+    WHERE merchant_id = ${sqlLiteral(merchantId)}
+      AND account_id = ${sqlLiteral(accountId)}
+      AND id = ${sqlLiteral(keyId)}
+      AND status != 'active';
+  `);
+  return {
+    id: existing.id,
+    deleted: true,
+    previousStatus: existing.status
+  };
+};
+
 export const countActiveApiKeys = (merchantId, accountId) => {
   const row = one(`
     SELECT COUNT(1) AS count
@@ -1246,10 +1339,11 @@ export const countActiveApiKeysByRole = (merchantId, accountId, role) => {
   return Number(row?.count || 0);
 };
 
-export const createWebhookEndpoint = ({ merchantId, accountId, url }) => {
+export const createWebhookEndpoint = ({ merchantId, accountId, url, signingSecret }) => {
   const id = newId();
   const createdAt = nowIso();
-  const signingSecret = `whsec_${randomBytes(24).toString("base64url")}`;
+  const normalizedSecret =
+    String(signingSecret || "").trim() || `whsec_${randomBytes(24).toString("base64url")}`;
   run(`
     INSERT INTO webhook_endpoints (
       id,
@@ -1265,7 +1359,7 @@ export const createWebhookEndpoint = ({ merchantId, accountId, url }) => {
       ${sqlLiteral(merchantId)},
       ${sqlLiteral(accountId)},
       ${sqlLiteral(url)},
-      ${sqlLiteral(signingSecret)},
+      ${sqlLiteral(normalizedSecret)},
       'active',
       ${sqlLiteral(createdAt)},
       ${sqlLiteral(createdAt)}
@@ -1277,7 +1371,6 @@ export const createWebhookEndpoint = ({ merchantId, accountId, url }) => {
     merchantId,
     accountId,
     url,
-    signingSecret,
     status: "active",
     createdAt,
     updatedAt: createdAt
@@ -1337,7 +1430,7 @@ export const listActiveWebhookEndpoints = (merchantId, accountId) =>
     ORDER BY created_at DESC;
   `);
 
-export const markWebhookTestResult = (webhookId, status) => {
+export const markWebhookTestResult = (merchantId, accountId, webhookId, status) => {
   const timestamp = nowIso();
   run(`
     UPDATE webhook_endpoints
@@ -1345,7 +1438,9 @@ export const markWebhookTestResult = (webhookId, status) => {
       last_test_status = ${sqlLiteral(status)},
       last_test_at = ${sqlLiteral(timestamp)},
       updated_at = ${sqlLiteral(timestamp)}
-    WHERE id = ${sqlLiteral(webhookId)};
+    WHERE id = ${sqlLiteral(webhookId)}
+      AND merchant_id = ${sqlLiteral(merchantId)}
+      AND account_id = ${sqlLiteral(accountId)};
   `);
 };
 
@@ -1385,6 +1480,181 @@ export const deleteWebhookEndpoint = (merchantId, accountId, webhookId) => {
       AND id = ${sqlLiteral(webhookId)};
   `);
   return existing;
+};
+
+export const listPayoutAddressBookEntries = (merchantId, accountId) =>
+  all(`
+    SELECT
+      id,
+      merchant_id AS merchantId,
+      account_id AS accountId,
+      label,
+      network,
+      address,
+      last_used_at AS lastUsedAt,
+      created_at AS createdAt,
+      updated_at AS updatedAt
+    FROM payout_address_book_entries
+    WHERE merchant_id = ${sqlLiteral(merchantId)}
+      AND account_id = ${sqlLiteral(accountId)}
+    ORDER BY COALESCE(last_used_at, created_at) DESC, created_at DESC;
+  `);
+
+export const getPayoutAddressBookEntryById = (merchantId, accountId, entryId) =>
+  one(`
+    SELECT
+      id,
+      merchant_id AS merchantId,
+      account_id AS accountId,
+      label,
+      network,
+      address,
+      last_used_at AS lastUsedAt,
+      created_at AS createdAt,
+      updated_at AS updatedAt
+    FROM payout_address_book_entries
+    WHERE merchant_id = ${sqlLiteral(merchantId)}
+      AND account_id = ${sqlLiteral(accountId)}
+      AND id = ${sqlLiteral(entryId)}
+    LIMIT 1;
+  `);
+
+export const findPayoutAddressBookEntryByNetworkAddress = (merchantId, accountId, network, address) =>
+  one(`
+    SELECT
+      id,
+      merchant_id AS merchantId,
+      account_id AS accountId,
+      label,
+      network,
+      address,
+      last_used_at AS lastUsedAt,
+      created_at AS createdAt,
+      updated_at AS updatedAt
+    FROM payout_address_book_entries
+    WHERE merchant_id = ${sqlLiteral(merchantId)}
+      AND account_id = ${sqlLiteral(accountId)}
+      AND network = ${sqlLiteral(String(network || "").trim())}
+      AND address = ${sqlLiteral(normalizeEvmAddress(address))}
+    LIMIT 1;
+  `);
+
+export const upsertPayoutAddressBookEntry = ({
+  merchantId,
+  accountId,
+  label,
+  network,
+  address
+}) => {
+  const normalizedNetwork = String(network || "").trim();
+  const normalizedAddress = normalizeEvmAddress(address);
+  const normalizedLabel = String(label || "").trim();
+  const existing = findPayoutAddressBookEntryByNetworkAddress(
+    merchantId,
+    accountId,
+    normalizedNetwork,
+    normalizedAddress
+  );
+  const timestamp = nowIso();
+
+  if (existing) {
+    run(`
+      UPDATE payout_address_book_entries
+      SET
+        label = ${sqlLiteral(normalizedLabel)},
+        updated_at = ${sqlLiteral(timestamp)}
+      WHERE id = ${sqlLiteral(existing.id)};
+    `);
+    return getPayoutAddressBookEntryById(merchantId, accountId, existing.id);
+  }
+
+  const id = newId();
+  run(`
+    INSERT INTO payout_address_book_entries (
+      id,
+      merchant_id,
+      account_id,
+      label,
+      network,
+      address,
+      last_used_at,
+      created_at,
+      updated_at
+    ) VALUES (
+      ${sqlLiteral(id)},
+      ${sqlLiteral(merchantId)},
+      ${sqlLiteral(accountId)},
+      ${sqlLiteral(normalizedLabel)},
+      ${sqlLiteral(normalizedNetwork)},
+      ${sqlLiteral(normalizedAddress)},
+      NULL,
+      ${sqlLiteral(timestamp)},
+      ${sqlLiteral(timestamp)}
+    );
+  `);
+  return getPayoutAddressBookEntryById(merchantId, accountId, id);
+};
+
+export const updatePayoutAddressBookEntry = (merchantId, accountId, entryId, patch = {}) => {
+  const existing = getPayoutAddressBookEntryById(merchantId, accountId, entryId);
+  if (!existing) {
+    return null;
+  }
+  const nextLabel = patch.label !== undefined ? String(patch.label || "").trim() : existing.label;
+  const nextNetwork = patch.network !== undefined ? String(patch.network || "").trim() : existing.network;
+  const nextAddress = patch.address !== undefined ? normalizeEvmAddress(patch.address) : existing.address;
+
+  run(`
+    UPDATE payout_address_book_entries
+    SET
+      label = ${sqlLiteral(nextLabel)},
+      network = ${sqlLiteral(nextNetwork)},
+      address = ${sqlLiteral(nextAddress)},
+      updated_at = ${sqlLiteral(nowIso())}
+    WHERE merchant_id = ${sqlLiteral(merchantId)}
+      AND account_id = ${sqlLiteral(accountId)}
+      AND id = ${sqlLiteral(entryId)};
+  `);
+  return getPayoutAddressBookEntryById(merchantId, accountId, entryId);
+};
+
+export const deletePayoutAddressBookEntry = (merchantId, accountId, entryId) => {
+  const existing = getPayoutAddressBookEntryById(merchantId, accountId, entryId);
+  if (!existing) {
+    return null;
+  }
+  run(`
+    DELETE FROM payout_address_book_entries
+    WHERE merchant_id = ${sqlLiteral(merchantId)}
+      AND account_id = ${sqlLiteral(accountId)}
+      AND id = ${sqlLiteral(entryId)};
+  `);
+  return existing;
+};
+
+export const touchPayoutAddressBookEntryUsedByNetworkAddress = (merchantId, accountId, network, address) => {
+  const normalizedAddress = normalizeEvmAddress(address);
+  if (!normalizedAddress) {
+    return null;
+  }
+  const existing = findPayoutAddressBookEntryByNetworkAddress(
+    merchantId,
+    accountId,
+    String(network || "").trim(),
+    normalizedAddress
+  );
+  if (!existing) {
+    return null;
+  }
+  const timestamp = nowIso();
+  run(`
+    UPDATE payout_address_book_entries
+    SET
+      last_used_at = ${sqlLiteral(timestamp)},
+      updated_at = ${sqlLiteral(timestamp)}
+    WHERE id = ${sqlLiteral(existing.id)};
+  `);
+  return getPayoutAddressBookEntryById(merchantId, accountId, existing.id);
 };
 
 export const insertWebhookDelivery = ({
@@ -1987,6 +2257,13 @@ const getLatestSettlementRows = (merchantId, accountId) => {
 const aggregateBalances = (merchantId, accountId) => {
   const latestSettlementRows = getLatestSettlementRows(merchantId, accountId);
   const aggregated = new Map();
+  const toBigIntSafe = (value) => {
+    try {
+      return BigInt(String(value || "0"));
+    } catch {
+      return 0n;
+    }
+  };
 
   const add = (network, delta) => {
     const current = aggregated.get(network) || 0n;
@@ -1994,11 +2271,14 @@ const aggregateBalances = (merchantId, accountId) => {
   };
 
   latestSettlementRows.forEach((row) => {
-    if (row.status === "failed") {
+    if (row.status === "failed" || row.status === "bridge_pending") {
       return;
     }
 
-    const amount = BigInt(row.amount);
+    const amount = toBigIntSafe(row.amount);
+    if (amount <= 0n) {
+      return;
+    }
     const network =
       row.status === "bridge_confirmed" && row.destinationNetwork
         ? row.destinationNetwork
@@ -2016,7 +2296,10 @@ const aggregateBalances = (merchantId, accountId) => {
   `);
 
   consolidationRows.forEach((row) => {
-    const amount = BigInt(row.amount);
+    const amount = toBigIntSafe(row.amount);
+    if (amount <= 0n) {
+      return;
+    }
     add(row.sourceNetwork, -amount);
     add(row.destinationNetwork, amount);
   });
@@ -2030,7 +2313,10 @@ const aggregateBalances = (merchantId, accountId) => {
   `);
 
   payoutRows.forEach((row) => {
-    const amount = BigInt(row.amount);
+    const amount = toBigIntSafe(row.amount);
+    if (amount <= 0n) {
+      return;
+    }
     add(row.network, -amount);
   });
 
@@ -2104,6 +2390,61 @@ export const getAvailableBalanceForNetwork = (merchantId, accountId, network) =>
     LIMIT 1;
   `);
   return BigInt(row?.amount || "0");
+};
+
+export const acquireTenantMutationDbLock = (lockKey, leaseMs = 120000) => {
+  const ownerToken = `lock_${randomUUID()}`;
+  const nowMs = Date.now();
+  const now = new Date(nowMs).toISOString();
+  const expiresAt = new Date(nowMs + Math.max(1000, Number(leaseMs) || 120000)).toISOString();
+
+  run(`
+    INSERT INTO tenant_mutation_locks (
+      lock_key,
+      owner_token,
+      expires_at,
+      created_at,
+      updated_at
+    ) VALUES (
+      ${sqlLiteral(lockKey)},
+      ${sqlLiteral(ownerToken)},
+      ${sqlLiteral(expiresAt)},
+      ${sqlLiteral(now)},
+      ${sqlLiteral(now)}
+    )
+    ON CONFLICT(lock_key) DO UPDATE SET
+      owner_token = excluded.owner_token,
+      expires_at = excluded.expires_at,
+      updated_at = excluded.updated_at
+    WHERE tenant_mutation_locks.expires_at <= excluded.updated_at;
+  `);
+
+  const row = one(`
+    SELECT owner_token AS ownerToken, expires_at AS expiresAt
+    FROM tenant_mutation_locks
+    WHERE lock_key = ${sqlLiteral(lockKey)}
+    LIMIT 1;
+  `);
+
+  if (!row || row.ownerToken !== ownerToken) {
+    return null;
+  }
+  return {
+    lockKey,
+    ownerToken,
+    expiresAt: String(row.expiresAt || expiresAt)
+  };
+};
+
+export const releaseTenantMutationDbLock = (lockHandle) => {
+  if (!lockHandle || !lockHandle.lockKey || !lockHandle.ownerToken) {
+    return;
+  }
+  run(`
+    DELETE FROM tenant_mutation_locks
+    WHERE lock_key = ${sqlLiteral(lockHandle.lockKey)}
+      AND owner_token = ${sqlLiteral(lockHandle.ownerToken)};
+  `);
 };
 
 export const createConsolidation = (input) => {
@@ -2346,90 +2687,162 @@ export const getApiRevenueBreakdown = (merchantId, accountId, limit = 20) => {
   };
 };
 
+const buildTimelineUnionSql = (merchantId, accountId) => `
+  SELECT
+    'settlement' AS itemType,
+    event_id AS id,
+    settlement_id AS settlementId,
+    api_id AS apiId,
+    api_route AS apiRoute,
+    api_name AS apiName,
+    source_network AS sourceNetwork,
+    destination_network AS destinationNetwork,
+    NULL AS destinationAddress,
+    asset,
+    amount,
+    status,
+    fail_reason AS failReason,
+    tx_hash AS txHash,
+    source_tx_hash AS sourceTxHash,
+    bridge_tx_hash AS bridgeTxHash,
+    destination_tx_hash AS destinationTxHash,
+    block_number AS blockNumber,
+    log_index AS logIndex,
+    confirmations,
+    created_at AS createdAt
+  FROM treasury_settlement_events
+  WHERE merchant_id = ${sqlLiteral(merchantId)}
+    AND account_id = ${sqlLiteral(accountId)}
+
+  UNION ALL
+
+  SELECT
+    'consolidation' AS itemType,
+    id,
+    id AS settlementId,
+    NULL AS apiId,
+    NULL AS apiRoute,
+    NULL AS apiName,
+    source_network AS sourceNetwork,
+    destination_network AS destinationNetwork,
+    NULL AS destinationAddress,
+    asset,
+    amount,
+    status,
+    fail_reason AS failReason,
+    tx_hash AS txHash,
+    source_tx_hash AS sourceTxHash,
+    bridge_tx_hash AS bridgeTxHash,
+    destination_tx_hash AS destinationTxHash,
+    NULL AS blockNumber,
+    NULL AS logIndex,
+    NULL AS confirmations,
+    created_at AS createdAt
+  FROM treasury_consolidations
+  WHERE merchant_id = ${sqlLiteral(merchantId)}
+    AND account_id = ${sqlLiteral(accountId)}
+
+  UNION ALL
+
+  SELECT
+    'payout' AS itemType,
+    id,
+    id AS settlementId,
+    NULL AS apiId,
+    NULL AS apiRoute,
+    NULL AS apiName,
+    network AS sourceNetwork,
+    NULL AS destinationNetwork,
+    destination_address AS destinationAddress,
+    asset,
+    amount,
+    status,
+    fail_reason AS failReason,
+    tx_hash AS txHash,
+    tx_hash AS sourceTxHash,
+    NULL AS bridgeTxHash,
+    NULL AS destinationTxHash,
+    NULL AS blockNumber,
+    NULL AS logIndex,
+    NULL AS confirmations,
+    created_at AS createdAt
+  FROM treasury_payout_requests
+  WHERE merchant_id = ${sqlLiteral(merchantId)}
+    AND account_id = ${sqlLiteral(accountId)}
+`;
+
+export const queryTimeline = (
+  merchantId,
+  accountId,
+  { page = 1, pageSize = 20, itemTypes = [], createdFrom = "", createdTo = "" } = {}
+) => {
+  const safePageSize = Number.isFinite(pageSize) ? Math.max(1, Math.min(pageSize, 100)) : 20;
+  const safePage = Number.isFinite(page) ? Math.max(1, Math.floor(page)) : 1;
+  const offset = (safePage - 1) * safePageSize;
+
+  const allowedItemTypes = new Set(["settlement", "consolidation", "payout"]);
+  const normalizedItemTypes = Array.isArray(itemTypes)
+    ? itemTypes
+        .map((value) => String(value || "").trim().toLowerCase())
+        .filter((value) => allowedItemTypes.has(value))
+    : [];
+
+  const whereParts = [];
+  if (normalizedItemTypes.length > 0) {
+    whereParts.push(
+      `itemType IN (${normalizedItemTypes.map((value) => sqlLiteral(value)).join(", ")})`
+    );
+  }
+  const fromValue = String(createdFrom || "").trim();
+  if (fromValue) {
+    whereParts.push(`createdAt >= ${sqlLiteral(fromValue)}`);
+  }
+  const toValue = String(createdTo || "").trim();
+  if (toValue) {
+    whereParts.push(`createdAt <= ${sqlLiteral(toValue)}`);
+  }
+
+  const whereClause = whereParts.length ? `WHERE ${whereParts.join(" AND ")}` : "";
+  const timelineUnionSql = buildTimelineUnionSql(merchantId, accountId);
+
+  const items = all(`
+    WITH timeline AS (
+      ${timelineUnionSql}
+    )
+    SELECT *
+    FROM timeline
+    ${whereClause}
+    ORDER BY createdAt DESC
+    LIMIT ${safePageSize}
+    OFFSET ${offset};
+  `);
+
+  const countRow = one(`
+    WITH timeline AS (
+      ${timelineUnionSql}
+    )
+    SELECT COUNT(*) AS total
+    FROM timeline
+    ${whereClause};
+  `);
+  const total = Number(countRow?.total || 0);
+  const totalPages = Math.max(1, Math.ceil(total / safePageSize));
+
+  return {
+    items,
+    page: safePage,
+    pageSize: safePageSize,
+    total,
+    totalPages,
+    hasNextPage: safePage < totalPages,
+    hasPreviousPage: safePage > 1
+  };
+};
+
 export const getTimeline = (merchantId, accountId, limit = 100) => {
   const safeLimit = Number.isFinite(limit) ? Math.max(1, Math.min(limit, 200)) : 100;
-  const settlementRows = all(`
-    SELECT
-      'settlement' AS itemType,
-      event_id AS id,
-      settlement_id AS settlementId,
-      api_id AS apiId,
-      api_route AS apiRoute,
-      api_name AS apiName,
-      source_network AS sourceNetwork,
-      destination_network AS destinationNetwork,
-      asset,
-      amount,
-      status,
-      fail_reason AS failReason,
-      tx_hash AS txHash,
-      source_tx_hash AS sourceTxHash,
-      bridge_tx_hash AS bridgeTxHash,
-      destination_tx_hash AS destinationTxHash,
-      block_number AS blockNumber,
-      log_index AS logIndex,
-      confirmations,
-      created_at AS createdAt
-    FROM treasury_settlement_events
-    WHERE merchant_id = ${sqlLiteral(merchantId)}
-      AND account_id = ${sqlLiteral(accountId)}
-  `);
-
-  const consolidationRows = all(`
-    SELECT
-      'consolidation' AS itemType,
-      id,
-      id AS settlementId,
-      NULL AS apiId,
-      NULL AS apiRoute,
-      NULL AS apiName,
-      source_network AS sourceNetwork,
-      destination_network AS destinationNetwork,
-      asset,
-      amount,
-      status,
-      fail_reason AS failReason,
-      tx_hash AS txHash,
-      source_tx_hash AS sourceTxHash,
-      bridge_tx_hash AS bridgeTxHash,
-      destination_tx_hash AS destinationTxHash,
-      NULL AS blockNumber,
-      NULL AS logIndex,
-      NULL AS confirmations,
-      created_at AS createdAt
-    FROM treasury_consolidations
-    WHERE merchant_id = ${sqlLiteral(merchantId)}
-      AND account_id = ${sqlLiteral(accountId)}
-  `);
-
-  const payoutRows = all(`
-    SELECT
-      'payout' AS itemType,
-      id,
-      id AS settlementId,
-      NULL AS apiId,
-      NULL AS apiRoute,
-      NULL AS apiName,
-      network AS sourceNetwork,
-      NULL AS destinationNetwork,
-      asset,
-      amount,
-      status,
-      fail_reason AS failReason,
-      tx_hash AS txHash,
-      tx_hash AS sourceTxHash,
-      NULL AS bridgeTxHash,
-      NULL AS destinationTxHash,
-      NULL AS blockNumber,
-      NULL AS logIndex,
-      NULL AS confirmations,
-      created_at AS createdAt
-    FROM treasury_payout_requests
-    WHERE merchant_id = ${sqlLiteral(merchantId)}
-      AND account_id = ${sqlLiteral(accountId)}
-  `);
-
-  return [...settlementRows, ...consolidationRows, ...payoutRows]
-    .sort((a, b) => (a.createdAt < b.createdAt ? 1 : -1))
-    .slice(0, safeLimit);
+  return queryTimeline(merchantId, accountId, {
+    page: 1,
+    pageSize: safeLimit
+  }).items;
 };

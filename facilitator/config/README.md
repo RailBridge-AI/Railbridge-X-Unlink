@@ -31,11 +31,17 @@ After editing JSON config, restart facilitator to apply changes.
 
 ## Payment Script Config
 
-Use `payment-test-config.json` for non-sensitive smoke-test defaults (URLs, route hints, timeouts).
+Use `payment-test-config.json` for non-sensitive smoke-test defaults (URLs, route hints, client pay-network choices, timeouts).
 
 Current section:
 
 1. `existingMerchantPayment`
+
+Useful keys inside `existingMerchantPayment`:
+
+1. `sourceNetwork`: fallback network if facilitator `/supported` is unavailable.
+2. `preferredPayNetworks`: ordered list of client pay attempts for smoke tests, for example Base Sepolia then Arbitrum Sepolia.
+3. `verifySettlement`: whether the script should also observe Merchant OS after each payment.
 
 ## Keep In `.env`
 

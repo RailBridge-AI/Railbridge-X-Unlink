@@ -302,7 +302,7 @@ export default function OnboardingPage() {
 
             <div className="mt-2 flex flex-wrap gap-2">
               <Link className="inline-flex rounded-lg border border-slate-300 bg-white px-2.5 py-1.5 text-xs hover:bg-slate-100" href="/settlements">
-                Open Settlements
+                Open Activity
               </Link>
               <Link className="inline-flex rounded-lg border border-slate-300 bg-white px-2.5 py-1.5 text-xs hover:bg-slate-100" href="/products">
                 Open Products
