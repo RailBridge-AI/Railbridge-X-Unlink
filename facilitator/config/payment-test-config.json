@@ -9,7 +9,8 @@
     "sourceNetwork": "eip155:84532",
     "preferredPayNetworks": ["eip155:84532", "eip155:421614"],
     "verifySettlement": true,
-    "verifyTimeoutMs": 45000
+    "verifyTimeoutMs": 45000,
+    "healthTimeoutMs": 15000
   },
   "existingMerchantPaymentPublicTestnet": {
     "facilitatorUrl": "https://facilitator.testnet.railbridge.ai",
@@ -21,6 +22,7 @@
     "sourceNetwork": "eip155:84532",
     "preferredPayNetworks": ["eip155:84532", "eip155:421614"],
     "verifySettlement": true,
-    "verifyTimeoutMs": 45000
+    "verifyTimeoutMs": 45000,
+    "healthTimeoutMs": 60000
   }
 }

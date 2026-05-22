@@ -59,6 +59,7 @@ type ExistingMerchantScriptConfig = {
   preferredPayNetworks: string[];
   verifySettlement: boolean;
   verifyTimeoutMs: number;
+  healthTimeoutMs: number;
   clientPrivateKey: `0x${string}`;
   verificationApiKey: string;
 };
@@ -187,20 +188,34 @@ const requestJson = async <T>({
   return payload as T;
 };
 
+const formatFetchError = (error: unknown): string => {
+  if (error instanceof Error) {
+    const cause =
+      error.cause && typeof error.cause === "object"
+        ? String((error.cause as { message?: unknown }).message || error.cause)
+        : "";
+    return cause ? `${error.message} (cause: ${cause})` : error.message;
+  }
+  return String(error);
+};
+
 const waitForHealth = async (baseUrl: string, timeoutMs = 30_000) => {
   const startedAt = Date.now();
+  let lastError = "";
   while (Date.now() - startedAt < timeoutMs) {
     try {
       const response = await fetch(`${baseUrl}/health`);
       if (response.ok) {
         return;
       }
-    } catch {
-      // keep polling
+      lastError = `HTTP ${response.status}`;
+    } catch (error) {
+      lastError = formatFetchError(error);
     }
     await sleep(400);
   }
-  throw new Error(`Timed out waiting for health: ${baseUrl}/health`);
+  const details = lastError ? ` (last error: ${lastError})` : "";
+  throw new Error(`Timed out waiting for health: ${baseUrl}/health${details}`);
 };
 
 const loadScriptConfig = (): ExistingMerchantScriptConfig => {
@@ -220,6 +235,7 @@ const loadScriptConfig = (): ExistingMerchantScriptConfig => {
       preferredPayNetworks: [...DEFAULT_CLIENT_PAY_NETWORKS],
       verifySettlement: true,
       verifyTimeoutMs: 45000,
+      healthTimeoutMs: 15000,
     },
     existingMerchantPaymentPublicTestnet: {
       facilitatorUrl: "https://facilitator.testnet.railbridge.ai",
@@ -232,6 +248,7 @@ const loadScriptConfig = (): ExistingMerchantScriptConfig => {
       preferredPayNetworks: [...DEFAULT_CLIENT_PAY_NETWORKS],
       verifySettlement: true,
       verifyTimeoutMs: 45000,
+      healthTimeoutMs: 60000,
     },
   };
 
@@ -264,6 +281,7 @@ const loadScriptConfig = (): ExistingMerchantScriptConfig => {
     preferredPayNetworks,
     verifySettlement: parseBoolean(existingMerchantPaymentConfig.verifySettlement, true),
     verifyTimeoutMs: parseIntValue(existingMerchantPaymentConfig.verifyTimeoutMs, 45000),
+    healthTimeoutMs: parseIntValue(existingMerchantPaymentConfig.healthTimeoutMs, 30000),
     clientPrivateKey: String(process.env.CLIENT_PRIVATE_KEY || "").trim() as `0x${string}`,
     // This API key is only for test-harness verification against Merchant OS.
     // It is not part of the payer/client payment flow.
@@ -564,8 +582,8 @@ const main = async () => {
   const attempts = resolveClientPaymentAttempts(config.preferredPayNetworks);
 
   assertRequired(config.clientPrivateKey, "CLIENT_PRIVATE_KEY");
-  await waitForHealth(config.facilitatorUrl, 15_000);
-  await waitForHealth(config.merchantUrl, 15_000);
+  await waitForHealth(config.facilitatorUrl, config.healthTimeoutMs);
+  await waitForHealth(config.merchantUrl, config.healthTimeoutMs);
 
   const observer = await prepareObserver({
     config,

@@ -46,6 +46,7 @@ Useful keys inside `existingMerchantPayment`:
 1. `sourceNetwork`: fallback network if facilitator `/supported` is unavailable.
 2. `preferredPayNetworks`: ordered list of client pay attempts for smoke tests, for example Base Sepolia then Arbitrum Sepolia.
 3. `verifySettlement`: whether the script should also observe Merchant OS after each payment.
+4. `healthTimeoutMs`: health-check timeout for facilitator/merchant endpoints before payment starts.
 
 Script selector:
 
