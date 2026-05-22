@@ -76,6 +76,32 @@ services:
       - traefik.http.routers.rb-testnet-facilitator.tls.certresolver=${TRAEFIK_CERT_RESOLVER:-letsencrypt}
       - traefik.http.services.rb-testnet-facilitator.loadbalancer.server.port=4022
 
+  demo-merchant:
+    build:
+      context: ../..
+      dockerfile: facilitator/Dockerfile
+    command: ["node", "dist/merchant-server-merchant-os-testnet.js"]
+    restart: unless-stopped
+    environment:
+      NODE_ENV: production
+      RAILBRIDGE_ENV: testnet
+    depends_on:
+      - merchant-api
+      - facilitator
+    volumes:
+      - ../../facilitator/demo-merchant.env:/app/facilitator/.env:ro
+    networks:
+      - railbridge-internal
+      - traefik-public
+    labels:
+      - traefik.enable=true
+      - traefik.docker.network=${TRAEFIK_NETWORK:-traefik-public}
+      - traefik.http.routers.rb-testnet-demo.rule=Host(`${DEMO_MERCHANT_HOST:-demo.testnet.railbridge.ai}`)
+      - traefik.http.routers.rb-testnet-demo.entrypoints=${TRAEFIK_ENTRYPOINT:-websecure}
+      - traefik.http.routers.rb-testnet-demo.tls=true
+      - traefik.http.routers.rb-testnet-demo.tls.certresolver=${TRAEFIK_CERT_RESOLVER:-letsencrypt}
+      - traefik.http.services.rb-testnet-demo.loadbalancer.server.port=4021
+
 networks:
   railbridge-internal:
     name: railbridge-testnet-internal

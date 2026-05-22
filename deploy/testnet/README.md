@@ -1,6 +1,6 @@
 # RailBridge Testnet Deployment (Shared VPS + Traefik)
 
-This folder contains the deployment assets for the `app/api/facilitator.testnet.railbridge.ai` rollout.
+This folder contains the deployment assets for the `app/api/facilitator/demo.testnet.railbridge.ai` rollout.
 
 ## Scope
 
@@ -22,6 +22,7 @@ Place the following files on the VPS config directory (default: `/opt/railbridge
 - `merchant-os.testnet.env`
 - `merchant-web.testnet.env`
 - `facilitator.testnet.env`
+- `demo-merchant.testnet.env`
 - `merchant-os.runtime-config.testnet.json`
 - `facilitator.runtime-config.testnet.json`
 
@@ -34,6 +35,7 @@ mkdir -p /opt/railbridge-config/testnet
 cp deploy/testnet/config/merchant-os.testnet.env.example /opt/railbridge-config/testnet/merchant-os.testnet.env
 cp deploy/testnet/config/merchant-web.testnet.env.example /opt/railbridge-config/testnet/merchant-web.testnet.env
 cp deploy/testnet/config/facilitator.testnet.env.example /opt/railbridge-config/testnet/facilitator.testnet.env
+cp deploy/testnet/config/demo-merchant.testnet.env.example /opt/railbridge-config/testnet/demo-merchant.testnet.env
 cp deploy/testnet/config/merchant-os.runtime-config.testnet.json.example /opt/railbridge-config/testnet/merchant-os.runtime-config.testnet.json
 cp deploy/testnet/config/facilitator.runtime-config.testnet.json.example /opt/railbridge-config/testnet/facilitator.runtime-config.testnet.json
 ```
@@ -52,6 +54,7 @@ Mapping performed by the script:
 - `merchant-os.runtime-config.testnet.json` -> `merchant-os/config/runtime-config.local.json`
 - `merchant-web.testnet.env` -> `merchant-os/frontend/.env.production`
 - `facilitator.testnet.env` -> `facilitator/.env`
+- `demo-merchant.testnet.env` -> `facilitator/demo-merchant.env`
 - `facilitator.runtime-config.testnet.json` -> `facilitator/config/runtime-config.local.json`
 
 ## Deploy
@@ -89,6 +92,7 @@ Optional:
 - `TESTNET_APP_HOST` (default `app.testnet.railbridge.ai`)
 - `TESTNET_API_HOST` (default `api.testnet.railbridge.ai`)
 - `TESTNET_FACILITATOR_HOST` (default `facilitator.testnet.railbridge.ai`)
+- `TESTNET_DEMO_MERCHANT_HOST` (default `demo.testnet.railbridge.ai`)
 - `TESTNET_MERCHANT_OS_DATA_DIR` (default `/data/railbridge/merchant-os`)
 - `TESTNET_FACILITATOR_DATA_DIR` (default `/data/railbridge/facilitator`)
 
@@ -108,6 +112,7 @@ Point Namecheap records to the VPS IP:
 - `app.testnet.railbridge.ai`
 - `api.testnet.railbridge.ai`
 - `facilitator.testnet.railbridge.ai`
+- `demo.testnet.railbridge.ai`
 
 ## Existing App Coexistence
 

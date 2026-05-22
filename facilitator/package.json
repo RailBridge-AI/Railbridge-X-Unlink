@@ -12,6 +12,7 @@
     "lint": "eslint src --ext .ts",
     "test:merchant": "tsx src/merchant-server.ts",
     "test:merchant-os-demo": "tsx src/merchant-server-merchant-os-demo.ts",
+    "test:merchant-os-testnet": "tsx src/merchant-server-merchant-os-testnet.ts",
     "test:accept-payment-merchant-os": "tsx scripts/pay-merchant-os-testnet.ts",
     "test:accept-payment-existing-merchant-os": "tsx scripts/pay-existing-merchant-testnet.ts",
     "test:bridge-merchant-os": "tsx scripts/manual-bridge-merchant-os.ts",

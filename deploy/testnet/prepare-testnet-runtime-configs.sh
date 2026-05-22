@@ -31,6 +31,7 @@ copy_json() {
 require_file "${CONFIG_ROOT}/merchant-os.testnet.env"
 require_file "${CONFIG_ROOT}/merchant-web.testnet.env"
 require_file "${CONFIG_ROOT}/facilitator.testnet.env"
+require_file "${CONFIG_ROOT}/demo-merchant.testnet.env"
 require_file "${CONFIG_ROOT}/merchant-os.runtime-config.testnet.json"
 require_file "${CONFIG_ROOT}/facilitator.runtime-config.testnet.json"
 
@@ -50,6 +51,10 @@ copy_env \
   "${CONFIG_ROOT}/facilitator.testnet.env" \
   "${REPO_ROOT}/facilitator/.env"
 
+copy_env \
+  "${CONFIG_ROOT}/demo-merchant.testnet.env" \
+  "${REPO_ROOT}/facilitator/demo-merchant.env"
+
 copy_json \
   "${CONFIG_ROOT}/facilitator.runtime-config.testnet.json" \
   "${REPO_ROOT}/facilitator/config/runtime-config.local.json"
@@ -59,5 +64,5 @@ echo "- merchant-os/.env"
 echo "- merchant-os/config/runtime-config.local.json"
 echo "- merchant-os/frontend/.env.production"
 echo "- facilitator/.env"
+echo "- facilitator/demo-merchant.env"
 echo "- facilitator/config/runtime-config.local.json"
-
