@@ -39,9 +39,12 @@ cp .env.template .env
 ```
 
 Required variables:
-- `EVM_PRIVATE_KEY`: Private key for EVM facilitator wallet
-- `EVM_RPC_URL`: RPC endpoint for EVM chains
-- `DEPLOY_ERC4337_WITH_EIP6492` (optional): `true` to enable ERC-4337 smart wallet deployment
+- `FACILITATOR_EVM_PRIVATE_KEY`: Private key for EVM facilitator wallet
+- `FACILITATOR_ADMIN_TOKEN`: Admin bearer token for protected facilitator ops endpoints (recommended)
+
+Non-sensitive RPC defaults:
+- Set in `facilitator/config/runtime-config.json` (`evmRpcUrl`, `rpcOverridesByNetwork`, `crossChainEnabled`, worker timings, etc.)
+- Use `facilitator/config/runtime-config.local.json` for machine/deploy overrides.
 
 ### 3. Run
 
@@ -77,7 +80,7 @@ npm start
 ```bash
 npm install
 cp env.template .env
-# edit .env to set EVM_PRIVATE_KEY, EVM_RPC_URL, etc.
+# edit .env to set FACILITATOR_EVM_PRIVATE_KEY and tokens/secrets.
 npm run dev
 ```
 
@@ -527,12 +530,15 @@ import { baseSepolia } from "viem/chains";
 // Create signer from private key
 const signer = privateKeyToAccount(process.env.CLIENT_PRIVATE_KEY as `0x${string}`);
 
-// Create viem wallet client for signing
-const viemClient = createWalletClient({
-  account: signer,
-  chain: baseSepolia,
-  transport: http(process.env.EVM_RPC_URL || "https://sepolia.base.org"),
-});
+const rpcByNetwork = JSON.parse(process.env.CLIENT_RPC_OVERRIDES_JSON || "{}");
+const resolveRpcUrl = (network: string) =>
+  rpcByNetwork[network] || process.env.CLIENT_DEFAULT_RPC_URL || "https://sepolia.base.org";
+const createClientForNetwork = (network: string) =>
+  createWalletClient({
+    account: signer,
+    chain: baseSepolia,
+    transport: http(resolveRpcUrl(network)),
+  });
 
 // Create x402 client
 const client = new x402Client();
@@ -633,10 +639,14 @@ See `src/client-example.ts` for a complete working example with error handling a
 # Required
 CLIENT_PRIVATE_KEY=0xYourPrivateKey
 
-# Optional
-EVM_RPC_URL=https://sepolia.base.org
+# Recommended for multi-chain clients
+CLIENT_RPC_OVERRIDES_JSON={"eip155:84532":"https://sepolia.base.org","eip155:421614":"https://arbitrum-sepolia-rpc.publicnode.com"}
+# Optional fallback
+CLIENT_DEFAULT_RPC_URL=https://sepolia.base.org
 MERCHANT_URL=http://localhost:4021
 ```
+
+`CLIENT_RPC_OVERRIDES_JSON` is client-side only and unrelated to facilitator server runtime config.
 
 ## Development
 
@@ -716,4 +726,3 @@ npm run lint
 ## License
 
 MIT
-

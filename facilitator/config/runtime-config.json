@@ -1,0 +1,21 @@
+{
+  "port": 4022,
+  "evmRpcUrl": "https://sepolia.base.org",
+  "crossChainEnabled": true,
+  "deployErc4337WithEip6492": false,
+  "merchantOsEventIngestUrl": "http://localhost:4030/v1/internal/events/settlements",
+  "merchantContextMapJson": "",
+  "merchantOsDefaultMerchantId": "",
+  "merchantOsDefaultAccountId": "",
+  "facilitatorDataDir": "data",
+  "bridgeJobsFile": "",
+  "chainStatusFile": "",
+  "evmMaxFeePerGasWei": "",
+  "evmMaxPriorityFeePerGasWei": "",
+  "bridgeWorkerIntervalMs": 4000,
+  "bridgeRetryBaseMs": 30000,
+  "bridgeMaxAttempts": 5,
+  "chainSyncMs": 300000,
+  "chainStatusOverrides": {},
+  "rpcOverridesByNetwork": {}
+}

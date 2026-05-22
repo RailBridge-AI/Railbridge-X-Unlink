@@ -10,7 +10,7 @@ export const readAuth = () => {
       return null;
     }
     const parsed = JSON.parse(raw);
-    if (!parsed?.token || !parsed?.merchantId || !parsed?.accountId || !parsed?.apiKey) {
+    if (!parsed?.token || !parsed?.merchantId || !parsed?.accountId) {
       return null;
     }
     return parsed;
@@ -23,7 +23,8 @@ export const saveAuth = (payload) => {
   if (typeof window === "undefined") {
     return;
   }
-  window.sessionStorage.setItem(AUTH_STORAGE_KEY, JSON.stringify(payload));
+  const { apiKey: _apiKey, ...safePayload } = payload || {};
+  window.sessionStorage.setItem(AUTH_STORAGE_KEY, JSON.stringify(safePayload));
 };
 
 export const clearAuth = () => {
@@ -52,13 +53,19 @@ export const apiWithSession = async ({ token, path, method = "GET", body }) => {
   return payload;
 };
 
-export const apiWithMerchantKey = async ({ apiKey, path, method = "GET", body }) => {
+export const apiWithMerchantKey = async ({ apiKey, token, path, method = "GET", body }) => {
+  const resolvedToken = token || readAuth()?.token || "";
+  const headers = {
+    "content-type": "application/json"
+  };
+  if (apiKey) {
+    headers["x-railbridge-api-key"] = apiKey;
+  } else if (resolvedToken) {
+    headers.authorization = `Bearer ${resolvedToken}`;
+  }
   const response = await fetch(path, {
     method,
-    headers: {
-      "content-type": "application/json",
-      "x-railbridge-api-key": apiKey
-    },
+    headers,
     body: body ? JSON.stringify(body) : undefined
   });
 

@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { randomUUID } from "node:crypto";
 import { fileURLToPath } from "node:url";
 import { after, before, describe, test } from "node:test";
 import { verifyWebhook } from "../../sdk/index.js";
@@ -140,6 +141,7 @@ describe("Merchant OS core integration flows", () => {
   });
 
   test("webhook lifecycle and signature verification work", async () => {
+    const generatedSecret = `whsec_${randomUUID().replace(/-/g, "")}`;
     const createResponse = await call({
       path: "/v1/onboarding/webhooks",
       method: "POST",
@@ -147,14 +149,14 @@ describe("Merchant OS core integration flows", () => {
         authorization: `Bearer ${token}`
       },
       body: {
-        url: webhookReceiver.webhookUrl
+        url: webhookReceiver.webhookUrl,
+        signingSecret: generatedSecret
       }
     });
     assert.equal(createResponse.status, 201);
     assert.ok(createResponse.body.id);
-    assert.ok(createResponse.body.signingSecret);
     webhookId = createResponse.body.id;
-    webhookSecret = createResponse.body.signingSecret;
+    webhookSecret = generatedSecret;
 
     const patchResponse = await call({
       path: `/v1/onboarding/webhooks/${webhookId}`,
@@ -230,7 +232,7 @@ describe("Merchant OS core integration flows", () => {
     });
     assert.equal(createResponse.status, 201);
     assert.equal(createResponse.body.sourceNetwork, "any");
-    assert.equal(createResponse.body.settlementMode, "cross_chain");
+    assert.equal(createResponse.body.settlementMode, "same_chain");
     productId = createResponse.body.id;
 
     const duplicateResponse = await call({
@@ -443,6 +445,24 @@ describe("Merchant OS core integration flows", () => {
     assert.equal(insufficientBridge.status, 400);
     assert.equal(insufficientBridge.body.error, "insufficient source balance");
 
+    const estimate = await call({
+      path: `/v1/merchants/${merchantId}/consolidations/estimate`,
+      method: "POST",
+      headers: {
+        "x-railbridge-api-key": apiKey
+      },
+      body: {
+        sourceNetwork: "eip155:421614",
+        destinationNetwork: "eip155:11155111",
+        amountUsdc: "0.01"
+      }
+    });
+    assert.equal(estimate.status, 200);
+    assert.equal(estimate.body.executionMode, "simulation");
+    assert.equal(estimate.body.amountUsdc, "0.01");
+    assert.ok(Array.isArray(estimate.body.gasFees));
+    assert.ok(estimate.body.recommendation);
+
     const bridge = await call({
       path: `/v1/merchants/${merchantId}/consolidations`,
       method: "POST",
@@ -457,6 +477,18 @@ describe("Merchant OS core integration flows", () => {
     });
     assert.equal(bridge.status, 202);
     assert.equal(bridge.body.status, "confirmed");
+    assert.ok(bridge.body.id);
+    assert.ok(bridge.body.statusPath);
+
+    const consolidationStatus = await call({
+      path: bridge.body.statusPath,
+      headers: {
+        "x-railbridge-api-key": apiKey
+      }
+    });
+    assert.equal(consolidationStatus.status, 200);
+    assert.equal(consolidationStatus.body.id, bridge.body.id);
+    assert.equal(consolidationStatus.body.status, "confirmed");
 
     const invalidPayout = await call({
       path: `/v1/merchants/${merchantId}/payouts`,

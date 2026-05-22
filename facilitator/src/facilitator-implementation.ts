@@ -12,7 +12,6 @@ import { createNonceManager, jsonRpc } from "viem/nonce";
 import { Network } from "@x402/core/types";
 import { CircleCCTPBridgeService } from "./services/circleCCTPBridgeService.js";
 import { MerchantOsPublisher } from "./services/merchantOsPublisher.js";
-import { RevenueRegistryRecorder } from "./services/revenueRegistryRecorder.js";
 import { extractCrossChainInfo, CROSS_CHAIN } from "./extensions/crossChain.js";
 import { CrossChainRouter } from "./schemes/crossChainRouter.js";
 import { BridgeJobStore } from "./services/bridgeJobStore.js";
@@ -25,7 +24,7 @@ import { config } from "./config.js";
 // ============================================================================
 
 // Base account for address logging and non-signing uses.
-const evmAccount = privateKeyToAccount(config.EVM_PRIVATE_KEY);
+const evmAccount = privateKeyToAccount(config.FACILITATOR_EVM_PRIVATE_KEY);
 console.info(`✅ EVM Facilitator account: ${evmAccount.address}`);
 
 type EvmChainConfig = {
@@ -68,12 +67,18 @@ if (!cctpEvmChains.length) {
   throw new Error("No supported EVM chains found from Circle BridgeKit");
 }
 
+const bridgeRpcUrls = Object.fromEntries(
+  Object.entries(config.RPC_OVERRIDES_BY_NETWORK || {})
+    .map(([network, urls]) => [network, Array.isArray(urls) ? urls[0] : undefined])
+    .filter(([, url]) => typeof url === "string" && Boolean(url))
+) as Record<string, string>;
+
 const exactSchemesByNetwork = new Map<Network, ExactEvmSchemeDomainFacilitator>();
 let v1EvmSigner: ReturnType<typeof toFacilitatorEvmSigner> | null = null;
 cctpEvmChains.forEach(({ network, rpcUrl, chain }) => {
   // Create a chain-scoped nonce manager to avoid cross-chain nonce drift.
   const nonceManager = createNonceManager({ source: jsonRpc() });
-  const chainAccount = privateKeyToAccount(config.EVM_PRIVATE_KEY, {
+  const chainAccount = privateKeyToAccount(config.FACILITATOR_EVM_PRIVATE_KEY, {
     nonceManager,
   });
   const viemClient = createWalletClient({
@@ -155,6 +160,8 @@ cctpEvmChains.forEach(({ network, rpcUrl, chain }) => {
 const bridgeService = new CircleCCTPBridgeService({
   provider: "cctp",
   facilitatorAddress: evmAccount.address,
+  rpcUrls: bridgeRpcUrls,
+  defaultRpcUrl: config.EVM_RPC_URL,
 });
 
 const merchantOsPublisher = new MerchantOsPublisher({
@@ -179,22 +186,15 @@ const bridgeJobWorker = new BridgeJobWorker({
   retryBaseMs: config.BRIDGE_RETRY_BASE_MS
 });
 
-const revenueRegistryRecorder = new RevenueRegistryRecorder({
-  enabled: config.REVENUE_REGISTRY_ENABLED,
-  contractAddress: config.REVENUE_REGISTRY_ADDRESS,
-  rpcUrl: config.ARBITRUM_SEPOLIA_RPC_URL,
-  privateKey: config.EVM_PRIVATE_KEY
-});
-
 if (!config.MERCHANT_OS_EVENT_INGEST_URL) {
   console.warn(
-    "[merchant-os] MERCHANT_OS_EVENT_INGEST_URL is not set. Settlement events will not appear in Merchant OS dashboard.",
+    "[merchant-os] merchantOsEventIngestUrl is not set in facilitator runtime config. Settlement events will not appear in Merchant OS dashboard.",
   );
 } else {
   console.info(`[merchant-os] Settlement event ingest enabled: ${config.MERCHANT_OS_EVENT_INGEST_URL}`);
   if (!config.MERCHANT_CONTEXT_MAP_JSON && !config.MERCHANT_OS_DEFAULT_MERCHANT_ID) {
     console.warn(
-      "[merchant-os] No merchant context mapping/default configured. If requirements omit merchant metadata, events will be dropped.",
+      "[merchant-os] No merchant context mapping/default configured in facilitator runtime config. If requirements omit merchant metadata, events will be dropped.",
     );
   } else {
     console.info(
@@ -203,16 +203,6 @@ if (!config.MERCHANT_OS_EVENT_INGEST_URL) {
       }`,
     );
   }
-}
-
-if (revenueRegistryRecorder.isEnabled()) {
-  console.info(
-    `[revenue-registry] Enabled: ${config.REVENUE_REGISTRY_ADDRESS} (Arbitrum Sepolia)`
-  );
-} else {
-  console.warn(
-    "[revenue-registry] Disabled. Set REVENUE_REGISTRY_ADDRESS (and optionally REVENUE_REGISTRY_ENABLED=true) to enable onchain revenue proof."
-  );
 }
 
 const pickString = (...values: unknown[]): string | undefined =>
@@ -273,28 +263,6 @@ const extractMerchantContextMeta = (requirements: PaymentRequirements) => {
   const merchantId = pickString(reqExtra.merchantId, priceExtra.merchantId, reqAny.merchantId);
   const accountId = pickString(reqExtra.accountId, priceExtra.accountId, reqAny.accountId);
   return { merchantId, accountId };
-};
-
-const normalizeAddress = (value: unknown): `0x${string}` | undefined => {
-  if (typeof value !== "string") {
-    return undefined;
-  }
-  const text = value.trim();
-  if (!/^0x[a-fA-F0-9]{40}$/.test(text)) {
-    return undefined;
-  }
-  return text as `0x${string}`;
-};
-
-const normalizeBytes32 = (value: unknown): `0x${string}` | undefined => {
-  if (typeof value !== "string") {
-    return undefined;
-  }
-  const text = value.trim();
-  if (!/^0x[a-fA-F0-9]{64}$/.test(text)) {
-    return undefined;
-  }
-  return text as `0x${string}`;
 };
 
 // ============================================================================
@@ -461,45 +429,6 @@ const facilitator = new x402Facilitator()
         destinationTxHash: isCrossChain ? undefined : context.result.transaction,
         settlementId: context.result.transaction,
       });
-
-      const payer =
-        normalizeAddress(context.result.payer) ||
-        normalizeAddress((context.paymentPayload as any)?.payload?.authorization?.from) ||
-        normalizeAddress((context.paymentPayload as any)?.payload?.from);
-      const settlementId = normalizeBytes32(context.result.transaction);
-      const sourceTxHash = normalizeBytes32(context.result.transaction);
-
-      if (revenueRegistryRecorder.isEnabled() && payer && settlementId && sourceTxHash) {
-        revenueRegistryRecorder
-          .recordSettlement({
-            settlementId,
-            sourceTxHash,
-            merchantId: merchantContextMeta.merchantId || "unknown_merchant",
-            apiId: apiMeta.apiId || apiMeta.apiRoute || "unknown_api",
-            amount: context.requirements.amount,
-            payer,
-          })
-          .then((registryTxHash) => {
-            if (!registryTxHash) {
-              return;
-            }
-            console.info("[revenue-registry] Settlement recorded onchain", {
-              settlementId,
-              registryTxHash,
-            });
-          })
-          .catch((error) => {
-            console.error("[revenue-registry] Failed to record settlement onchain", {
-              settlementId,
-              error: error instanceof Error ? error.message : String(error),
-            });
-          });
-      } else if (revenueRegistryRecorder.isEnabled()) {
-        console.warn("[revenue-registry] Skip record: missing payer or tx hash", {
-          payer: context.result.payer,
-          txHash: context.result.transaction,
-        });
-      }
     }
 
     // Queue durable bridge job instead of in-memory async retries.
@@ -659,7 +588,15 @@ app.post("/settle", async (req, res) => {
 app.get("/supported", async (req, res) => {
   try {
     const response = facilitator.getSupported();
-    res.json(response);
+    const filteredKinds = Array.isArray((response as any)?.kinds)
+      ? (response as any).kinds.filter((kind: { network?: unknown }) =>
+          typeof kind?.network === "string" && kind.network.includes(":")
+        )
+      : [];
+    res.json({
+      ...response,
+      kinds: filteredKinds
+    });
   } catch (error) {
     console.error("Supported error:", error);
     res.status(500).json({

@@ -35,7 +35,8 @@ export class FacilitatorChainCatalog {
 
   constructor(
     private readonly statusFilePath: string = config.CHAIN_STATUS_FILE,
-    private readonly statusOverrides: Record<string, string> = config.CHAIN_STATUS_OVERRIDES_JSON
+    private readonly statusOverrides: Record<string, string> = config.CHAIN_STATUS_OVERRIDES_JSON,
+    private readonly rpcOverridesByNetwork: Record<string, string[]> = config.RPC_OVERRIDES_BY_NETWORK
   ) {
     this.loadStatuses();
   }
@@ -77,6 +78,30 @@ export class FacilitatorChainCatalog {
     writeFileSync(this.statusFilePath, JSON.stringify(payload, null, 2), "utf8");
   }
 
+  private resolveRpcEndpoints(network: Network, bridgeKitRpcEndpoints: unknown): string[] {
+    const override = Array.isArray(this.rpcOverridesByNetwork?.[network])
+      ? this.rpcOverridesByNetwork[network].filter(
+          (url) => typeof url === "string" && /^https?:\/\//.test(url)
+        )
+      : [];
+    if (override.length) {
+      return override;
+    }
+
+    const fromBridgeKit = Array.isArray(bridgeKitRpcEndpoints)
+      ? bridgeKitRpcEndpoints.filter((url) => typeof url === "string" && /^https?:\/\//.test(url))
+      : [];
+    if (fromBridgeKit.length) {
+      return fromBridgeKit;
+    }
+
+    if (config.EVM_RPC_URL && /^https?:\/\//.test(config.EVM_RPC_URL)) {
+      return [config.EVM_RPC_URL];
+    }
+
+    return [];
+  }
+
   sync(): FacilitatorChain[] {
     this.loadStatuses();
 
@@ -94,9 +119,7 @@ export class FacilitatorChainCatalog {
         const network = `eip155:${chain.chainId}` as Network;
         const persistedStatus = this.statusByNetwork.get(network);
         const status = normalizeStatus(persistedStatus || "active");
-        const rpcEndpoints = Array.isArray(chain.rpcEndpoints)
-          ? chain.rpcEndpoints.filter((url) => typeof url === "string" && /^https?:\/\//.test(url))
-          : [];
+        const rpcEndpoints = this.resolveRpcEndpoints(network, chain.rpcEndpoints);
 
         next.push({
           network,

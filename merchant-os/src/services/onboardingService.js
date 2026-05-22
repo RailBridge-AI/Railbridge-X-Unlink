@@ -1,4 +1,6 @@
 import {
+  getPolicy,
+  getTenantProfile,
   getTimeline,
   listApiKeys,
   listApiProducts,
@@ -60,11 +62,24 @@ export const buildOnboardingChecklist = (merchantId, accountId) => {
   };
 };
 
-export const buildTenantSettingsPayload = (merchantId, accountId) => ({
-  merchantId,
-  accountId,
-  apiKeys: listApiKeys(merchantId, accountId),
-  webhooks: listWebhookEndpoints(merchantId, accountId),
-  chains: listChainCatalog(),
-  checklist: buildOnboardingChecklist(merchantId, accountId)
-});
+export const buildTenantSettingsPayload = (merchantId, accountId) => {
+  const profile = getTenantProfile(merchantId, accountId);
+  const policy = getPolicy(merchantId, accountId);
+  return {
+    merchantId,
+    accountId,
+    merchantName: profile?.merchantName || "",
+    accountName: profile?.accountName || "",
+    user: profile?.userEmail
+      ? {
+          email: profile.userEmail,
+          role: profile.userRole || "admin"
+        }
+      : null,
+    apiKeys: listApiKeys(merchantId, accountId),
+    webhooks: listWebhookEndpoints(merchantId, accountId),
+    chains: listChainCatalog(),
+    policy: policy || null,
+    checklist: buildOnboardingChecklist(merchantId, accountId)
+  };
+};

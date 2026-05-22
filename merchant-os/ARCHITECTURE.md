@@ -15,12 +15,10 @@ flowchart LR
     RPC["Public RPCs<br/>(USDC + native reads)"]
     BridgeKit["Circle Bridge Kit<br/>(consolidation execution)"]
     GasSponsor["Gas Sponsor Wallet<br/>(optional auto top-up)"]
-    RevenueRegistry["RevenueRegistry Contract<br/>(Arbitrum Sepolia, optional)"]
 
     Client -->|GET paid API| MerchantServer
     MerchantServer -->|payment middleware (verify/settle under the hood)| Facilitator
     Facilitator -->|settlement lifecycle ingest| MerchantOSAPI
-    Facilitator -->|optional recordSettlement| RevenueRegistry
 
     Frontend -->|/v1/* via Next rewrites| MerchantOSAPI
     MerchantOSAPI --> DB
@@ -63,9 +61,6 @@ flowchart LR
 - `facilitator/src/services/merchantOsPaymentGuard.ts` encapsulates requirement resolution + x402 middleware wiring for demo merchant integrations.
 - `facilitator/src/merchant-server-merchant-os-demo.ts` now mounts the guard as a thin merchant-facing integration entrypoint.
 - Merchant integrations should not manually call facilitator endpoints. Verify/settle happens inside payment middleware or RailBridge-hosted payment execution.
-
-8. Optional onchain revenue proof
-- `facilitator/src/services/revenueRegistryRecorder.ts` writes settlement proof to `RevenueRegistry` on Arbitrum Sepolia.
 
 ## 3) Payment + Settlement Flow
 

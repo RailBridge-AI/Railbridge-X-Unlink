@@ -128,7 +128,7 @@ References:
 
 Status: Config-dependent (real path implemented)
 
-When enabled (`realConsolidationBridgeEnabled=true` in runtime config, or `MERCHANT_OS_REAL_CONSOLIDATION_BRIDGE=true` override):
+When enabled (`realConsolidationBridgeEnabled=true` in runtime config):
 
 1. Uses Circle Bridge Kit path.
 2. Performs gas and onchain preflight checks.
@@ -136,8 +136,9 @@ When enabled (`realConsolidationBridgeEnabled=true` in runtime config, or `MERCH
 
 Current signer model for prototype:
 
-1. Wallets with `mpc:*` references resolve to a shared configured signer key (`MERCHANT_OS_BRIDGE_EVM_PRIVATE_KEY`) when present.
-2. If signer key is missing or invalid, bridge fails with explicit reason and remains visible in timeline.
+1. Wallets with `mpc:*` references resolve to tenant-derived private keys from `MERCHANT_OS_CUSTODY_MASTER_KEY`.
+2. Non-`mpc:*` references generate tenant custody keys that are encrypted at rest with `MERCHANT_OS_CUSTODY_MASTER_KEY`.
+3. If required signer material is missing or invalid, bridge fails with explicit reason and remains visible in timeline.
 
 References:
 
@@ -152,10 +153,10 @@ References:
 Status: Config-dependent (real path implemented)
 
 1. Payout request creates request -> `submitted`.
-2. With `realPayoutsEnabled=true` (or `MERCHANT_OS_REAL_PAYOUTS_ENABLED=true` override), server executes real ERC20 USDC transfer and updates to:
+2. With `realPayoutsEnabled=true`, server executes real ERC20 USDC transfer and updates to:
    - `completed` with `txHash`, or
    - `failed` with `failReason`.
-3. With `realPayoutsEnabled=false` (or `MERCHANT_OS_REAL_PAYOUTS_ENABLED=false` override), payout uses simulation fallback and marks `completed`.
+3. With `realPayoutsEnabled=false`, payout uses simulation fallback and marks `completed`.
 4. `payout.completed` and `payout.failed` webhooks are emitted.
 
 References:
@@ -169,7 +170,7 @@ Notable current values:
 
 1. Non-sensitive defaults live in `merchant-os/config/runtime-config.json`.
 2. `merchant-os/config/runtime-config.local.json` can override those defaults per machine.
-3. Secrets and deployment overrides live in `merchant-os/.env`.
+3. Secrets live in `merchant-os/.env`.
 4. Ingest and internal tokens are separate controls (`MERCHANT_OS_INGEST_TOKEN`, `MERCHANT_OS_INTERNAL_TOKEN`).
 5. Ingest endpoint accepts ingest-token and internal-token headers for compatibility.
 

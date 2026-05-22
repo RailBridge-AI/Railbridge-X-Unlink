@@ -27,9 +27,8 @@ const MERCHANT_URL = process.env.MERCHANT_URL || "http://localhost:4021";
 const CLIENT_PRIVATE_KEY = process.env.CLIENT_PRIVATE_KEY as
   | `0x${string}`
   | undefined;
-const FACILITATOR_PRIVATE_KEY = process.env.EVM_PRIVATE_KEY as
-  | `0x${string}`
-  | undefined;
+const FACILITATOR_PRIVATE_KEY = process.env
+  .FACILITATOR_EVM_PRIVATE_KEY as `0x${string}` | undefined;
 
 const PAYMENT_AMOUNT = 10000n;
 const ERC20_ABI = [
@@ -316,7 +315,7 @@ const run = async () => {
     : null;
   if (!facilitatorAccount) {
     console.warn(
-      "⚠️  EVM_PRIVATE_KEY not set; skipping facilitator gas balance checks",
+      "⚠️  FACILITATOR_EVM_PRIVATE_KEY not set; skipping facilitator gas balance checks",
     );
   }
   const paymentFailures: string[] = [];
@@ -589,4 +588,3 @@ run().catch((error) => {
   console.error(error instanceof Error ? error.message : error);
   process.exit(1);
 });
-

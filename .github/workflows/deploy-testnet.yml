@@ -1,0 +1,93 @@
+name: Deploy Testnet
+
+on:
+  push:
+    branches:
+      - testnet
+    paths:
+      - ".github/workflows/deploy-testnet.yml"
+      - "deploy/testnet/**"
+      - "merchant-os/**"
+      - "facilitator/**"
+  workflow_dispatch:
+
+concurrency:
+  group: deploy-testnet
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Deploy to VPS over SSH
+        uses: appleboy/ssh-action@v1.2.0
+        env:
+          REF_NAME: ${{ github.ref_name }}
+          TESTNET_APP_DIR: ${{ secrets.TESTNET_APP_DIR }}
+          TESTNET_CONFIG_DIR: ${{ secrets.TESTNET_CONFIG_DIR }}
+          TRAEFIK_NETWORK: ${{ secrets.TRAEFIK_NETWORK }}
+          TRAEFIK_ENTRYPOINT: ${{ secrets.TRAEFIK_ENTRYPOINT }}
+          TRAEFIK_CERT_RESOLVER: ${{ secrets.TRAEFIK_CERT_RESOLVER }}
+          APP_HOST: ${{ secrets.TESTNET_APP_HOST }}
+          API_HOST: ${{ secrets.TESTNET_API_HOST }}
+          FACILITATOR_HOST: ${{ secrets.TESTNET_FACILITATOR_HOST }}
+          DEMO_MERCHANT_HOST: ${{ secrets.TESTNET_DEMO_MERCHANT_HOST }}
+          MERCHANT_OS_DATA_DIR: ${{ secrets.TESTNET_MERCHANT_OS_DATA_DIR }}
+          FACILITATOR_DATA_DIR: ${{ secrets.TESTNET_FACILITATOR_DATA_DIR }}
+        with:
+          host: ${{ secrets.TESTNET_VPS_HOST }}
+          username: ${{ secrets.TESTNET_VPS_USER }}
+          key: ${{ secrets.TESTNET_VPS_SSH_KEY }}
+          port: 22
+          envs: REF_NAME,TESTNET_APP_DIR,TESTNET_CONFIG_DIR,TRAEFIK_NETWORK,TRAEFIK_ENTRYPOINT,TRAEFIK_CERT_RESOLVER,APP_HOST,API_HOST,FACILITATOR_HOST,DEMO_MERCHANT_HOST,MERCHANT_OS_DATA_DIR,FACILITATOR_DATA_DIR
+          script_stop: true
+          script: |
+            set -euo pipefail
+
+            if [ -z "${TESTNET_APP_DIR:-}" ]; then
+              echo "TESTNET_APP_DIR is required."
+              exit 1
+            fi
+
+            if [ -z "${TESTNET_CONFIG_DIR:-}" ]; then
+              echo "TESTNET_CONFIG_DIR is required."
+              exit 1
+            fi
+
+            cd "${TESTNET_APP_DIR}"
+            git fetch --all --prune
+            git checkout "${REF_NAME}"
+            git pull --ff-only origin "${REF_NAME}"
+
+            chmod +x deploy/testnet/prepare-testnet-runtime-configs.sh
+            ./deploy/testnet/prepare-testnet-runtime-configs.sh "${TESTNET_CONFIG_DIR}"
+
+            : "${TRAEFIK_NETWORK:=traefik-public}"
+            : "${TRAEFIK_ENTRYPOINT:=websecure}"
+            : "${TRAEFIK_CERT_RESOLVER:=letsencrypt}"
+            : "${APP_HOST:=app.testnet.railbridge.ai}"
+            : "${API_HOST:=api.testnet.railbridge.ai}"
+            : "${FACILITATOR_HOST:=facilitator.testnet.railbridge.ai}"
+            : "${DEMO_MERCHANT_HOST:=demo.testnet.railbridge.ai}"
+            : "${MERCHANT_OS_DATA_DIR:=/data/railbridge/merchant-os}"
+            : "${FACILITATOR_DATA_DIR:=/data/railbridge/facilitator}"
+
+            docker network inspect "${TRAEFIK_NETWORK}" >/dev/null 2>&1 || {
+              echo "Traefik external network '${TRAEFIK_NETWORK}' not found."
+              exit 1
+            }
+
+            export TRAEFIK_NETWORK TRAEFIK_ENTRYPOINT TRAEFIK_CERT_RESOLVER
+            export APP_HOST API_HOST FACILITATOR_HOST DEMO_MERCHANT_HOST
+            export MERCHANT_OS_DATA_DIR FACILITATOR_DATA_DIR
+
+            docker compose \
+              -f deploy/testnet/docker-compose.testnet.yml \
+              --project-name railbridge-testnet \
+              up -d --build --remove-orphans
+
+            docker compose \
+              -f deploy/testnet/docker-compose.testnet.yml \
+              --project-name railbridge-testnet \
+              ps

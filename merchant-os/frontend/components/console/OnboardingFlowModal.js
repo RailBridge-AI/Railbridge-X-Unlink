@@ -1,8 +1,14 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
+import { createPortal } from "react-dom";
 import { useRouter } from "next/navigation";
-import { apiWithSession } from "../../lib/platformClient";
+import { apiWithMerchantKey, apiWithSession } from "../../lib/platformClient";
+import SyntaxCodeBlock from "./SyntaxCodeBlock";
+import {
+  BACKEND_REQUIREMENTS_CURL,
+  BACKEND_REQUIREMENTS_SNIPPET
+} from "../../lib/integrationSnippets";
 
 const STEP_META = {
   api_key: {
@@ -28,7 +34,7 @@ const STEP_META = {
     title: "Receive first sandbox payment",
     description:
       "Your backend makes one request for payment instructions; RailBridge handles validation, settlement, and fund movement after the customer pays.",
-    actionLabel: "Open Settlements",
+    actionLabel: "Open Activity",
     kind: "navigate",
     href: "/settlements"
   },
@@ -39,6 +45,27 @@ const STEP_META = {
     kind: "navigate",
     href: "/payouts"
   }
+};
+
+const WEBHOOK_SKIPPED_MESSAGE =
+  "Webhook step skipped for now. Continue setup and configure webhook later in Settings.";
+const generateWebhookSigningSecret = () => {
+  const bytes = new Uint8Array(24);
+  window.crypto.getRandomValues(bytes);
+  const value = Array.from(bytes, (item) =>
+    String.fromCharCode(item)
+  ).join("");
+  return `whsec_${btoa(value).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/g, "")}`;
+};
+const maskSecretValue = (value) => {
+  const text = String(value || "").trim();
+  if (!text) {
+    return "";
+  }
+  if (text.length <= 10) {
+    return `${text.slice(0, 2)}...${text.slice(-2)}`;
+  }
+  return `${text.slice(0, 6)}...${text.slice(-4)}`;
 };
 
 const classNames = (...values) => values.filter(Boolean).join(" ");
@@ -60,7 +87,10 @@ export default function OnboardingFlowModal({
   const [webhookSecret, setWebhookSecret] = useState("");
   const [copiedId, setCopiedId] = useState("");
   const [showWebhookSkipWarning, setShowWebhookSkipWarning] = useState(false);
+  const [closeAttemptedWhileWebhookIncomplete, setCloseAttemptedWhileWebhookIncomplete] = useState(false);
   const [skippedStepIds, setSkippedStepIds] = useState([]);
+  const [integrationBusy, setIntegrationBusy] = useState(false);
+  const [mounted, setMounted] = useState(false);
 
   const summary = useMemo(() => {
     const steps = checklist?.steps || [];
@@ -98,7 +128,37 @@ export default function OnboardingFlowModal({
     };
   }, [checklist, createdApiKey, skippedStepIds]);
 
-  if (!open || !auth || (!summary.activeStep && !summary.isCompleteForWizard)) {
+  useEffect(() => {
+    setMounted(true);
+    return () => setMounted(false);
+  }, []);
+
+  useEffect(() => {
+    if (summary.activeStep?.id !== "webhook" && message === WEBHOOK_SKIPPED_MESSAGE) {
+      setMessage("");
+    }
+  }, [message, summary.activeStep?.id]);
+
+  useEffect(() => {
+    if (!createdApiKey) {
+      return;
+    }
+    const timer = setTimeout(() => {
+      setCreatedApiKey("");
+      setApiKeyCopied(false);
+    }, 5 * 60 * 1000);
+    return () => clearTimeout(timer);
+  }, [createdApiKey]);
+
+  useEffect(() => {
+    if (!webhookSecret) {
+      return;
+    }
+    const timer = setTimeout(() => setWebhookSecret(""), 5 * 60 * 1000);
+    return () => clearTimeout(timer);
+  }, [webhookSecret]);
+
+  if (!mounted || !open || !auth || (!summary.activeStep && !summary.isCompleteForWizard)) {
     return null;
   }
 
@@ -159,15 +219,17 @@ export default function OnboardingFlowModal({
         if (!/^https?:\/\//.test(trimmed)) {
           throw new Error("Enter a valid http(s) webhook URL.");
         }
-        const payload = await apiWithSession({
+        const signingSecret = generateWebhookSigningSecret();
+        await apiWithSession({
           token: auth.token,
           path: "/v1/onboarding/webhooks",
           method: "POST",
           body: {
-            url: trimmed
+            url: trimmed,
+            signingSecret
           }
         });
-        setWebhookSecret(payload.signingSecret || "");
+        setWebhookSecret(signingSecret);
         setMessage("Webhook registered. Save the signing secret now.");
         setWebhookUrl("");
         await withRefresh();
@@ -229,8 +291,57 @@ export default function OnboardingFlowModal({
     }
   };
 
+  const runIntegrationCheck = async () => {
+    if (!auth || integrationBusy) {
+      return;
+    }
+
+    setIntegrationBusy(true);
+    setError("");
+    setMessage("");
+    try {
+      const products = await apiWithMerchantKey({
+        apiKey: auth.apiKey,
+        path: `/v1/merchants/${auth.merchantId}/products`
+      });
+      const activeProduct = Array.isArray(products.items)
+        ? products.items.find((item) => Boolean(item?.enabled))
+        : null;
+
+      if (!activeProduct) {
+        throw new Error("Create a paid product first, then run integration check.");
+      }
+
+      const resolved = await apiWithMerchantKey({
+        apiKey: auth.apiKey,
+        path: "/v1/sdk/requirements/resolve",
+        method: "POST",
+        body: {
+          apiId: activeProduct.apiId,
+          method: activeProduct.method,
+          path: activeProduct.path
+        }
+      });
+
+      const optionCount = Array.isArray(resolved.requirements)
+        ? resolved.requirements.length
+        : resolved.requirement
+          ? 1
+          : 0;
+
+      setMessage(
+        `Integration check passed. RailBridge resolved ${optionCount} payment option(s) for ${activeProduct.method} ${activeProduct.path}.`
+      );
+    } catch (nextError) {
+      setError(nextError.message || "Integration check failed");
+    } finally {
+      setIntegrationBusy(false);
+    }
+  };
+
   const requestClose = () => {
     if (webhookStepIncomplete) {
+      setCloseAttemptedWhileWebhookIncomplete(true);
       setShowWebhookSkipWarning(true);
       return;
     }
@@ -239,15 +350,16 @@ export default function OnboardingFlowModal({
 
   const confirmSkipWebhook = () => {
     setShowWebhookSkipWarning(false);
+    setCloseAttemptedWhileWebhookIncomplete(false);
     setSkippedStepIds((current) =>
       current.includes("webhook") ? current : [...current, "webhook"]
     );
-    setMessage("Webhook step skipped for now. Continue setup and configure webhook later in Settings.");
+    setMessage("");
   };
 
-  return (
-    <div className="fixed inset-0 z-[70] flex items-center justify-center bg-slate-900/55 p-4">
-      <div className="w-full max-w-2xl overflow-hidden rounded-3xl border border-slate-200 bg-white shadow-2xl">
+  const modalContent = (
+    <div className="fixed inset-0 z-[120] flex items-center justify-center overflow-y-auto bg-slate-950/60 p-4 backdrop-blur-sm sm:p-6 md:p-8">
+      <div className="mx-auto flex w-full max-w-[1240px] max-h-[92vh] flex-col overflow-hidden rounded-[30px] border border-slate-200 bg-white shadow-2xl">
         <div className="border-b border-slate-200 px-5 pb-4 pt-5">
           <div className="mb-3 flex items-start justify-between gap-3">
             <div>
@@ -273,7 +385,48 @@ export default function OnboardingFlowModal({
           </p>
         </div>
 
-        <div className="space-y-4 px-5 pb-5 pt-4">
+        <div className="flex-1 space-y-4 overflow-y-auto px-5 pb-5 pt-4">
+          {showWebhookSkipWarning ? (
+            <section className="rounded-xl border border-amber-300 bg-amber-50 px-3 py-3 text-sm text-amber-900">
+              <div className="flex items-start gap-2">
+                <span className="mt-0.5 inline-flex h-5 w-5 shrink-0 items-center justify-center rounded-full border border-amber-400 bg-amber-100 text-[11px] font-bold text-amber-800">
+                  !
+                </span>
+                <div>
+                  <p className="font-semibold">Skip webhook setup?</p>
+                  <p className="mt-1 text-xs text-amber-800">
+                    You can continue without webhook, but your backend will not receive real-time payment and payout
+                    events. You will need to poll APIs manually and can miss async updates.
+                  </p>
+                  {closeAttemptedWhileWebhookIncomplete ? (
+                    <p className="mt-1 text-xs font-semibold text-amber-900">
+                      To close onboarding now, press <span className="font-mono">"Skip For Now"</span> first.
+                    </p>
+                  ) : null}
+                </div>
+              </div>
+              <div className="mt-3 flex flex-wrap gap-2">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setShowWebhookSkipWarning(false);
+                    setCloseAttemptedWhileWebhookIncomplete(false);
+                  }}
+                  className="rounded-lg border border-amber-300 bg-white px-2.5 py-1.5 text-xs font-medium text-amber-800 hover:bg-amber-100"
+                >
+                  Continue Webhook Setup
+                </button>
+                <button
+                  type="button"
+                  onClick={confirmSkipWebhook}
+                  className="rounded-lg border border-amber-700 bg-amber-700 px-2.5 py-1.5 text-xs font-semibold text-white hover:brightness-105"
+                >
+                  Skip For Now
+                </button>
+              </div>
+            </section>
+          ) : null}
+
           {summary.isCompleteForWizard ? (
             <section className="rounded-2xl border border-emerald-200 bg-emerald-50 p-4">
               <p className="text-sm font-semibold text-emerald-800">All onboarding steps are complete.</p>
@@ -327,6 +480,51 @@ export default function OnboardingFlowModal({
                       This URL must be hosted by your backend service. Do not use a frontend page URL.
                     </p>
                   </div>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      onClose?.();
+                      router.push("/settings?panel=webhooks");
+                    }}
+                    className="inline-flex rounded-lg border border-slate-300 bg-white px-2.5 py-1.5 text-xs font-medium text-slate-700 hover:bg-slate-100"
+                  >
+                    More Details In Settings
+                  </button>
+                </div>
+              ) : null}
+              {summary.activeStep.id === "sandbox_payment" ? (
+                <div className="mt-3 space-y-2 rounded-xl border border-slate-200 bg-white p-3">
+                  <p className="text-xs font-semibold text-slate-700">Backend integration snippet</p>
+                  <p className="text-[11px] text-slate-500">
+                    Use <span className="font-mono">x-railbridge-api-key</span> from your backend to resolve payment
+                    requirements for protected routes.
+                  </p>
+                  <SyntaxCodeBlock language="javascript" code={BACKEND_REQUIREMENTS_SNIPPET} />
+                  <SyntaxCodeBlock language="bash" code={BACKEND_REQUIREMENTS_CURL} />
+                  <div className="flex flex-wrap gap-2">
+                    <button
+                      type="button"
+                      onClick={() => copyText("modal-backend-snippet", BACKEND_REQUIREMENTS_SNIPPET)}
+                      className="rounded-lg border border-slate-300 bg-white px-2.5 py-1.5 text-xs font-medium text-slate-700 hover:bg-slate-100"
+                    >
+                      {copiedId === "modal-backend-snippet" ? "Copied" : "Copy backend snippet"}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => copyText("modal-backend-curl", BACKEND_REQUIREMENTS_CURL)}
+                      className="rounded-lg border border-slate-300 bg-white px-2.5 py-1.5 text-xs font-medium text-slate-700 hover:bg-slate-100"
+                    >
+                      {copiedId === "modal-backend-curl" ? "Copied" : "Copy curl test"}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={runIntegrationCheck}
+                      disabled={integrationBusy}
+                      className="rounded-lg border border-rail-700 bg-gradient-to-br from-rail-700 to-rail-800 px-2.5 py-1.5 text-xs font-semibold text-white hover:brightness-105 disabled:opacity-60"
+                    >
+                      {integrationBusy ? "Checking..." : "Run integration check"}
+                    </button>
+                  </div>
                 </div>
               ) : null}
 
@@ -376,7 +574,7 @@ export default function OnboardingFlowModal({
           {createdApiKey ? (
             <div className="rounded-xl border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800">
               <p>
-                Copy API key now: <span className="font-mono">{createdApiKey}</span>
+                Copy API key now: <span className="font-mono">{maskSecretValue(createdApiKey)}</span>
               </p>
               <button
                 type="button"
@@ -399,7 +597,7 @@ export default function OnboardingFlowModal({
           {webhookSecret ? (
             <div className="rounded-xl border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800">
               <p>
-                Copy webhook signing secret now: <span className="font-mono">{webhookSecret}</span>
+                Copy webhook signing secret now: <span className="font-mono">{maskSecretValue(webhookSecret)}</span>
               </p>
               <button
                 type="button"
@@ -417,33 +615,10 @@ export default function OnboardingFlowModal({
             <p className="rounded-xl border border-rose-300 bg-rose-50 px-3 py-2 text-sm text-rose-700">{error}</p>
           ) : null}
 
-          {showWebhookSkipWarning ? (
-            <section className="rounded-xl border border-amber-300 bg-amber-50 px-3 py-3 text-sm text-amber-900">
-              <p className="font-semibold">Skip webhook setup?</p>
-              <p className="mt-1 text-xs text-amber-800">
-                You can continue without webhook, but your backend will not receive real-time payment and payout
-                events. You will need to poll APIs manually and can miss async updates.
-              </p>
-              <div className="mt-3 flex flex-wrap gap-2">
-                <button
-                  type="button"
-                  onClick={() => setShowWebhookSkipWarning(false)}
-                  className="rounded-lg border border-amber-300 bg-white px-2.5 py-1.5 text-xs font-medium text-amber-800 hover:bg-amber-100"
-                >
-                  Continue Webhook Setup
-                </button>
-                <button
-                  type="button"
-                  onClick={confirmSkipWebhook}
-                  className="rounded-lg border border-amber-700 bg-amber-700 px-2.5 py-1.5 text-xs font-semibold text-white hover:brightness-105"
-                >
-                  Skip For Now
-                </button>
-              </div>
-            </section>
-          ) : null}
         </div>
       </div>
     </div>
   );
+
+  return createPortal(modalContent, document.body);
 }

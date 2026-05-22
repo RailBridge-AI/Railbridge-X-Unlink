@@ -19,7 +19,7 @@ const kit = new BridgeKit();
 //   try {
 //     // Initialize the adapter which lets you transfer tokens from your wallet on any EVM-compatible chain
 //     const adapter = createViemAdapterFromPrivateKey({
-//       privateKey: process.env.EVM_PRIVATE_KEY as string,
+//       privateKey: process.env.FACILITATOR_EVM_PRIVATE_KEY as string,
 //     });
 
 //     console.log("---------------Starting Bridging---------------");

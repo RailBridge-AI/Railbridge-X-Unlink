@@ -1,6 +1,6 @@
 # RailBridge Merchant Onboarding And Integration (Technical)
 
-Last reviewed: 2026-05-17
+Last reviewed: 2026-05-19
 
 This guide explains how onboarding and merchant integration work in the current prototype.
 
@@ -72,6 +72,18 @@ sequenceDiagram
 7. Default API key.
 
 This is why a merchant can log in and immediately configure products and webhooks.
+
+### 4.1 Custody address assignment model
+
+Current behavior for custodial MPC wallets:
+
+1. Each merchant account gets a tenant-derived signer identity.
+2. For the same merchant account, the EVM address is consistent across EVM chains (same signer, same address string).
+3. Different merchants get different custody addresses.
+
+Operational note:
+
+1. RailBridge still keeps an internal ledger/timeline for lifecycle state (`settled_source`, `bridge_pending`, `bridge_confirmed`, `failed`) and reconciliation, even with merchant-isolated custody addresses.
 
 ## 5) Authentication Model
 

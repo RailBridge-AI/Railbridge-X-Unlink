@@ -56,7 +56,9 @@ const parseMerchantContextMap = (raw: string | undefined): MerchantContextMap =>
     });
     return normalized;
   } catch (error) {
-    console.warn("[merchant-os] Invalid MERCHANT_CONTEXT_MAP_JSON, default context fallback will be used");
+    console.warn(
+      "[merchant-os] Invalid merchantContextMapJson runtime config value; default context fallback will be used"
+    );
     return {};
   }
 };
@@ -96,7 +98,8 @@ export class MerchantOsPublisher {
     if (!context) {
       console.warn("[merchant-os] Missing merchant context for address, skipping event publish", {
         merchantAddress: input.merchantAddress,
-        hint: "Set MERCHANT_OS_DEFAULT_MERCHANT_ID + MERCHANT_OS_DEFAULT_ACCOUNT_ID or MERCHANT_CONTEXT_MAP_JSON",
+        hint:
+          "Set merchantOsDefaultMerchantId + merchantOsDefaultAccountId or merchantContextMapJson in facilitator runtime config",
       });
       return;
     }

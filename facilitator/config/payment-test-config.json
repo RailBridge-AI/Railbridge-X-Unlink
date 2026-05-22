@@ -1,0 +1,28 @@
+{
+  "existingMerchantPayment": {
+    "facilitatorUrl": "http://localhost:4022",
+    "merchantUrl": "http://localhost:4025",
+    "merchantOsUrl": "http://localhost:4030",
+    "apiId": "premium_api",
+    "routeMethod": "GET",
+    "routePath": "/api/premium",
+    "sourceNetwork": "eip155:84532",
+    "preferredPayNetworks": ["eip155:84532", "eip155:421614"],
+    "verifySettlement": true,
+    "verifyTimeoutMs": 45000,
+    "healthTimeoutMs": 15000
+  },
+  "existingMerchantPaymentPublicTestnet": {
+    "facilitatorUrl": "https://facilitator.testnet.railbridge.ai",
+    "merchantUrl": "https://demo.testnet.railbridge.ai",
+    "merchantOsUrl": "https://api.testnet.railbridge.ai",
+    "apiId": "premium_api",
+    "routeMethod": "GET",
+    "routePath": "/api/premium",
+    "sourceNetwork": "eip155:84532",
+    "preferredPayNetworks": ["eip155:84532", "eip155:421614"],
+    "verifySettlement": true,
+    "verifyTimeoutMs": 45000,
+    "healthTimeoutMs": 60000
+  }
+}

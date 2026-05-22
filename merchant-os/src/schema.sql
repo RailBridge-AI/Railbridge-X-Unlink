@@ -11,7 +11,7 @@ CREATE TABLE IF NOT EXISTS merchant_users (
   merchant_id TEXT NOT NULL REFERENCES merchants(id),
   email TEXT NOT NULL UNIQUE,
   password_hash TEXT NOT NULL,
-  password_hash_algo TEXT NOT NULL DEFAULT 'legacy_plaintext',
+  password_hash_algo TEXT NOT NULL DEFAULT 'pbkdf2_sha512',
   role TEXT NOT NULL CHECK(role IN ('admin', 'finance', 'readonly')),
   status TEXT NOT NULL DEFAULT 'active',
   created_at TEXT NOT NULL
@@ -124,6 +124,9 @@ CREATE TABLE IF NOT EXISTS treasury_settlement_events (
 CREATE INDEX IF NOT EXISTS idx_settlement_tenant
   ON treasury_settlement_events(merchant_id, account_id, created_at DESC);
 
+CREATE UNIQUE INDEX IF NOT EXISTS idx_settlement_tenant_tx_status
+  ON treasury_settlement_events(merchant_id, account_id, tx_hash, status);
+
 CREATE TABLE IF NOT EXISTS treasury_balances (
   merchant_id TEXT NOT NULL REFERENCES merchants(id),
   account_id TEXT NOT NULL REFERENCES merchant_accounts(id),
@@ -153,6 +156,9 @@ CREATE TABLE IF NOT EXISTS treasury_consolidations (
   updated_at TEXT NOT NULL
 );
 
+CREATE INDEX IF NOT EXISTS idx_treasury_consolidations_tenant_created
+  ON treasury_consolidations(merchant_id, account_id, created_at DESC);
+
 CREATE TABLE IF NOT EXISTS treasury_payout_requests (
   id TEXT PRIMARY KEY,
   merchant_id TEXT NOT NULL REFERENCES merchants(id),
@@ -167,6 +173,22 @@ CREATE TABLE IF NOT EXISTS treasury_payout_requests (
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS payout_address_book_entries (
+  id TEXT PRIMARY KEY,
+  merchant_id TEXT NOT NULL REFERENCES merchants(id),
+  account_id TEXT NOT NULL REFERENCES merchant_accounts(id),
+  label TEXT NOT NULL,
+  network TEXT NOT NULL,
+  address TEXT NOT NULL,
+  last_used_at TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  UNIQUE(merchant_id, account_id, network, address)
+);
+
+CREATE INDEX IF NOT EXISTS idx_payout_address_book_tenant
+  ON payout_address_book_entries(merchant_id, account_id, network, created_at);
 
 CREATE TABLE IF NOT EXISTS chain_catalog (
   network TEXT PRIMARY KEY,
@@ -260,3 +282,14 @@ CREATE TABLE IF NOT EXISTS bridge_jobs (
 
 CREATE INDEX IF NOT EXISTS idx_bridge_jobs_status
   ON bridge_jobs(status, next_retry_at);
+
+CREATE TABLE IF NOT EXISTS tenant_mutation_locks (
+  lock_key TEXT PRIMARY KEY,
+  owner_token TEXT NOT NULL,
+  expires_at TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_tenant_mutation_locks_expires
+  ON tenant_mutation_locks(expires_at);

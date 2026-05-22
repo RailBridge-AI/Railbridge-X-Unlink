@@ -1,8 +1,13 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import PlatformShell from "../../components/console/PlatformShell";
-import { getNetworkInfo, formatUsdcBaseUnits } from "../../lib/assetDisplay";
+import {
+  formatUsdcBaseUnits,
+  getNetworkInfo,
+  isTestnetNetwork,
+  shouldPreferTestnetsInUi
+} from "../../lib/assetDisplay";
 import { apiWithMerchantKey } from "../../lib/platformClient";
 import { useAuthGuard } from "../../lib/useAuthGuard";
 
@@ -17,7 +22,7 @@ const defaultForm = {
   amountUsdc: "0.01",
   sourceNetwork: SOURCE_NETWORK_ANY,
   destinationNetwork: "",
-  settlementMode: "cross_chain"
+  settlementMode: "same_chain"
 };
 
 const isSourceAny = (network) => String(network || "").trim().toLowerCase() === SOURCE_NETWORK_ANY;
@@ -55,6 +60,59 @@ const baseUnitsToUsdcInput = (value) => {
   return fraction ? `${whole}.${fraction}` : whole;
 };
 
+const MethodDropdown = ({
+  value,
+  onChange,
+  open,
+  setOpen,
+  dropdownRef,
+  options,
+  disabled = false,
+  roundedClassName = "rounded-xl",
+  buttonPaddingClassName = "px-3 py-2",
+  menuPaddingClassName = "p-1",
+  itemPaddingClassName = "px-2 py-1.5"
+}) => (
+  <div className="relative" ref={dropdownRef}>
+    <button
+      type="button"
+      className={`flex w-full items-center justify-between border border-slate-300 bg-white text-left text-sm text-slate-900 ${roundedClassName} ${buttonPaddingClassName}`}
+      onClick={() => setOpen((current) => !current)}
+      disabled={disabled}
+    >
+      <span className="font-medium">{value || "Select method"}</span>
+      <span className="text-slate-500">{open ? "▴" : "▾"}</span>
+    </button>
+    {open ? (
+      <div className={`absolute z-30 mt-1 max-h-64 w-full overflow-auto border border-slate-300 bg-white shadow-xl ${roundedClassName} ${menuPaddingClassName}`}>
+        {options.map((option) => {
+          const isSelected = option === value;
+          return (
+            <button
+              key={`method-option-${option}`}
+              type="button"
+              className={`flex w-full items-center justify-between rounded-lg text-left text-sm ${itemPaddingClassName} ${
+                isSelected
+                  ? "bg-rail-50 text-rail-800"
+                  : "text-slate-700 hover:bg-slate-100"
+              }`}
+              onClick={() => {
+                onChange(option);
+                setOpen(false);
+              }}
+            >
+              <span className="font-medium">{option}</span>
+              <span className={`text-xs ${isSelected ? "text-rail-700" : "text-transparent"}`}>
+                ✓
+              </span>
+            </button>
+          );
+        })}
+      </div>
+    ) : null}
+  </div>
+);
+
 export default function ProductsPage() {
   const { auth, logout } = useAuthGuard();
   const [items, setItems] = useState([]);
@@ -72,12 +130,17 @@ export default function ProductsPage() {
     amountUsdc: "",
     sourceNetwork: SOURCE_NETWORK_ANY,
     destinationNetwork: "",
-    settlementMode: "cross_chain",
+    settlementMode: "same_chain",
     enabled: true
   });
   const [editAdvancedRouting, setEditAdvancedRouting] = useState(false);
   const [actionProductId, setActionProductId] = useState("");
   const [actionBusy, setActionBusy] = useState(false);
+  const [showTestnetsOnly, setShowTestnetsOnly] = useState(false);
+  const [createMethodDropdownOpen, setCreateMethodDropdownOpen] = useState(false);
+  const [editMethodDropdownOpen, setEditMethodDropdownOpen] = useState(false);
+  const createMethodDropdownRef = useRef(null);
+  const editMethodDropdownRef = useRef(null);
 
   const sourceSelectOptions = useMemo(
     () => [{ network: SOURCE_NETWORK_ANY, displayName: "Any supported USDC network" }, ...chainOptions],
@@ -106,28 +169,68 @@ export default function ProductsPage() {
     setItems(payload.items || []);
   };
 
-  const loadChains = async () => {
-    const response = await fetch("/v1/chains", { method: "GET" });
-    const payload = await response.json().catch(() => ({}));
-    if (!response.ok) {
-      throw new Error(payload.error || payload.message || `HTTP ${response.status}`);
-    }
-    const activeChains = Array.isArray(payload.items)
+  const loadChains = async (currentAuth, testnetsOnly) => {
+    const payload = await apiWithMerchantKey({
+      apiKey: currentAuth.apiKey,
+      path: "/v1/chains"
+    });
+    const availableChains = Array.isArray(payload.items)
       ? payload.items
           .filter((item) => item?.network && item.status !== "paused")
-          .sort((a, b) => String(a.displayName || a.network).localeCompare(String(b.displayName || b.network)))
       : [];
-    setChainOptions(activeChains);
+    const visibleChains = testnetsOnly
+      ? availableChains.filter((item) => isTestnetNetwork(item.network))
+      : availableChains;
+    visibleChains.sort((a, b) =>
+      String(a.displayName || a.network).localeCompare(String(b.displayName || b.network))
+    );
+    setChainOptions(visibleChains);
   };
+
+  useEffect(() => {
+    setShowTestnetsOnly(shouldPreferTestnetsInUi());
+  }, []);
 
   useEffect(() => {
     if (!auth) {
       return;
     }
-    Promise.all([loadProducts(auth), loadChains()]).catch((nextError) =>
+    Promise.all([loadProducts(auth), loadChains(auth, showTestnetsOnly)]).catch((nextError) =>
       setError(nextError.message || "Failed to load products")
     );
-  }, [auth]);
+  }, [auth, showTestnetsOnly]);
+
+  useEffect(() => {
+    if (!createMethodDropdownOpen && !editMethodDropdownOpen) {
+      return;
+    }
+
+    const handlePointerDown = (event) => {
+      const insideCreate = createMethodDropdownRef.current?.contains(event.target);
+      const insideEdit = editMethodDropdownRef.current?.contains(event.target);
+      if (insideCreate || insideEdit) {
+        return;
+      }
+      setCreateMethodDropdownOpen(false);
+      setEditMethodDropdownOpen(false);
+    };
+
+    const handleEscape = (event) => {
+      if (event.key === "Escape") {
+        setCreateMethodDropdownOpen(false);
+        setEditMethodDropdownOpen(false);
+      }
+    };
+
+    document.addEventListener("mousedown", handlePointerDown);
+    document.addEventListener("touchstart", handlePointerDown, { passive: true });
+    window.addEventListener("keydown", handleEscape);
+    return () => {
+      document.removeEventListener("mousedown", handlePointerDown);
+      document.removeEventListener("touchstart", handlePointerDown);
+      window.removeEventListener("keydown", handleEscape);
+    };
+  }, [createMethodDropdownOpen, editMethodDropdownOpen]);
 
   const createProduct = async (event) => {
     event.preventDefault();
@@ -136,7 +239,7 @@ export default function ProductsPage() {
     }
 
     const sourceNetwork = advancedRouting ? form.sourceNetwork : SOURCE_NETWORK_ANY;
-    const settlementMode = advancedRouting ? form.settlementMode : "cross_chain";
+    const settlementMode = advancedRouting ? form.settlementMode : "same_chain";
     const destinationNetwork =
       settlementMode === "cross_chain" && advancedRouting ? form.destinationNetwork || null : null;
 
@@ -160,6 +263,7 @@ export default function ProductsPage() {
       });
       setForm(defaultForm);
       setAdvancedRouting(false);
+      setCreateMethodDropdownOpen(false);
       await loadProducts(auth);
     } catch (nextError) {
       setError(nextError.message || "Failed to create product");
@@ -171,10 +275,11 @@ export default function ProductsPage() {
   const startEdit = (item) => {
     const hasCustomRouting =
       !isSourceAny(item.sourceNetwork) ||
-      item.settlementMode === "same_chain" ||
+      item.settlementMode === "cross_chain" ||
       Boolean(item.destinationNetwork);
     setEditingProductId(item.id);
     setEditAdvancedRouting(hasCustomRouting);
+    setEditMethodDropdownOpen(false);
     setEditForm({
       apiId: item.apiId || "",
       apiName: item.apiName || "",
@@ -183,13 +288,14 @@ export default function ProductsPage() {
       amountUsdc: baseUnitsToUsdcInput(item.amount),
       sourceNetwork: item.sourceNetwork || SOURCE_NETWORK_ANY,
       destinationNetwork: item.destinationNetwork || "",
-      settlementMode: item.settlementMode || "cross_chain",
+      settlementMode: item.settlementMode || "same_chain",
       enabled: Boolean(item.enabled)
     });
   };
 
   const cancelEdit = () => {
     setEditingProductId("");
+    setEditMethodDropdownOpen(false);
     setEditForm({
       apiId: "",
       apiName: "",
@@ -198,7 +304,7 @@ export default function ProductsPage() {
       amountUsdc: "",
       sourceNetwork: SOURCE_NETWORK_ANY,
       destinationNetwork: "",
-      settlementMode: "cross_chain",
+      settlementMode: "same_chain",
       enabled: true
     });
     setEditAdvancedRouting(false);
@@ -213,11 +319,8 @@ export default function ProductsPage() {
     setActionBusy(true);
     try {
       const sourceNetwork = editAdvancedRouting ? editForm.sourceNetwork : SOURCE_NETWORK_ANY;
-      const settlementMode = editAdvancedRouting ? editForm.settlementMode : "cross_chain";
-      const destinationNetwork =
-        settlementMode === "cross_chain" && editAdvancedRouting
-          ? editForm.destinationNetwork || null
-          : null;
+      const settlementMode = editAdvancedRouting ? editForm.settlementMode : "same_chain";
+      const destinationNetwork = settlementMode === "cross_chain" ? editForm.destinationNetwork || null : null;
 
       await apiWithMerchantKey({
         apiKey: auth.apiKey,
@@ -279,7 +382,7 @@ export default function ProductsPage() {
       <form className="grid gap-2 rounded-2xl border border-slate-200 bg-slate-50 p-3.5" onSubmit={createProduct}>
         <p className="text-base font-semibold">Create Product</p>
         <p className="text-xs text-slate-500">
-          Simplicity default: accept USDC from any active supported network and auto-settle to your treasury policy.
+          Simplicity default: accept USDC from any active supported network and keep funds on the source chain.
         </p>
 
         <input
@@ -300,18 +403,17 @@ export default function ProductsPage() {
           required
         />
         <div className="grid gap-2 md:grid-cols-2">
-          <select
-            className="rounded-xl border border-slate-300 bg-white px-3 py-2 text-sm"
+          <MethodDropdown
             value={form.method}
-            onChange={(event) => setForm((curr) => ({ ...curr, method: event.target.value.toUpperCase() }))}
-            required
-          >
-            {HTTP_METHOD_OPTIONS.map((method) => (
-              <option key={`method-create-${method}`} value={method}>
-                {method}
-              </option>
-            ))}
-          </select>
+            onChange={(method) => setForm((curr) => ({ ...curr, method }))}
+            open={createMethodDropdownOpen}
+            setOpen={(nextValue) => {
+              setEditMethodDropdownOpen(false);
+              setCreateMethodDropdownOpen(nextValue);
+            }}
+            dropdownRef={createMethodDropdownRef}
+            options={HTTP_METHOD_OPTIONS}
+          />
           <input
             className="rounded-xl border border-slate-300 bg-white px-3 py-2 text-sm"
             placeholder="Path"
@@ -320,13 +422,16 @@ export default function ProductsPage() {
             required
           />
         </div>
-        <input
-          className="rounded-xl border border-slate-300 bg-white px-3 py-2 text-sm"
-          placeholder="Amount USDC"
-          value={form.amountUsdc}
-          onChange={(event) => setForm((curr) => ({ ...curr, amountUsdc: event.target.value }))}
-          required
-        />
+        <div className="relative">
+          <span className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-sm font-medium text-slate-700">$</span>
+          <input
+            className="w-full rounded-xl border border-slate-300 bg-white pl-7 pr-3 py-2 text-sm text-slate-900 placeholder:text-slate-400"
+            placeholder="0.01"
+            value={form.amountUsdc}
+            onChange={(event) => setForm((curr) => ({ ...curr, amountUsdc: event.target.value }))}
+            required
+          />
+        </div>
 
         <label className="mt-1 inline-flex items-center gap-2 text-xs text-slate-600">
           <input
@@ -368,8 +473,8 @@ export default function ProductsPage() {
                   }))
                 }
               >
-                <option value="cross_chain">Auto-move to treasury network</option>
                 <option value="same_chain">Keep funds where payment arrives</option>
+                <option value="cross_chain">Auto-move to treasury network</option>
               </select>
             </label>
 
@@ -450,18 +555,21 @@ export default function ProductsPage() {
                   required
                 />
                 <div className="grid gap-2 md:grid-cols-2">
-                  <select
-                    className="rounded-lg border border-slate-300 bg-white px-2.5 py-1.5 text-sm"
+                  <MethodDropdown
                     value={editForm.method}
-                    onChange={(event) => setEditForm((current) => ({ ...current, method: event.target.value.toUpperCase() }))}
-                    required
-                  >
-                    {HTTP_METHOD_OPTIONS.map((method) => (
-                      <option key={`method-edit-${item.id}-${method}`} value={method}>
-                        {method}
-                      </option>
-                    ))}
-                  </select>
+                    onChange={(method) => setEditForm((current) => ({ ...current, method }))}
+                    open={editMethodDropdownOpen}
+                    setOpen={(nextValue) => {
+                      setCreateMethodDropdownOpen(false);
+                      setEditMethodDropdownOpen(nextValue);
+                    }}
+                    dropdownRef={editMethodDropdownRef}
+                    options={HTTP_METHOD_OPTIONS}
+                    roundedClassName="rounded-lg"
+                    buttonPaddingClassName="px-2.5 py-1.5"
+                    menuPaddingClassName="p-1"
+                    itemPaddingClassName="px-2 py-1.5"
+                  />
                   <input
                     className="rounded-lg border border-slate-300 bg-white px-2.5 py-1.5 text-sm"
                     value={editForm.path}
@@ -470,13 +578,16 @@ export default function ProductsPage() {
                     required
                   />
                 </div>
-                <input
-                  className="rounded-lg border border-slate-300 bg-white px-2.5 py-1.5 text-sm"
-                  value={editForm.amountUsdc}
-                  onChange={(event) => setEditForm((current) => ({ ...current, amountUsdc: event.target.value }))}
-                  placeholder="Amount USDC"
-                  required
-                />
+                <div className="relative">
+                  <span className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-sm font-medium text-slate-700">$</span>
+                  <input
+                    className="w-full rounded-lg border border-slate-300 bg-white pl-7 pr-2.5 py-1.5 text-sm text-slate-900 placeholder:text-slate-400"
+                    value={editForm.amountUsdc}
+                    onChange={(event) => setEditForm((current) => ({ ...current, amountUsdc: event.target.value }))}
+                    placeholder="0.01"
+                    required
+                  />
+                </div>
                 <label className="inline-flex items-center gap-2 text-xs text-slate-600">
                   <input
                     type="checkbox"
@@ -521,8 +632,8 @@ export default function ProductsPage() {
                           }))
                         }
                       >
-                        <option value="cross_chain">Auto-move to treasury network</option>
                         <option value="same_chain">Keep funds where payment arrives</option>
+                        <option value="cross_chain">Auto-move to treasury network</option>
                       </select>
                     </label>
                     <label className="grid gap-1 text-xs text-slate-600">

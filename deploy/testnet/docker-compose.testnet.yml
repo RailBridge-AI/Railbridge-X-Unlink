@@ -1,0 +1,110 @@
+name: railbridge-testnet
+
+services:
+  merchant-api:
+    build:
+      context: ../..
+      dockerfile: merchant-os/Dockerfile.api
+    restart: unless-stopped
+    environment:
+      NODE_ENV: production
+      RAILBRIDGE_ENV: testnet
+    volumes:
+      - ${MERCHANT_OS_DATA_DIR:-/data/railbridge/merchant-os}:/data
+      - ../../merchant-os/.env:/app/merchant-os/.env:ro
+      - ../../merchant-os/config/runtime-config.local.json:/app/merchant-os/config/runtime-config.local.json:ro
+    networks:
+      - railbridge-internal
+      - traefik-public
+    labels:
+      - traefik.enable=true
+      - traefik.docker.network=${TRAEFIK_NETWORK:-traefik-public}
+      - traefik.http.routers.rb-testnet-api.rule=Host(`${API_HOST:-api.testnet.railbridge.ai}`)
+      - traefik.http.routers.rb-testnet-api.entrypoints=${TRAEFIK_ENTRYPOINT:-websecure}
+      - traefik.http.routers.rb-testnet-api.tls=true
+      - traefik.http.routers.rb-testnet-api.tls.certresolver=${TRAEFIK_CERT_RESOLVER:-letsencrypt}
+      - traefik.http.services.rb-testnet-api.loadbalancer.server.port=4030
+
+  merchant-web:
+    build:
+      context: ../..
+      dockerfile: merchant-os/frontend/Dockerfile
+      args:
+        MERCHANT_OS_API_URL: ${MERCHANT_OS_API_URL:-https://api.testnet.railbridge.ai}
+    restart: unless-stopped
+    environment:
+      NODE_ENV: production
+      RAILBRIDGE_ENV: testnet
+      MERCHANT_OS_API_URL: ${MERCHANT_OS_API_URL:-https://api.testnet.railbridge.ai}
+    depends_on:
+      - merchant-api
+    volumes:
+      - ../../merchant-os/frontend/.env.production:/app/merchant-os/frontend/.env.production:ro
+    networks:
+      - railbridge-internal
+      - traefik-public
+    labels:
+      - traefik.enable=true
+      - traefik.docker.network=${TRAEFIK_NETWORK:-traefik-public}
+      - traefik.http.routers.rb-testnet-app.rule=Host(`${APP_HOST:-app.testnet.railbridge.ai}`)
+      - traefik.http.routers.rb-testnet-app.entrypoints=${TRAEFIK_ENTRYPOINT:-websecure}
+      - traefik.http.routers.rb-testnet-app.tls=true
+      - traefik.http.routers.rb-testnet-app.tls.certresolver=${TRAEFIK_CERT_RESOLVER:-letsencrypt}
+      - traefik.http.services.rb-testnet-app.loadbalancer.server.port=3000
+
+  facilitator:
+    build:
+      context: ../..
+      dockerfile: facilitator/Dockerfile
+    restart: unless-stopped
+    environment:
+      NODE_ENV: production
+      RAILBRIDGE_ENV: testnet
+    volumes:
+      - ${FACILITATOR_DATA_DIR:-/data/railbridge/facilitator}:/data
+      - ../../facilitator/.env:/app/facilitator/.env:ro
+      - ../../facilitator/config/runtime-config.local.json:/app/facilitator/config/runtime-config.local.json:ro
+    networks:
+      - railbridge-internal
+      - traefik-public
+    labels:
+      - traefik.enable=true
+      - traefik.docker.network=${TRAEFIK_NETWORK:-traefik-public}
+      - traefik.http.routers.rb-testnet-facilitator.rule=Host(`${FACILITATOR_HOST:-facilitator.testnet.railbridge.ai}`)
+      - traefik.http.routers.rb-testnet-facilitator.entrypoints=${TRAEFIK_ENTRYPOINT:-websecure}
+      - traefik.http.routers.rb-testnet-facilitator.tls=true
+      - traefik.http.routers.rb-testnet-facilitator.tls.certresolver=${TRAEFIK_CERT_RESOLVER:-letsencrypt}
+      - traefik.http.services.rb-testnet-facilitator.loadbalancer.server.port=4022
+
+  demo-merchant:
+    build:
+      context: ../..
+      dockerfile: facilitator/Dockerfile
+    command: ["node", "dist/merchant-server-merchant-os-testnet.js"]
+    restart: unless-stopped
+    environment:
+      NODE_ENV: production
+      RAILBRIDGE_ENV: testnet
+    depends_on:
+      - merchant-api
+      - facilitator
+    volumes:
+      - ../../facilitator/demo-merchant.env:/app/facilitator/.env:ro
+    networks:
+      - railbridge-internal
+      - traefik-public
+    labels:
+      - traefik.enable=true
+      - traefik.docker.network=${TRAEFIK_NETWORK:-traefik-public}
+      - traefik.http.routers.rb-testnet-demo.rule=Host(`${DEMO_MERCHANT_HOST:-demo.testnet.railbridge.ai}`)
+      - traefik.http.routers.rb-testnet-demo.entrypoints=${TRAEFIK_ENTRYPOINT:-websecure}
+      - traefik.http.routers.rb-testnet-demo.tls=true
+      - traefik.http.routers.rb-testnet-demo.tls.certresolver=${TRAEFIK_CERT_RESOLVER:-letsencrypt}
+      - traefik.http.services.rb-testnet-demo.loadbalancer.server.port=4021
+
+networks:
+  railbridge-internal:
+    name: railbridge-testnet-internal
+  traefik-public:
+    external: true
+    name: ${TRAEFIK_NETWORK:-traefik-public}

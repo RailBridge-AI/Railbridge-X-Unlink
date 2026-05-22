@@ -23,12 +23,14 @@ Set these environment variables in your environment (for example, `.env`):
 
 ```bash
 CLIENT_PRIVATE_KEY=0xYourClientPrivateKey
-EVM_RPC_URL=https://sepolia.base.org
+CLIENT_RPC_OVERRIDES_JSON={"eip155:84532":"https://sepolia.base.org","eip155:421614":"https://arbitrum-sepolia-rpc.publicnode.com"}
+CLIENT_DEFAULT_RPC_URL=https://sepolia.base.org
 MERCHANT_URL=http://localhost:4021
 ```
 
 - `CLIENT_PRIVATE_KEY` - Private key for the client wallet (testnet)
-- `EVM_RPC_URL` - RPC URL for the source chain (for example, Base Sepolia)
+- `CLIENT_RPC_OVERRIDES_JSON` - per-network RPC map used for multi-chain payment options
+- `CLIENT_DEFAULT_RPC_URL` - optional fallback RPC if a network is missing from the map
 - `MERCHANT_URL` - Base URL of the merchant server you are paying
 
 ### 4. Basic Client Setup
@@ -46,12 +48,15 @@ import { baseSepolia } from "viem/chains";
 // Create signer from private key
 const signer = privateKeyToAccount(process.env.CLIENT_PRIVATE_KEY as `0x${string}`);
 
-// Create viem wallet client for signing
-const viemClient = createWalletClient({
-  account: signer,
-  chain: baseSepolia,
-  transport: http(process.env.EVM_RPC_URL || "https://sepolia.base.org"),
-});
+const rpcByNetwork = JSON.parse(process.env.CLIENT_RPC_OVERRIDES_JSON || "{}");
+const resolveRpcUrl = (network: string) =>
+  rpcByNetwork[network] || process.env.CLIENT_DEFAULT_RPC_URL || "https://sepolia.base.org";
+const createClientForNetwork = (network: string) =>
+  createWalletClient({
+    account: signer,
+    chain: baseSepolia,
+    transport: http(resolveRpcUrl(network)),
+  });
 
 // Create x402 client
 const client = new x402Client();
@@ -168,7 +173,7 @@ Common client-side issues:
   - Confirm the client supports the network and asset advertised by the merchant.
 
 - **Signature or gas errors**:
-  - Check that `CLIENT_PRIVATE_KEY` and `EVM_RPC_URL` are correct.
+  - Check that `CLIENT_PRIVATE_KEY` and `CLIENT_RPC_OVERRIDES_JSON` are correct.
   - Ensure the client wallet has enough funds for gas and the payment amount.
 
 ### 10. Next Steps

@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 
 export const nowIso = () => new Date().toISOString();
+const MAX_BIGINT_DIGITS = 39;
 
 export const addHoursIso = (hours) => {
   const now = Date.now();
@@ -10,7 +11,12 @@ export const addHoursIso = (hours) => {
 export const newId = () => randomUUID();
 
 export const toDecimalUsdcString = (baseUnits) => {
-  const value = BigInt(baseUnits);
+  let value = 0n;
+  try {
+    value = BigInt(baseUnits);
+  } catch {
+    return "0";
+  }
   const whole = value / 1000000n;
   const frac = value % 1000000n;
   if (frac === 0n) {
@@ -27,6 +33,9 @@ export const parsePositiveBigInt = (input, fieldName) => {
   const text = String(input).trim();
   if (!/^[0-9]+$/.test(text)) {
     throw new Error(`${fieldName} must be an unsigned integer string`);
+  }
+  if (text.length > MAX_BIGINT_DIGITS) {
+    throw new Error(`${fieldName} is too large`);
   }
   const value = BigInt(text);
   if (value <= 0n) {

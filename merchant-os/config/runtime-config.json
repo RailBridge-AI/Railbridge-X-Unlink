@@ -9,7 +9,7 @@
   ],
   "custodyMode": "mpc",
   "custodyAddress": "",
-  "realConsolidationBridgeEnabled": false,
+  "realConsolidationBridgeEnabled": true,
   "realPayoutsEnabled": true,
   "facilitatorAddress": "0x0EC05eAfc58912d0B74423A099ccF2567a83A9B0",
   "demoSourceNetwork": "eip155:421614",
@@ -32,6 +32,11 @@
   "gasSponsorTopupWei": "300000000000000",
   "gasSponsorReceiptTimeoutMs": 120000,
   "rpcOverridesByNetwork": {
+    "eip155:84532": [
+      "https://sepolia.base.org",
+      "https://base-sepolia-rpc.publicnode.com",
+      "https://base-sepolia.drpc.org"
+    ],
     "eip155:421614": [
       "https://arbitrum-sepolia-rpc.publicnode.com",
       "https://sepolia-rollup.arbitrum.io/rpc",
