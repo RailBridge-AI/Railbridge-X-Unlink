@@ -6,19 +6,19 @@ Use this folder for non-sensitive facilitator configuration.
 
 1. `runtime-config.json` (tracked): shared defaults for local/dev.
 2. `runtime-config.local.json` (optional, gitignored): machine-specific overrides.
-3. `payment-test-config.json` (tracked): non-sensitive defaults for payment smoke-test scripts.
-4. `payment-test-config.local.json` (optional, gitignored): machine-specific script overrides.
-5. `.env`: secrets and deployment overrides.
+3. `runtime-config.local.example.json` (tracked): example local override template.
+4. `payment-test-config.json` (tracked): non-sensitive defaults for payment smoke-test scripts.
+5. `payment-test-config.local.json` (optional, gitignored): machine-specific script overrides.
+6. `.env`: secrets only.
 
 ## Precedence
 
-Configuration is resolved in this order:
+Configuration is resolved in this order for non-secrets:
 
 1. `runtime-config.json`
 2. `runtime-config.local.json`
-3. Environment variables (`.env` or shell env)
 
-The last source wins.
+`runtime-config.local.json` overrides `runtime-config.json`.
 
 ## Common Kill Switches (Non-sensitive)
 
@@ -26,6 +26,9 @@ Use JSON config for operational toggles that are not secrets:
 
 1. `crossChainEnabled`: set `false` to pause cross-chain bridging.
 2. `chainStatusOverrides`: set per-chain states (`active`, `degraded`, `paused`).
+3. `rpcOverridesByNetwork`: set explicit per-chain RPC endpoint lists.
+4. `bridgeWorkerIntervalMs`, `bridgeRetryBaseMs`, `bridgeMaxAttempts`, `chainSyncMs`: worker/sync tuning.
+5. `evmMaxFeePerGasWei`, `evmMaxPriorityFeePerGasWei`: optional gas fee floor tuning.
 
 After editing JSON config, restart facilitator to apply changes.
 
@@ -46,6 +49,6 @@ Useful keys inside `existingMerchantPayment`:
 ## Keep In `.env`
 
 1. `FACILITATOR_EVM_PRIVATE_KEY`
-2. `CLIENT_PRIVATE_KEY`
-3. API-keyed RPC URLs (if used) and private integrations
-4. Operational tokens such as `MERCHANT_OS_INGEST_TOKEN`
+2. `FACILITATOR_ADMIN_TOKEN`
+3. `MERCHANT_OS_INGEST_TOKEN`
+4. `CLIENT_PRIVATE_KEY` (for local client-example scripts)

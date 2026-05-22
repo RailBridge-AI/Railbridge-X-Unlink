@@ -90,22 +90,6 @@ const resolveDbPath = (value) => {
   return resolve(rootDir, raw);
 };
 
-const parseJsonObjectEnv = (value, fallback = {}, envName = "JSON_ENV") => {
-  if (!value || typeof value !== "string") {
-    return fallback;
-  }
-  try {
-    const parsed = JSON.parse(value);
-    return parsed && typeof parsed === "object" ? parsed : fallback;
-  } catch (error) {
-    console.warn(
-      `[merchant-os] Invalid JSON in ${envName}; using fallback value.`,
-      error instanceof Error ? error.message : String(error)
-    );
-    return fallback;
-  }
-};
-
 const parseCsvList = (value) =>
   String(value || "")
     .split(",")
@@ -240,53 +224,12 @@ const runtimeConfig = {
   }
 };
 
-const parseRpcOverridesFromEnv = () => {
-  const overrides = {};
-
-  Object.entries(process.env).forEach(([key, rawValue]) => {
-    if (!key.startsWith("MERCHANT_OS_RPC_EIP155_")) {
-      return;
-    }
-    const chainId = key.slice("MERCHANT_OS_RPC_EIP155_".length).trim();
-    if (!/^[0-9]+$/.test(chainId)) {
-      return;
-    }
-    const urls = String(rawValue || "")
-      .split(/[\s,]+/)
-      .map((item) => item.trim())
-      .filter((item) => item.startsWith("http://") || item.startsWith("https://"));
-    if (urls.length > 0) {
-      overrides[`eip155:${chainId}`] = urls;
-    }
-  });
-
-  const rawJson = process.env.MERCHANT_OS_RPC_OVERRIDES_JSON;
-  if (rawJson && rawJson.trim()) {
-    const parsed = parseJsonObjectEnv(rawJson, {}, "MERCHANT_OS_RPC_OVERRIDES_JSON");
-    Object.entries(parsed).forEach(([network, urls]) => {
-      if (!/^eip155:[0-9]+$/.test(network)) {
-        return;
-      }
-      if (Array.isArray(urls)) {
-        const valid = urls
-          .map((item) => String(item || "").trim())
-          .filter((item) => item.startsWith("http://") || item.startsWith("https://"));
-        if (valid.length > 0) {
-          overrides[network] = valid;
-        }
-      }
-    });
-  }
-
-  return overrides;
-};
+const nodeEnvNormalized = String(process.env.NODE_ENV || "").trim().toLowerCase();
+const isProductionEnv = nodeEnvNormalized === "production";
+const isTestEnv = nodeEnvNormalized === "test";
 
 const runtimeRpcOverrides = normalizeRpcOverrideMap(runtimeConfig.rpcOverridesByNetwork);
-const envRpcOverrides = parseRpcOverridesFromEnv();
-const rpcUrlsByNetwork = {
-  ...runtimeRpcOverrides,
-  ...envRpcOverrides
-};
+const rpcUrlsByNetwork = { ...runtimeRpcOverrides };
 const rpcByNetwork = Object.fromEntries(
   Object.entries(rpcUrlsByNetwork).map(([network, urls]) => [network, urls[0]])
 );
@@ -294,10 +237,7 @@ const rpcByNetwork = Object.fromEntries(
 const runtimeUsdcTokenByNetwork = {};
 const runtimeUsdcAssetAllowlist = new Set(["usdc"]);
 
-const onboardingAllowlistSource =
-  process.env.MERCHANT_OS_ONBOARDING_ALLOWLIST_DOMAINS !== undefined
-    ? process.env.MERCHANT_OS_ONBOARDING_ALLOWLIST_DOMAINS
-    : runtimeConfig.onboardingAllowlistDomains;
+const onboardingAllowlistSource = runtimeConfig.onboardingAllowlistDomains;
 const onboardingAllowlistDomains = new Set(
   parseStringList(onboardingAllowlistSource)
     .map((item) => item.toLowerCase())
@@ -305,32 +245,19 @@ const onboardingAllowlistDomains = new Set(
 );
 
 const chainStatusOverrides = {
-  ...toPlainObject(runtimeConfig.chainStatusOverrides),
-  ...parseJsonObjectEnv(
-    process.env.MERCHANT_OS_CHAIN_STATUS_OVERRIDES_JSON,
-    {},
-    "MERCHANT_OS_CHAIN_STATUS_OVERRIDES_JSON"
-  )
+  ...toPlainObject(runtimeConfig.chainStatusOverrides)
 };
-const nodeEnvNormalized = String(process.env.NODE_ENV || "").trim().toLowerCase();
-const isProductionEnv = nodeEnvNormalized === "production";
-const isTestEnv = nodeEnvNormalized === "test";
 
-const custodyMode = String(
-  process.env.MERCHANT_OS_CUSTODY_MODE ?? runtimeConfig.custodyMode ?? "mpc"
-)
-  .trim()
-  .toLowerCase();
+const custodyMode = String(runtimeConfig.custodyMode ?? "mpc").trim().toLowerCase();
 
 export const config = {
   appName: "railbridge-merchant-os",
-  port: parseIntValue(process.env.MERCHANT_OS_PORT ?? runtimeConfig.port, 4030),
+  port: parseIntValue(runtimeConfig.port, 4030),
   webUrl: String(
-    (process.env.MERCHANT_OS_WEB_URL ?? runtimeConfig.webUrl) ||
-      "http://localhost:3000"
+    runtimeConfig.webUrl || "http://localhost:3000"
   ),
-  dbPath: resolveDbPath(process.env.MERCHANT_OS_DB_PATH ?? runtimeConfig.dbPath ?? "data/merchant-os.db"),
-  sessionHours: parseIntValue(process.env.MERCHANT_OS_SESSION_HOURS ?? runtimeConfig.sessionHours, 24),
+  dbPath: resolveDbPath(runtimeConfig.dbPath ?? "data/merchant-os.db"),
+  sessionHours: parseIntValue(runtimeConfig.sessionHours, 24),
 
   ingestToken: process.env.MERCHANT_OS_INGEST_TOKEN || "merchant-os-demo-ingest",
   internalToken:
@@ -339,128 +266,94 @@ export const config = {
     "merchant-os-demo-ingest",
   adminToken: process.env.MERCHANT_OS_ADMIN_TOKEN || "",
 
-  bridgePrivateKey:
-    process.env.MERCHANT_OS_BRIDGE_EVM_PRIVATE_KEY || "",
   gasSponsorPrivateKey: process.env.MERCHANT_OS_GAS_SPONSOR_PRIVATE_KEY || "",
   gasSponsorAutoTopupEnabled: parseBooleanValue(
-    process.env.MERCHANT_OS_GAS_SPONSOR_AUTO_TOPUP,
+    runtimeConfig.gasSponsorAutoTopupEnabled,
     parseBooleanValue(runtimeConfig.gasSponsorAutoTopupEnabled, true)
   ),
   gasEstimatorEnabled: parseBooleanValue(
-    process.env.MERCHANT_OS_GAS_ESTIMATOR_ENABLED,
+    runtimeConfig.gasEstimatorEnabled,
     parseBooleanValue(runtimeConfig.gasEstimatorEnabled, true)
   ),
   gasEstimatorSourceGasUnits: parseIntValue(
-    process.env.MERCHANT_OS_GAS_ESTIMATOR_SOURCE_GAS_UNITS ??
-      runtimeConfig.gasEstimatorSourceGasUnits,
+    runtimeConfig.gasEstimatorSourceGasUnits,
     450000
   ),
   gasEstimatorDestinationGasUnits: parseIntValue(
-    process.env.MERCHANT_OS_GAS_ESTIMATOR_DESTINATION_GAS_UNITS ??
-      runtimeConfig.gasEstimatorDestinationGasUnits,
+    runtimeConfig.gasEstimatorDestinationGasUnits,
     350000
   ),
   gasEstimatorBufferBps: parseIntValue(
-    process.env.MERCHANT_OS_GAS_ESTIMATOR_BUFFER_BPS ??
-      runtimeConfig.gasEstimatorBufferBps,
+    runtimeConfig.gasEstimatorBufferBps,
     18000
   ),
   gasSponsorTopupWei: parseBigIntValue(
-    process.env.MERCHANT_OS_GAS_SPONSOR_TOPUP_WEI ??
-      runtimeConfig.gasSponsorTopupWei,
+    runtimeConfig.gasSponsorTopupWei,
     300_000_000_000_000n
   ),
   minBridgeNativeBalanceWei: parseBigIntValue(
-    process.env.MERCHANT_OS_MIN_BRIDGE_NATIVE_BALANCE_WEI ??
-      runtimeConfig.minBridgeNativeBalanceWei,
+    runtimeConfig.minBridgeNativeBalanceWei,
     100_000_000_000_000n
   ),
   gasSponsorReceiptTimeoutMs: parseIntValue(
-    process.env.MERCHANT_OS_GAS_SPONSOR_RECEIPT_TIMEOUT_MS ??
-      runtimeConfig.gasSponsorReceiptTimeoutMs,
+    runtimeConfig.gasSponsorReceiptTimeoutMs,
     120000
   ),
 
   mpcCustodyEnabled: custodyMode !== "legacy",
   custodyMasterKey: process.env.MERCHANT_OS_CUSTODY_MASTER_KEY || "",
-  custodyAddress: String(
-    process.env.MERCHANT_OS_CUSTODY_EVM_ADDRESS ??
-      runtimeConfig.custodyAddress ??
-      ""
-  ),
+  custodyAddress: String(runtimeConfig.custodyAddress ?? ""),
 
   realConsolidationBridgeEnabled: parseBooleanValue(
-    process.env.MERCHANT_OS_REAL_CONSOLIDATION_BRIDGE,
+    runtimeConfig.realConsolidationBridgeEnabled,
     parseBooleanValue(runtimeConfig.realConsolidationBridgeEnabled, true)
   ),
   realPayoutsEnabled: parseBooleanValue(
-    process.env.MERCHANT_OS_REAL_PAYOUTS_ENABLED,
+    runtimeConfig.realPayoutsEnabled,
     parseBooleanValue(runtimeConfig.realPayoutsEnabled, true)
   ),
   allowSimulatedLedgerMutations: parseBooleanValue(
-    process.env.MERCHANT_OS_ALLOW_SIMULATED_LEDGER_MUTATIONS,
+    runtimeConfig.allowSimulatedLedgerMutations,
     parseBooleanValue(runtimeConfig.allowSimulatedLedgerMutations, isTestEnv)
   ),
-  payoutTxTimeoutMs: parseIntValue(
-    process.env.MERCHANT_OS_PAYOUT_TX_TIMEOUT_MS ??
-      runtimeConfig.payoutTxTimeoutMs,
-    120000
-  ),
+  payoutTxTimeoutMs: parseIntValue(runtimeConfig.payoutTxTimeoutMs, 120000),
   consolidationBridgeTimeoutMs: parseIntValue(
-    process.env.MERCHANT_OS_CONSOLIDATION_BRIDGE_TIMEOUT_MS ??
-      runtimeConfig.consolidationBridgeTimeoutMs,
+    runtimeConfig.consolidationBridgeTimeoutMs,
     300000
   ),
   consolidationBridgeRetryAttempts: parseIntValue(
-    process.env.MERCHANT_OS_CONSOLIDATION_BRIDGE_RETRY_ATTEMPTS ??
-      runtimeConfig.consolidationBridgeRetryAttempts,
+    runtimeConfig.consolidationBridgeRetryAttempts,
     2
   ),
   consolidationBridgeRetryBackoffMs: parseIntValue(
-    process.env.MERCHANT_OS_CONSOLIDATION_BRIDGE_RETRY_BACKOFF_MS ??
-      runtimeConfig.consolidationBridgeRetryBackoffMs,
+    runtimeConfig.consolidationBridgeRetryBackoffMs,
     2500
   ),
   consolidationBridgeRpcTimeoutMs: parseIntValue(
-    process.env.MERCHANT_OS_CONSOLIDATION_BRIDGE_RPC_TIMEOUT_MS ??
-      runtimeConfig.consolidationBridgeRpcTimeoutMs,
+    runtimeConfig.consolidationBridgeRpcTimeoutMs,
     30000
   ),
   consolidationBridgeRpcRetryCount: parseIntValue(
-    process.env.MERCHANT_OS_CONSOLIDATION_BRIDGE_RPC_RETRY_COUNT ??
-      runtimeConfig.consolidationBridgeRpcRetryCount,
+    runtimeConfig.consolidationBridgeRpcRetryCount,
     3
   ),
 
-  facilitatorAddress:
-    process.env.MERCHANT_OS_FACILITATOR_ADDRESS ||
-    process.env.FACILITATOR_ADDRESS ||
-    String(runtimeConfig.facilitatorAddress || ""),
+  facilitatorAddress: String(runtimeConfig.facilitatorAddress || ""),
   demoSourceNetwork: String(
-    process.env.MERCHANT_OS_DEMO_SOURCE_NETWORK ??
-      runtimeConfig.demoSourceNetwork ??
-      "eip155:421614"
+    runtimeConfig.demoSourceNetwork ?? "eip155:421614"
   ),
-  onchainReadTimeoutMs: parseIntValue(
-    process.env.MERCHANT_OS_ONCHAIN_TIMEOUT_MS ??
-      runtimeConfig.onchainReadTimeoutMs,
-    7000
-  ),
+  onchainReadTimeoutMs: parseIntValue(runtimeConfig.onchainReadTimeoutMs, 7000),
   onchainReadTotalBudgetMs: parseIntValue(
-    process.env.MERCHANT_OS_ONCHAIN_TOTAL_BUDGET_MS ??
-      runtimeConfig.onchainReadTotalBudgetMs,
+    runtimeConfig.onchainReadTotalBudgetMs,
     2200
   ),
 
-  chainCatalogSyncMs: parseIntValue(
-    process.env.MERCHANT_OS_CHAIN_SYNC_MS ?? runtimeConfig.chainCatalogSyncMs,
-    300000
-  ),
+  chainCatalogSyncMs: parseIntValue(runtimeConfig.chainCatalogSyncMs, 300000),
   chainStatusOverrides,
 
   onboardingAllowlistDomains,
   onboardingAutoApprove: parseBooleanValue(
-    process.env.MERCHANT_OS_ONBOARDING_AUTO_APPROVE,
+    runtimeConfig.onboardingAutoApprove,
     parseBooleanValue(runtimeConfig.onboardingAutoApprove, false)
   ),
 
@@ -484,14 +377,6 @@ export const config = {
         : [];
       mergedRpcUrlsByNetwork[network] = [
         ...new Set([...overrideUrls, ...catalogUrls].filter(Boolean))
-      ];
-    });
-    Object.entries(envRpcOverrides).forEach(([network, overrideUrls]) => {
-      const existing = Array.isArray(mergedRpcUrlsByNetwork[network])
-        ? mergedRpcUrlsByNetwork[network]
-        : [];
-      mergedRpcUrlsByNetwork[network] = [
-        ...new Set([...overrideUrls, ...existing].filter(Boolean))
       ];
     });
 
@@ -557,7 +442,7 @@ const simulationModeEnabled =
   !config.realConsolidationBridgeEnabled || !config.realPayoutsEnabled;
 if (simulationModeEnabled && !config.allowSimulatedLedgerMutations) {
   console.error(
-    "[merchant-os] FATAL: simulation ledger mutations are disabled. Set MERCHANT_OS_ALLOW_SIMULATED_LEDGER_MUTATIONS=true only for isolated test/demo environments."
+    "[merchant-os] FATAL: simulation ledger mutations are disabled. Set allowSimulatedLedgerMutations=true in runtime-config.local.json only for isolated test/demo environments."
   );
   process.exit(1);
 }

@@ -1,5 +1,5 @@
 import { createServer } from "node:http";
-import { mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { spawn } from "node:child_process";
@@ -127,25 +127,43 @@ export const startMerchantOsServer = async ({ cwd }) => {
   const port = await getFreePort();
   const tempRoot = mkdtempSync(join(tmpdir(), "merchant-os-tests-"));
   const dbPath = join(tempRoot, "merchant-os.db");
+  const runtimeConfigLocalPath = join(cwd, "config", "runtime-config.local.json");
+  const hadOriginalRuntimeConfigLocal = existsSync(runtimeConfigLocalPath);
+  const originalRuntimeConfigLocalRaw = hadOriginalRuntimeConfigLocal
+    ? readFileSync(runtimeConfigLocalPath, "utf8")
+    : null;
+
+  const restoreRuntimeConfigLocal = () => {
+    if (hadOriginalRuntimeConfigLocal) {
+      writeFileSync(runtimeConfigLocalPath, originalRuntimeConfigLocalRaw ?? "", "utf8");
+      return;
+    }
+    rmSync(runtimeConfigLocalPath, { force: true });
+  };
+
+  const testRuntimeConfig = {
+    port,
+    webUrl: "http://localhost:3000",
+    dbPath,
+    onboardingAutoApprove: true,
+    realConsolidationBridgeEnabled: false,
+    realPayoutsEnabled: false,
+    allowSimulatedLedgerMutations: true,
+    facilitatorAddress: "0x1111111111111111111111111111111111111111",
+    onchainReadTimeoutMs: 20,
+    onchainReadTotalBudgetMs: 20,
+    chainCatalogSyncMs: 300000
+  };
+  writeFileSync(runtimeConfigLocalPath, `${JSON.stringify(testRuntimeConfig, null, 2)}\n`, "utf8");
 
   const env = {
     ...process.env,
-    MERCHANT_OS_PORT: String(port),
-    MERCHANT_OS_DB_PATH: dbPath,
-    MERCHANT_OS_WEB_URL: "http://localhost:3000",
+    NODE_ENV: "test",
     MERCHANT_OS_INGEST_TOKEN: "test-ingest-token",
     MERCHANT_OS_INTERNAL_TOKEN: "test-internal-token",
     MERCHANT_OS_ADMIN_TOKEN: "test-admin-token",
     MERCHANT_OS_CUSTODY_MASTER_KEY:
-      "0x1111111111111111111111111111111111111111111111111111111111111111",
-    MERCHANT_OS_ONBOARDING_AUTO_APPROVE: "true",
-    MERCHANT_OS_REAL_CONSOLIDATION_BRIDGE: "false",
-    MERCHANT_OS_REAL_PAYOUTS_ENABLED: "false",
-    MERCHANT_OS_ALLOW_SIMULATED_LEDGER_MUTATIONS: "true",
-    MERCHANT_OS_FACILITATOR_ADDRESS: "0x1111111111111111111111111111111111111111",
-    MERCHANT_OS_ONCHAIN_TIMEOUT_MS: "20",
-    MERCHANT_OS_ONCHAIN_TOTAL_BUDGET_MS: "20",
-    MERCHANT_OS_CHAIN_SYNC_MS: "300000"
+      "0x1111111111111111111111111111111111111111111111111111111111111111"
   };
 
   const child = spawn(process.execPath, ["src/server.js"], {
@@ -175,7 +193,14 @@ export const startMerchantOsServer = async ({ cwd }) => {
     } catch {
       return false;
     }
-  }, { timeoutMs: 20000, intervalMs: 150 });
+  }, { timeoutMs: 20000, intervalMs: 150 }).catch((error) => {
+    if (child.exitCode === null) {
+      child.kill("SIGTERM");
+    }
+    restoreRuntimeConfigLocal();
+    rmSync(tempRoot, { recursive: true, force: true });
+    throw error;
+  });
 
   return {
     port,
@@ -190,6 +215,7 @@ export const startMerchantOsServer = async ({ cwd }) => {
           child.kill("SIGKILL");
         });
       }
+      restoreRuntimeConfigLocal();
       rmSync(tempRoot, { recursive: true, force: true });
     }
   };

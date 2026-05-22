@@ -90,14 +90,12 @@ Required:
 - `FACILITATOR_EVM_PRIVATE_KEY`: Private key for facilitator wallet (used by Circle BridgeKit adapter)
 
 Optional:
-- `EVM_RPC_URL`: Runtime override fallback RPC URL
-- `FACILITATOR_RPC_EIP155_<CHAIN_ID>`: per-chain RPC endpoint list override
-- `CROSS_CHAIN_ENABLED`: Optional emergency override; set to `false` to disable bridging
+- `FACILITATOR_ADMIN_TOKEN`: admin endpoint bearer token
+- `MERCHANT_OS_INGEST_TOKEN`: settlement event ingest auth token for Merchant OS
 
-Recommended:
-- Keep public/default RPC values in `facilitator/config/runtime-config.json`
-- Keep `crossChainEnabled` in `facilitator/config/runtime-config.json` as the primary kill switch
-- Keep keyed/private provider RPC URLs in `.env`
+Non-secret runtime values (RPCs, cross-chain kill switch, per-chain status overrides, worker tuning, fee floors)
+must be configured in `facilitator/config/runtime-config.json` or
+`facilitator/config/runtime-config.local.json`.
 
 ### Bridge Config
 
@@ -211,7 +209,7 @@ To test the integration:
 ### Bridge Fails
 
 - Check `FACILITATOR_EVM_PRIVATE_KEY` is set correctly
-- Check per-chain RPCs in `facilitator/config/runtime-config.json` or `FACILITATOR_RPC_EIP155_*` overrides
+- Check per-chain RPCs in `facilitator/config/runtime-config.json`
 - Verify facilitator wallet has sufficient USDC on source chain
 - Ensure both chains are supported by Circle CCTP
 - Check RPC URLs are accessible

@@ -143,15 +143,7 @@ const normalizeEvmAddress = (value) => {
   return /^0x[a-fA-F0-9]{40}$/.test(text) ? text : null;
 };
 
-const normalizePrivateKey = (value) => {
-  const text = String(value || "").trim();
-  return /^0x[a-fA-F0-9]{64}$/.test(text) ? text : null;
-};
-
-const bridgeSignerPrivateKey = normalizePrivateKey(config.bridgePrivateKey);
-const defaultCustodyWalletAddress =
-  normalizeEvmAddress(config.custodyAddress) ||
-  (bridgeSignerPrivateKey ? privateKeyToAccount(bridgeSignerPrivateKey).address : null);
+const defaultCustodyWalletAddress = normalizeEvmAddress(config.custodyAddress);
 
 const deterministicWalletAddress = (merchantId, network) => {
   const seed = `${merchantId}:${network}`;

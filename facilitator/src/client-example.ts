@@ -6,7 +6,7 @@
  * 
  * Prerequisites:
  * 1. Set CLIENT_PRIVATE_KEY in .env (your wallet private key)
- * 2. Wallet must have Base Sepolia ETH for gas
+ * 2. Set CLIENT_RPC_OVERRIDES_JSON with per-network RPC endpoints
  * 3. Wallet must have testnet USDC (or update asset address)
  * 4. Facilitator and merchant server must be running
  * 
@@ -32,6 +32,8 @@ dotenv.config({ path: envPath });
 // Configuration
 const MERCHANT_URL = process.env.MERCHANT_URL || "http://localhost:4021";
 const CLIENT_PRIVATE_KEY = process.env.CLIENT_PRIVATE_KEY as `0x${string}` | undefined;
+const CLIENT_DEFAULT_RPC_URL = String(process.env.CLIENT_DEFAULT_RPC_URL || "").trim();
+const CLIENT_RPC_OVERRIDES_JSON = String(process.env.CLIENT_RPC_OVERRIDES_JSON || "").trim();
 
 if (!CLIENT_PRIVATE_KEY) {
   console.error("❌ CLIENT_PRIVATE_KEY environment variable is required");
@@ -40,9 +42,38 @@ if (!CLIENT_PRIVATE_KEY) {
   process.exit(1);
 }
 
+const parseRpcOverrides = (raw: string) => {
+  if (!raw) {
+    return {} as Record<string, string>;
+  }
+  try {
+    const parsed = JSON.parse(raw) as Record<string, unknown>;
+    return Object.fromEntries(
+      Object.entries(parsed)
+        .filter(([network, url]) => /^eip155:[0-9]+$/.test(network) && typeof url === "string")
+        .map(([network, url]) => [network, String(url).trim()])
+        .filter(([, url]) => /^https?:\/\//.test(url))
+    ) as Record<string, string>;
+  } catch (error) {
+    console.warn(
+      "[client-example] Invalid CLIENT_RPC_OVERRIDES_JSON; ignoring and falling back to CLIENT_DEFAULT_RPC_URL."
+    );
+    return {} as Record<string, string>;
+  }
+};
+
+const rpcByNetwork = parseRpcOverrides(CLIENT_RPC_OVERRIDES_JSON);
+const resolveRpcForNetwork = (network: string) =>
+  rpcByNetwork[network] || CLIENT_DEFAULT_RPC_URL || "";
+
 // Create signer from private key
 const signer = privateKeyToAccount(CLIENT_PRIVATE_KEY);
 console.log(`📱 Client wallet: ${signer.address}\n`);
+if (!Object.keys(rpcByNetwork).length && !CLIENT_DEFAULT_RPC_URL) {
+  console.warn(
+    "⚠️  No CLIENT_RPC_OVERRIDES_JSON or CLIENT_DEFAULT_RPC_URL configured. Multi-chain payment selection may fail on unsupported default RPC."
+  );
+}
 
 // Create x402 client with custom network selector
 // Option 1: Custom selector function to prefer specific networks
@@ -60,20 +91,31 @@ const networkSelector = (
 ): PaymentRequirements => {
   console.log("📋 Available payment options:");
   options.forEach((opt, i) => {
-    console.log(`   ${i + 1}. ${opt.network} (${opt.scheme}) - Amount: ${opt.amount}`);
+    const rpc = resolveRpcForNetwork(opt.network);
+    const rpcLabel = rpc ? "rpc configured" : "no rpc configured";
+    console.log(`   ${i + 1}. ${opt.network} (${opt.scheme}) - Amount: ${opt.amount} [${rpcLabel}]`);
   });
 
   // Try each preferred network in order
   for (const preferredNetwork of preferredNetworks) {
-    const match = options.find(opt => opt.network === preferredNetwork);
+    const match = options.find(
+      (opt) => opt.network === preferredNetwork && Boolean(resolveRpcForNetwork(opt.network))
+    );
     if (match) {
-      console.log(`✨ Selected preferred network: ${match.network}`);
+      console.log(`✨ Selected preferred network with RPC: ${match.network}`);
       return match;
     }
   }
 
-  // Fallback to first available option
-  console.log(`⚠️  No preferred network available, using: ${options[0].network}`);
+  // Then select any option that has configured RPC.
+  const firstRpcBacked = options.find((opt) => Boolean(resolveRpcForNetwork(opt.network)));
+  if (firstRpcBacked) {
+    console.log(`✨ Selected available network with RPC: ${firstRpcBacked.network}`);
+    return firstRpcBacked;
+  }
+
+  // Last resort fallback to first option.
+  console.log(`⚠️  No configured RPC for offered networks. Falling back to: ${options[0].network}`);
   return options[0];
 };
 

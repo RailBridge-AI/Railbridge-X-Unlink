@@ -71,17 +71,6 @@ const normalizeEvmAddress = (value) => {
   return text;
 };
 
-const normalizePrivateKey = (value) => {
-  if (!value || typeof value !== "string") {
-    return null;
-  }
-  const text = value.trim();
-  if (!/^0x[a-fA-F0-9]{64}$/.test(text)) {
-    return null;
-  }
-  return text;
-};
-
 const CUSTODY_MASTER_KEY_ERROR =
   "MERCHANT_OS_CUSTODY_MASTER_KEY is required and must be a 32-byte hex string (64 hex chars, optional 0x prefix)";
 
@@ -99,7 +88,6 @@ const toSeedHex = (value) => {
   return /^[0-9a-f]{64}$/.test(text) ? text : "";
 };
 
-const sharedCustodyPrivateKey = normalizePrivateKey(config.bridgePrivateKey);
 const mpcDerivationSeedHex = toSeedHex(config.custodyMasterKey);
 
 const sqlLiteral = (value) => {
@@ -524,10 +512,6 @@ const resolveSeedPrivateKeyForTenant = (merchantId, accountId) => {
   const existing = getFirstCustodyKeyRecordForTenant(merchantId, accountId);
   if (existing) {
     return decryptCustodyPrivateKey(existing, config.custodyMasterKey);
-  }
-
-  if (sharedCustodyPrivateKey) {
-    return sharedCustodyPrivateKey;
   }
 
   const generated = generateCustodyWallet();

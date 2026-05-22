@@ -188,13 +188,13 @@ const bridgeJobWorker = new BridgeJobWorker({
 
 if (!config.MERCHANT_OS_EVENT_INGEST_URL) {
   console.warn(
-    "[merchant-os] MERCHANT_OS_EVENT_INGEST_URL is not set. Settlement events will not appear in Merchant OS dashboard.",
+    "[merchant-os] merchantOsEventIngestUrl is not set in facilitator runtime config. Settlement events will not appear in Merchant OS dashboard.",
   );
 } else {
   console.info(`[merchant-os] Settlement event ingest enabled: ${config.MERCHANT_OS_EVENT_INGEST_URL}`);
   if (!config.MERCHANT_CONTEXT_MAP_JSON && !config.MERCHANT_OS_DEFAULT_MERCHANT_ID) {
     console.warn(
-      "[merchant-os] No merchant context mapping/default configured. If requirements omit merchant metadata, events will be dropped.",
+      "[merchant-os] No merchant context mapping/default configured in facilitator runtime config. If requirements omit merchant metadata, events will be dropped.",
     );
   } else {
     console.info(

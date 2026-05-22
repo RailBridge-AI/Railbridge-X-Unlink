@@ -81,7 +81,7 @@ Merchant OS now uses:
 
 1. `merchant-os/config/runtime-config.json` for non-sensitive, editable defaults.
 2. `merchant-os/config/runtime-config.local.json` (optional, gitignored) for local overrides.
-3. `merchant-os/.env` for secrets and deployment-time overrides.
+3. `merchant-os/.env` for secrets.
 
 Primary secrets in `.env`:
 
@@ -89,8 +89,7 @@ Primary secrets in `.env`:
 2. `MERCHANT_OS_INTERNAL_TOKEN`
 3. `MERCHANT_OS_ADMIN_TOKEN`
 4. `MERCHANT_OS_CUSTODY_MASTER_KEY`
-5. `MERCHANT_OS_BRIDGE_EVM_PRIVATE_KEY` (optional)
-6. `MERCHANT_OS_GAS_SPONSOR_PRIVATE_KEY` (optional)
+5. `MERCHANT_OS_GAS_SPONSOR_PRIVATE_KEY` (optional)
 
 `MERCHANT_OS_CUSTODY_MASTER_KEY` is mandatory; Merchant OS exits on startup if it is missing or invalid.
 
@@ -104,7 +103,7 @@ Frontend (`merchant-os/frontend/.env.local`):
 
 1. `MERCHANT_OS_API_URL` (default `http://localhost:4030`)
 
-Env variables still override runtime config when present (useful for tests, CI, and deployments).
+Non-secret runtime values are read from JSON config only (`runtime-config.json` + `runtime-config.local.json`).
 
 ## API Surface (Current)
 
