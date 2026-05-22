@@ -122,7 +122,26 @@ export const isLocalDevelopmentHost = (hostname) => {
   return false;
 };
 
-export const shouldPreferTestnetsInUi = () => isLocalDevelopmentHost();
+export const isTestnetDeploymentHost = (hostname) => {
+  const normalized = String(
+    hostname ??
+      (typeof window !== "undefined" ? window.location.hostname : "")
+  )
+    .trim()
+    .toLowerCase();
+
+  if (!normalized) {
+    return false;
+  }
+
+  return (
+    normalized === "testnet.railbridge.ai" ||
+    normalized.endsWith(".testnet.railbridge.ai")
+  );
+};
+
+export const shouldPreferTestnetsInUi = (hostname) =>
+  isLocalDevelopmentHost(hostname) || isTestnetDeploymentHost(hostname);
 
 export const compareNetworksForDisplay = (leftNetwork, rightNetwork) => {
   const leftIsTestnet = isTestnetNetwork(leftNetwork);
