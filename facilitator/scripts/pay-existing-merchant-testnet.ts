@@ -204,6 +204,10 @@ const waitForHealth = async (baseUrl: string, timeoutMs = 30_000) => {
 };
 
 const loadScriptConfig = (): ExistingMerchantScriptConfig => {
+  const configSection = String(
+    process.env.PAYMENT_TEST_CONFIG_SECTION || "existingMerchantPayment"
+  )
+    .trim();
   const scriptConfigDefaults = {
     existingMerchantPayment: {
       facilitatorUrl: "http://localhost:4022",
@@ -217,14 +221,29 @@ const loadScriptConfig = (): ExistingMerchantScriptConfig => {
       verifySettlement: true,
       verifyTimeoutMs: 45000,
     },
+    existingMerchantPaymentPublicTestnet: {
+      facilitatorUrl: "https://facilitator.testnet.railbridge.ai",
+      merchantUrl: "https://demo.testnet.railbridge.ai",
+      merchantOsUrl: "https://api.testnet.railbridge.ai",
+      apiId: "premium_api",
+      routeMethod: "GET",
+      routePath: "/api/premium",
+      sourceNetwork: TEST_CLIENT_NETWORKS.baseSepolia,
+      preferredPayNetworks: [...DEFAULT_CLIENT_PAY_NETWORKS],
+      verifySettlement: true,
+      verifyTimeoutMs: 45000,
+    },
   };
 
   const baseConfig = readJsonObjectFile(configFilePath);
   const localConfig = readJsonObjectFile(configLocalFilePath);
+  const defaultsBySection = toPlainObject(scriptConfigDefaults);
+  const defaultSectionConfig =
+    defaultsBySection[configSection] || scriptConfigDefaults.existingMerchantPayment;
   const existingMerchantPaymentConfig = {
-    ...scriptConfigDefaults.existingMerchantPayment,
-    ...toPlainObject(baseConfig.existingMerchantPayment),
-    ...toPlainObject(localConfig.existingMerchantPayment),
+    ...toPlainObject(defaultSectionConfig),
+    ...toPlainObject(baseConfig[configSection]),
+    ...toPlainObject(localConfig[configSection]),
   };
   const configuredPayNetworksRaw = (existingMerchantPaymentConfig as Record<string, unknown>).preferredPayNetworks
     ?? (existingMerchantPaymentConfig as Record<string, unknown>).preferredPayNetwork;

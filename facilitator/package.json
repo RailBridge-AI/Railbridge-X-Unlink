@@ -15,6 +15,7 @@
     "test:merchant-os-testnet": "tsx src/merchant-server-merchant-os-testnet.ts",
     "test:accept-payment-merchant-os": "tsx scripts/pay-merchant-os-testnet.ts",
     "test:accept-payment-existing-merchant-os": "tsx scripts/pay-existing-merchant-testnet.ts",
+    "test:accept-payment-existing-merchant-public-testnet": "tsx scripts/pay-existing-merchant-public-testnet.ts",
     "test:bridge-merchant-os": "tsx scripts/manual-bridge-merchant-os.ts",
     "test:merchant-same-chain": "tsx src/merchant-server-same-chain.ts",
     "example:client": "tsx src/client-example.ts",

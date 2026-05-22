@@ -39,12 +39,17 @@ Use `payment-test-config.json` for non-sensitive smoke-test defaults (URLs, rout
 Current section:
 
 1. `existingMerchantPayment`
+2. `existingMerchantPaymentPublicTestnet`
 
 Useful keys inside `existingMerchantPayment`:
 
 1. `sourceNetwork`: fallback network if facilitator `/supported` is unavailable.
 2. `preferredPayNetworks`: ordered list of client pay attempts for smoke tests, for example Base Sepolia then Arbitrum Sepolia.
 3. `verifySettlement`: whether the script should also observe Merchant OS after each payment.
+
+Script selector:
+
+1. `PAYMENT_TEST_CONFIG_SECTION` chooses which section to load (default `existingMerchantPayment`).
 
 ## Keep In `.env`
 

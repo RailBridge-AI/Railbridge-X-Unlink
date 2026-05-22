@@ -10,5 +10,17 @@
     "preferredPayNetworks": ["eip155:84532", "eip155:421614"],
     "verifySettlement": true,
     "verifyTimeoutMs": 45000
+  },
+  "existingMerchantPaymentPublicTestnet": {
+    "facilitatorUrl": "https://facilitator.testnet.railbridge.ai",
+    "merchantUrl": "https://demo.testnet.railbridge.ai",
+    "merchantOsUrl": "https://api.testnet.railbridge.ai",
+    "apiId": "premium_api",
+    "routeMethod": "GET",
+    "routePath": "/api/premium",
+    "sourceNetwork": "eip155:84532",
+    "preferredPayNetworks": ["eip155:84532", "eip155:421614"],
+    "verifySettlement": true,
+    "verifyTimeoutMs": 45000
   }
 }
