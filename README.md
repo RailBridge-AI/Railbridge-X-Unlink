@@ -30,6 +30,14 @@ This facilitator extends the x402 protocol by:
 - **`BridgeService`**: Stub service for actual bridge integration (Wormhole, LayerZero, or custom)
 - **Cross-chain extension**: Custom x402 extension that carries source chain information from client to facilitator
 
+## Testnet VPS Deployment
+
+For shared-VPS deployment with Traefik ingress and `*.testnet.env` config naming, use:
+
+- `deploy/testnet/README.md`
+- `deploy/testnet/docker-compose.testnet.yml`
+- `deploy/testnet/prepare-testnet-runtime-configs.sh`
+
 ## Setup
 
 ### 1. Install Dependencies

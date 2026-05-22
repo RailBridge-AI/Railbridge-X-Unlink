@@ -1,0 +1,41 @@
+{
+  "port": 4030,
+  "webUrl": "https://app.testnet.railbridge.ai",
+  "dbPath": "/data/merchant-os.db",
+  "sessionHours": 24,
+  "onboardingAutoApprove": false,
+  "onboardingAllowlistDomains": [
+    "example.com"
+  ],
+  "custodyMode": "mpc",
+  "custodyAddress": "",
+  "realConsolidationBridgeEnabled": true,
+  "realPayoutsEnabled": true,
+  "allowSimulatedLedgerMutations": false,
+  "facilitatorAddress": "0xReplaceWithFacilitatorAddress",
+  "demoSourceNetwork": "eip155:84532",
+  "chainCatalogSyncMs": 300000,
+  "chainStatusOverrides": {},
+  "onchainReadTimeoutMs": 7000,
+  "onchainReadTotalBudgetMs": 7000,
+  "payoutTxTimeoutMs": 120000,
+  "consolidationBridgeTimeoutMs": 300000,
+  "consolidationBridgeRetryAttempts": 2,
+  "consolidationBridgeRetryBackoffMs": 2500,
+  "consolidationBridgeRpcTimeoutMs": 30000,
+  "consolidationBridgeRpcRetryCount": 3,
+  "gasSponsorAutoTopupEnabled": true,
+  "gasEstimatorEnabled": true,
+  "gasEstimatorSourceGasUnits": 450000,
+  "gasEstimatorDestinationGasUnits": 350000,
+  "gasEstimatorBufferBps": 18000,
+  "minBridgeNativeBalanceWei": "100000000000000",
+  "gasSponsorTopupWei": "300000000000000",
+  "gasSponsorReceiptTimeoutMs": 120000,
+  "rpcOverridesByNetwork": {
+    "eip155:84532": [
+      "https://sepolia.base.org"
+    ]
+  }
+}
+
