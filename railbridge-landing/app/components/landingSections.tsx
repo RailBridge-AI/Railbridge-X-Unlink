@@ -140,19 +140,19 @@ function ChainSlides({ darkMode }: { darkMode: boolean }) {
 function FlowDiagram({ darkMode }: { darkMode: boolean }) {
   const steps = [
     {
-      label: "Pay",
-      title: "Complete x402 payment on source chain",
-      body: "A user or agent initiates a typical x402 flow on their preferred source chain.",
+      label: "Accept",
+      title: "Customers and agents pay through x402",
+      body: "Your paid routes stay simple while payers use supported networks they already prefer.",
     },
     {
       label: "Route",
-      title: "RailBridge AI routes & bridges",
-      body: "The RailBridge facilitator selects a cross‑chain path and handles bridging.",
+      title: "RailBridge coordinates routing and settlement",
+      body: "The facilitator handles cross-chain movement and settlement lifecycle events behind the scenes.",
     },
     {
-      label: "Settle",
-      title: "Merchant receives on destination chain",
-      body: "USDC lands on the merchant’s preferred chain with on‑chain receipts for audit.",
+      label: "Operate",
+      title: "Merchant OS keeps finance and ops in control",
+      body: "Track balances, settlements, policies, and payouts from one operational control plane.",
     },
   ];
 
@@ -393,6 +393,20 @@ export function HeaderSection({
               Solution
             </a>
             <a
+              href="#audience"
+              onClick={(e) => handleNavClick(e, "audience")}
+              className={darkMode ? "hover:text-white" : "hover:text-black"}
+            >
+              Who It&apos;s For
+            </a>
+            <a
+              href="#merchant-os"
+              onClick={(e) => handleNavClick(e, "merchant-os")}
+              className={darkMode ? "hover:text-white" : "hover:text-black"}
+            >
+              Merchant OS
+            </a>
+            <a
               href="#faq"
               onClick={(e) => handleNavClick(e, "faq")}
               className={darkMode ? "hover:text-white" : "hover:text-black"}
@@ -474,20 +488,19 @@ export function HeroSection({ darkMode }: { darkMode: boolean }) {
         <div className="grid md:grid-cols-2 gap-10 items-center">
           <div>
             <h1 className="text-3xl sm:text-5xl md:text-6xl font-semibold leading-tight">
-              The{" "}
+              Merchant Operating System{" "}
               <span className={darkMode ? "text-white" : "text-black"}>
-                Interoperability
-              </span>{" "}
-              Layer for Agentic Commerce
+                for AI Agent Payments
+              </span>
             </h1>
             <p
               className={`mt-5 max-w-xl transition-colors ${
                 darkMode ? "text-white/70" : "text-black/70"
               }`}
             >
-              Enable cross-chain USDC micropayments so users and agents can pay
-              on their preferred chain, while services receive USDC seamlessly
-              where they prefer.
+              Accept cross-chain USDC from agents and users, then manage
+              settlement and payouts in one control plane for business and
+              developer teams.
             </p>
             <div className="mt-7 flex flex-wrap gap-3">
               <a
@@ -530,24 +543,24 @@ export function ProblemSection({ darkMode }: { darkMode: boolean }) {
   return (
     <Section
       id="problem"
-      title="The Multi‑Chain Payment Problem"
-      subtitle="Payments are siloed within single chains. Even with x402 enabling agentic micropayments, there is no seamless way to pay on one chain and settle on another."
+      title="Why Merchant Teams Get Stuck"
+      subtitle="Growth in onchain payments usually creates scattered balances, manual reconciliation, and operational risk for finance and ops."
       darkMode={darkMode}
       inverted
     >
       <div className="grid md:grid-cols-3 gap-6">
         {[
           {
-            h: "Liquidity Fragmentation",
-            p: "Each chain has its own tokens and liquidity, forcing users to stay within one ecosystem.",
+            h: "Revenue Is Fragmented",
+            p: "Payments land across multiple chains and addresses, making it hard to maintain a single cash position.",
           },
           {
-            h: "Manual Workarounds",
-            p: "Developers build custom bridges to move value across chains — costly, risky.",
+            h: "Reconciliation Is Manual",
+            p: "Teams piece together explorer data, bridge events, and internal logs before they can trust reporting.",
           },
           {
-            h: "Fragmented Merchant Settlement",
-            p: "Merchants get paid across many chains and tokens, making treasury management and accounting significantly more complex.",
+            h: "Operations Don’t Scale",
+            p: "Payout execution, controls, and auditability become fragile when payment infrastructure is stitched together.",
           },
         ].map((card, i) => (
           <div
@@ -613,12 +626,265 @@ export function SolutionSection({ darkMode }: { darkMode: boolean }) {
   return (
     <Section
       id="solution"
-      title="RailBridge Keeps Settlement Simple"
-      subtitle="A routing layer on top of x402 that handles cross‑chain settlement"
+      title="Merchant OS, Powered by RailBridge"
+      subtitle="One operational layer from payment acceptance to settlement visibility and payout execution."
       darkMode={darkMode}
     >
       <div className="mt-4">
         <FlowDiagram darkMode={darkMode} />
+      </div>
+    </Section>
+  );
+}
+
+export function AudienceSection({ darkMode }: { darkMode: boolean }) {
+  return (
+    <Section
+      id="audience"
+      title="Who This Is For"
+      subtitle="RailBridge is built for teams that need stablecoin revenue operations to be reliable, auditable, and easy to run."
+      darkMode={darkMode}
+    >
+      <div className="grid md:grid-cols-3 gap-6">
+        {[
+          {
+            h: "API And SaaS Businesses",
+            p: "Monetize paid routes with x402 while keeping finance operations in one Merchant OS control plane.",
+          },
+          {
+            h: "AI Agent Platforms",
+            p: "Support agent payments without forcing every customer into one chain or one wallet ecosystem.",
+          },
+          {
+            h: "Marketplace And Infra Teams",
+            p: "Consolidate multi-chain payment flow into clear settlement timelines and payout workflows.",
+          },
+        ].map((card, i) => (
+          <div
+            key={i}
+            className={`rounded-3xl border p-6 sm:p-7 shadow-sm transition-colors ${
+              darkMode
+                ? "border-white/15 bg-white/[0.02]"
+                : "border-black/10 bg-black/[0.02]"
+            }`}
+          >
+            <h3
+              className={`text-lg sm:text-xl font-semibold leading-snug ${
+                darkMode ? "text-white" : "text-black"
+              }`}
+            >
+              {card.h}
+            </h3>
+            <p
+              className={`mt-3 text-sm leading-relaxed ${
+                darkMode ? "text-white/70" : "text-black/70"
+              }`}
+            >
+              {card.p}
+            </p>
+          </div>
+        ))}
+      </div>
+    </Section>
+  );
+}
+
+export function MerchantOsSection({ darkMode }: { darkMode: boolean }) {
+  const features = [
+    {
+      id: "overview",
+      title: "Treasury Overview",
+      summary:
+        "Monitor balances and total position across merchant accounts from one screen.",
+      screenshot: "/merchant-os-screenshots/overview.png",
+      alt: "Merchant OS overview dashboard",
+    },
+    {
+      id: "activity",
+      title: "Transaction Activity",
+      summary:
+        "Track lifecycle status for incoming, outgoing payments and cross-chain settlement events.",
+      screenshot: "/merchant-os-screenshots/activity.png",
+      alt: "Merchant OS settlement activity timeline",
+    },
+    {
+      id: "products",
+      title: "Product Configuration",
+      summary:
+        "Create paid routes, define pricing, and control how settlement should be handled.",
+      screenshot: "/merchant-os-screenshots/products.png",
+      alt: "Merchant OS products configuration page",
+    },
+    {
+      id: "payouts",
+      title: "Payout Operations",
+      summary:
+        "Execute payout requests with visibility into status, amount, and destination.",
+      screenshot: "/merchant-os-screenshots/payout.png",
+      alt: "Merchant OS payouts operations page",
+    },
+  ];
+
+  const [activeFeatureId, setActiveFeatureId] = useState(features[0].id);
+  const activeFeature =
+    features.find((feature) => feature.id === activeFeatureId) || features[0];
+
+  return (
+    <Section
+      id="merchant-os"
+      title="What You Get In Railbridge Merchant OS"
+      subtitle=""
+      darkMode={darkMode}
+      inverted
+    >
+      <div className="space-y-6">
+        <div className="grid sm:grid-cols-2 lg:grid-cols-4 gap-3">
+          {features.map((feature, index) => {
+            const isActive = feature.id === activeFeatureId;
+            const number = String(index + 1).padStart(2, "0");
+            return (
+              <button
+                key={feature.id}
+                type="button"
+                onClick={() => setActiveFeatureId(feature.id)}
+                className={`w-full text-left rounded-2xl border p-4 transition-colors ${
+                  isActive
+                    ? darkMode
+                      ? "border-black/25 bg-black/10"
+                      : "border-white/30 bg-white/10"
+                    : darkMode
+                      ? "border-black/10 bg-black/[0.02] hover:bg-black/5"
+                      : "border-white/10 bg-white/[0.02] hover:bg-white/5"
+                }`}
+                aria-pressed={isActive}
+              >
+                <div
+                  className={`text-[11px] font-medium tracking-[0.14em] ${
+                    darkMode ? "text-black/60" : "text-white/60"
+                  }`}
+                >
+                  {number}
+                </div>
+                <h3
+                  className={`mt-2 text-base sm:text-lg font-semibold ${
+                    darkMode ? "text-black" : "text-white"
+                  }`}
+                >
+                  {feature.title}
+                </h3>
+                <p
+                  className={`mt-2 text-sm leading-relaxed ${
+                    darkMode ? "text-black/70" : "text-white/70"
+                  }`}
+                >
+                  {feature.summary}
+                </p>
+              </button>
+            );
+          })}
+        </div>
+
+        <div className="overflow-hidden rounded-xl bg-white">
+          <AnimatePresence mode="wait">
+            <motion.img
+              key={activeFeature.id}
+              src={activeFeature.screenshot}
+              alt={activeFeature.alt}
+              className="block w-full h-auto object-cover"
+              initial={{ opacity: 0.4 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0.2 }}
+              transition={{ duration: 0.25, ease: "easeOut" }}
+              draggable={false}
+            />
+          </AnimatePresence>
+        </div>
+      </div>
+    </Section>
+  );
+}
+
+export function GetStartedSection({ darkMode }: { darkMode: boolean }) {
+  return (
+    <Section
+      id="launch"
+      title="Go Live In 3 Steps"
+      subtitle="Start in testnet first, validate your merchant flow, then move to production with confidence."
+      darkMode={darkMode}
+    >
+      <div className="grid md:grid-cols-3 gap-6">
+        {[
+          {
+            step: "1",
+            h: "Connect Merchant Flow",
+            p: "Set up your paid endpoint and wire x402 payment middleware with RailBridge integration.",
+          },
+          {
+            step: "2",
+            h: "Run Testnet End To End",
+            p: "Use app/api/facilitator/demo testnet stack and verify settlement timeline plus payouts.",
+          },
+          {
+            step: "3",
+            h: "Ship With Controls",
+            p: "Use Merchant OS policies, API keys, and payout workflows as your team scales usage.",
+          },
+        ].map((item) => (
+          <div
+            key={item.step}
+            className={`rounded-3xl border p-6 sm:p-7 shadow-sm transition-colors ${
+              darkMode
+                ? "border-white/15 bg-white/[0.02]"
+                : "border-black/10 bg-black/[0.02]"
+            }`}
+          >
+            <div
+              className={`inline-flex h-8 w-8 items-center justify-center rounded-full text-sm font-semibold ${
+                darkMode ? "bg-white/10 text-white" : "bg-black/5 text-black"
+              }`}
+            >
+              {item.step}
+            </div>
+            <h3
+              className={`mt-4 text-lg sm:text-xl font-semibold leading-snug ${
+                darkMode ? "text-white" : "text-black"
+              }`}
+            >
+              {item.h}
+            </h3>
+            <p
+              className={`mt-3 text-sm leading-relaxed ${
+                darkMode ? "text-white/70" : "text-black/70"
+              }`}
+            >
+              {item.p}
+            </p>
+          </div>
+        ))}
+      </div>
+      <div className="mt-8 flex flex-wrap gap-3">
+        <a
+          href="https://railbridge.gitbook.io/docs"
+          target="_blank"
+          rel="noopener noreferrer"
+          className={`px-4 py-2.5 font-medium transition-colors ${
+            darkMode
+              ? "bg-white hover:bg-white/90 text-black"
+              : "bg-black hover:bg-black/90 text-white"
+          }`}
+        >
+          Try Testnet Guide
+        </a>
+        <a
+          href="mailto:railbridge.ai@proton.me"
+          className={`px-4 py-2.5 border transition-colors ${
+            darkMode
+              ? "border-white/30 hover:bg-white/10"
+              : "border-black/30 hover:bg-black/10"
+          }`}
+        >
+          Book Integration Call
+        </a>
       </div>
     </Section>
   );
@@ -644,8 +910,8 @@ export function FAQSection({ darkMode }: { darkMode: boolean }) {
                 darkMode ? "text-white/70" : "text-black/70"
               }`}
             >
-              Everything you need to know about RailBridge and how it works.
-              Can&apos;t find an answer?{" "}
+              Everything you need to know about Merchant OS and RailBridge
+              operations. Can&apos;t find an answer?{" "}
               <a
                 href="mailto:railbridge.ai@proton.me"
                 className="underline underline-offset-2"
@@ -663,20 +929,20 @@ export function FAQSection({ darkMode }: { darkMode: boolean }) {
           >
             {[
               {
-                q: "How does a typical cross‑chain payment flow work?",
-                a: "A sender (user or agent) attaches a payment via x402 on the source chain as a typical x402 flow. The RailBridge router then performs a cross‑chain route, and the merchant receives on its preferred chain with receipts emitted for audit.",
+                q: "What does Merchant OS handle for my business team?",
+                a: "Merchant OS provides one control plane for products, balances, settlement timeline, payout operations, and API keys so teams do not have to operate chain-specific backoffice workflows.",
               },
               {
-                q: "What happens in each steps?",
-                a: "In the Send step, an x402 payment is done from any supported chain. In Route, RailBridge selects a path across bridges to perform the bridging. In Settle, funds land on the destination chain and the merchant receives the resource.",
+                q: "How does RailBridge fit with x402 payments?",
+                a: "Payers complete x402 payments from supported networks while RailBridge coordinates routing and settlement lifecycle. Merchant OS then reflects outcomes in business-friendly views and operational APIs.",
               },
               {
-                q: "What are common use cases for RailBridge AI?",
-                a: "Teams can use RailBridge for AI agents paying compute and data APIs, cross‑chain SaaS subscriptions, pay‑per‑call web services, usage‑metered dApps, multi‑chain marketplaces, and programmatic refunds or credits.",
+                q: "Is this only for AI agents?",
+                a: "No. Teams use RailBridge and Merchant OS for agent payments, API monetization, SaaS usage billing, marketplaces, and any product that needs stablecoin revenue with operational control.",
               },
               {
-                q: "Can RailBridge AI support new chains or tokens over time?",
-                a: "Yes. The routing layer is designed to be compatible for adding new bridges and chains over time.",
+                q: "Can we start on testnet before production rollout?",
+                a: "Yes. The stack supports dedicated testnet deployment with isolated configuration, domains, and data paths so teams can validate end-to-end flows safely.",
               },
             ].map((item, idx) => {
               const isOpen = openFaq === idx;
@@ -747,8 +1013,8 @@ export function CTASection({ darkMode }: { darkMode: boolean }) {
   return (
     <Section
       id="join"
-      title="Build with RailBridge AI"
-      subtitle="Join and help shape the cross‑chain agentic economy."
+      title="Run Your Payment Operations in Merchant OS"
+      subtitle="Start with testnet, prove your flow, then scale with stronger controls."
       darkMode={darkMode}
       inverted
     >
@@ -763,7 +1029,7 @@ export function CTASection({ darkMode }: { darkMode: boolean }) {
               : "bg-black hover:bg-black/90 text-white"
           }`}
         >
-          Get Started
+          View Integration Docs
         </a>
         <a
           href="mailto:railbridge.ai@proton.me"
@@ -788,10 +1054,8 @@ export function FooterSection({ darkMode }: { darkMode: boolean }) {
           ? "border-white/20 text-white/60" : "border-black/20 text-black/60"
       }`}
     >
-      © {new Date().getFullYear()} RailBridge AI. Built for the agentic
-      internet.
+      © {new Date().getFullYear()} RailBridge AI. Built for merchant-led
+      onchain commerce.
     </footer>
   );
 }
-
-
