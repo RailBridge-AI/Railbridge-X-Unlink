@@ -429,18 +429,18 @@ export function HeaderSection({
               Solution
             </a>
             <a
-              href="#audience"
-              onClick={(e) => handleNavClick(e, "audience")}
-              className={darkMode ? "hover:text-white" : "hover:text-black"}
-            >
-              Who It&apos;s For
-            </a>
-            <a
               href="#merchant-os"
               onClick={(e) => handleNavClick(e, "merchant-os")}
               className={darkMode ? "hover:text-white" : "hover:text-black"}
             >
               Merchant OS
+            </a>
+            <a
+              href="#audience"
+              onClick={(e) => handleNavClick(e, "audience")}
+              className={darkMode ? "hover:text-white" : "hover:text-black"}
+            >
+              Who It&apos;s For
             </a>
             <a
               href="#faq"
