@@ -6,6 +6,8 @@ import {
   HeroSection,
   ProblemSection,
   SolutionSection,
+  AudienceSection,
+  MerchantOsSection,
   FAQSection,
   CTASection,
   FooterSection,
@@ -46,6 +48,10 @@ export default function Page() {
 
       <SolutionSection darkMode={darkMode} />
 
+      <MerchantOsSection darkMode={darkMode} />
+
+      <AudienceSection darkMode={darkMode} />
+
       <FAQSection darkMode={darkMode} />
 
       <CTASection darkMode={darkMode} />
@@ -54,5 +60,3 @@ export default function Page() {
     </div>
   );
 }
-
-
