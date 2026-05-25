@@ -1,7 +1,42 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { AnimatePresence, motion } from "framer-motion";
+
+const merchantOsFeatures = [
+  {
+    id: "overview",
+    title: "Treasury Overview",
+    summary:
+      "Monitor balances and total position across merchant accounts from one screen.",
+    screenshot: "/merchant-os-screenshots/overview.png",
+    alt: "Merchant OS overview dashboard",
+  },
+  {
+    id: "activity",
+    title: "Transaction Activity",
+    summary:
+      "Track lifecycle status for incoming, outgoing payments and cross-chain settlement events.",
+    screenshot: "/merchant-os-screenshots/activity.png",
+    alt: "Merchant OS settlement activity timeline",
+  },
+  {
+    id: "products",
+    title: "Product Configuration",
+    summary:
+      "Create paid routes, define pricing, and control how settlement should be handled.",
+    screenshot: "/merchant-os-screenshots/products.png",
+    alt: "Merchant OS products configuration page",
+  },
+  {
+    id: "payouts",
+    title: "Payout Operations",
+    summary:
+      "Execute payout requests with visibility into status, amount, and destination.",
+    screenshot: "/merchant-os-screenshots/payout.png",
+    alt: "Merchant OS payouts operations page",
+  },
+] as const;
 
 // Simple Chain Badge (text-based so you can swap easily)
 function ChainBadge({ label, darkMode }: { label: string; darkMode: boolean }) {
@@ -690,44 +725,17 @@ export function AudienceSection({ darkMode }: { darkMode: boolean }) {
 }
 
 export function MerchantOsSection({ darkMode }: { darkMode: boolean }) {
-  const features = [
-    {
-      id: "overview",
-      title: "Treasury Overview",
-      summary:
-        "Monitor balances and total position across merchant accounts from one screen.",
-      screenshot: "/merchant-os-screenshots/overview.png",
-      alt: "Merchant OS overview dashboard",
-    },
-    {
-      id: "activity",
-      title: "Transaction Activity",
-      summary:
-        "Track lifecycle status for incoming, outgoing payments and cross-chain settlement events.",
-      screenshot: "/merchant-os-screenshots/activity.png",
-      alt: "Merchant OS settlement activity timeline",
-    },
-    {
-      id: "products",
-      title: "Product Configuration",
-      summary:
-        "Create paid routes, define pricing, and control how settlement should be handled.",
-      screenshot: "/merchant-os-screenshots/products.png",
-      alt: "Merchant OS products configuration page",
-    },
-    {
-      id: "payouts",
-      title: "Payout Operations",
-      summary:
-        "Execute payout requests with visibility into status, amount, and destination.",
-      screenshot: "/merchant-os-screenshots/payout.png",
-      alt: "Merchant OS payouts operations page",
-    },
-  ];
+  const [activeFeatureId, setActiveFeatureId] = useState(merchantOsFeatures[0].id);
+  useEffect(() => {
+    merchantOsFeatures.forEach((feature) => {
+      const preloadedImage = new Image();
+      preloadedImage.src = feature.screenshot;
+    });
+  }, []);
 
-  const [activeFeatureId, setActiveFeatureId] = useState(features[0].id);
   const activeFeature =
-    features.find((feature) => feature.id === activeFeatureId) || features[0];
+    merchantOsFeatures.find((feature) => feature.id === activeFeatureId) ||
+    merchantOsFeatures[0];
 
   return (
     <Section
@@ -739,7 +747,7 @@ export function MerchantOsSection({ darkMode }: { darkMode: boolean }) {
     >
       <div className="space-y-6">
         <div className="grid sm:grid-cols-2 lg:grid-cols-4 gap-3">
-          {features.map((feature, index) => {
+          {merchantOsFeatures.map((feature, index) => {
             const isActive = feature.id === activeFeatureId;
             const number = String(index + 1).padStart(2, "0");
             return (
@@ -785,19 +793,25 @@ export function MerchantOsSection({ darkMode }: { darkMode: boolean }) {
         </div>
 
         <div className="overflow-hidden rounded-xl bg-white">
-          <AnimatePresence mode="wait">
-            <motion.img
-              key={activeFeature.id}
-              src={activeFeature.screenshot}
-              alt={activeFeature.alt}
-              className="block w-full h-auto object-cover"
-              initial={{ opacity: 0.4 }}
-              animate={{ opacity: 1 }}
-              exit={{ opacity: 0.2 }}
-              transition={{ duration: 0.25, ease: "easeOut" }}
-              draggable={false}
-            />
-          </AnimatePresence>
+          <div className="relative w-full aspect-[16/10]">
+            {merchantOsFeatures.map((feature) => {
+              const isActive = feature.id === activeFeature.id;
+              return (
+                <motion.img
+                  key={feature.id}
+                  src={feature.screenshot}
+                  alt={feature.alt}
+                  className="absolute inset-0 h-full w-full object-cover"
+                  initial={false}
+                  animate={{ opacity: isActive ? 1 : 0 }}
+                  transition={{ duration: 0.22, ease: "easeOut" }}
+                  draggable={false}
+                  aria-hidden={!isActive}
+                  style={{ pointerEvents: isActive ? "auto" : "none" }}
+                />
+              );
+            })}
+          </div>
         </div>
       </div>
     </Section>
