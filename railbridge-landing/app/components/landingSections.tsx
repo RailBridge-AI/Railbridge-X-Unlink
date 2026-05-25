@@ -37,6 +37,7 @@ const merchantOsFeatures = [
     alt: "Merchant OS payouts operations page",
   },
 ] as const;
+type MerchantOsFeatureId = (typeof merchantOsFeatures)[number]["id"];
 
 // Simple Chain Badge (text-based so you can swap easily)
 function ChainBadge({ label, darkMode }: { label: string; darkMode: boolean }) {
@@ -725,7 +726,9 @@ export function AudienceSection({ darkMode }: { darkMode: boolean }) {
 }
 
 export function MerchantOsSection({ darkMode }: { darkMode: boolean }) {
-  const [activeFeatureId, setActiveFeatureId] = useState(merchantOsFeatures[0].id);
+  const [activeFeatureId, setActiveFeatureId] = useState<MerchantOsFeatureId>(
+    merchantOsFeatures[0].id,
+  );
   useEffect(() => {
     merchantOsFeatures.forEach((feature) => {
       const preloadedImage = new Image();
