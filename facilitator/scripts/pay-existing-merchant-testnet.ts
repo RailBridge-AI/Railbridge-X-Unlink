@@ -27,14 +27,6 @@ type SettlementItem = {
   createdAt: string;
 };
 
-type MerchantProduct = {
-  id: string;
-  apiId: string | null;
-  method: string;
-  path: string;
-  enabled: boolean;
-};
-
 type MerchantSdkContext = {
   merchantId: string;
   accountId: string;
@@ -64,10 +56,8 @@ type ExistingMerchantScriptConfig = {
   verificationApiKey: string;
 };
 
-type ObserverPreparation = {
-  shouldVerify: boolean;
-  route: RouteTarget;
-  context: MerchantSdkContext | null;
+type ObserverContext = {
+  merchantId: string;
 };
 
 type ClientPaymentAttempt = {
@@ -283,9 +273,10 @@ const loadScriptConfig = (): ExistingMerchantScriptConfig => {
     verifyTimeoutMs: parseIntValue(existingMerchantPaymentConfig.verifyTimeoutMs, 45000),
     healthTimeoutMs: parseIntValue(existingMerchantPaymentConfig.healthTimeoutMs, 30000),
     clientPrivateKey: String(process.env.CLIENT_PRIVATE_KEY || "").trim() as `0x${string}`,
-    // This API key is only for test-harness verification against Merchant OS.
-    // It is not part of the payer/client payment flow.
-    verificationApiKey: String(process.env.RB_API_KEY || "").trim(),
+    // Optional post-payment verification only. Never used for the payer/client request.
+    verificationApiKey: String(
+      process.env.RB_VERIFICATION_API_KEY || process.env.RB_API_KEY || "",
+    ).trim(),
   };
 };
 
@@ -310,52 +301,6 @@ const resolveSdkContextForObserver = async ({
       "x-railbridge-api-key": apiKey,
     },
   });
-};
-
-const resolveRouteFromMerchantOsForObserver = async ({
-  merchantOsUrl,
-  apiKey,
-  merchantId,
-  preferredApiId,
-}: {
-  merchantOsUrl: string;
-  apiKey: string;
-  merchantId: string;
-  preferredApiId: string;
-}): Promise<RouteTarget | null> => {
-  const response = await requestJson<{ items: MerchantProduct[] }>({
-    url: `${merchantOsUrl}/v1/merchants/${merchantId}/products`,
-    headers: {
-      "x-railbridge-api-key": apiKey,
-    },
-  });
-  const items = Array.isArray(response.items) ? response.items : [];
-  if (!items.length) {
-    return null;
-  }
-
-  const enabledItems = items.filter((item) => item.enabled !== false);
-  const scope = enabledItems.length ? enabledItems : items;
-  const selected =
-    (preferredApiId
-      ? scope.find((item) => String(item.apiId || "").trim() === preferredApiId)
-      : null) || scope[0];
-  if (!selected) {
-    return null;
-  }
-
-  const method = String(selected.method || "").trim().toUpperCase();
-  const rawPath = String(selected.path || "").trim();
-  const path = rawPath.startsWith("/") ? rawPath : `/${rawPath}`;
-  if (!method || !path || path === "/") {
-    return null;
-  }
-
-  return {
-    method,
-    path,
-    apiId: selected.apiId ? String(selected.apiId) : null,
-  };
 };
 
 const getSettlementIdsForObserver = async ({
@@ -413,41 +358,19 @@ const waitForSettlementForObserver = async ({
   throw new Error("Timed out waiting for new settlement event in Merchant OS timeline");
 };
 
-const prepareObserver = async ({
-  config,
-  fallbackRoute,
+const prepareObserverContextForVerification = async ({
+  merchantOsUrl,
+  apiKey,
 }: {
-  config: ExistingMerchantScriptConfig;
-  fallbackRoute: RouteTarget;
-}): Promise<ObserverPreparation> => {
-  if (config.verifySettlement && !config.verificationApiKey) {
-    console.warn("RB_API_KEY is not set; Merchant OS verification will be skipped.");
-  }
-
-  const shouldVerify = config.verifySettlement && Boolean(config.verificationApiKey);
-  if (!shouldVerify) {
-    return {
-      shouldVerify: false,
-      route: fallbackRoute,
-      context: null,
-    };
-  }
-
+  merchantOsUrl: string;
+  apiKey: string;
+}): Promise<ObserverContext> => {
   const context = await resolveSdkContextForObserver({
-    merchantOsUrl: config.merchantOsUrl,
-    apiKey: config.verificationApiKey,
+    merchantOsUrl,
+    apiKey,
   });
-  const merchantOsRoute = await resolveRouteFromMerchantOsForObserver({
-    merchantOsUrl: config.merchantOsUrl,
-    apiKey: config.verificationApiKey,
-    merchantId: context.merchantId,
-    preferredApiId: config.apiId,
-  });
-
   return {
-    shouldVerify: true,
-    route: merchantOsRoute || fallbackRoute,
-    context,
+    merchantId: context.merchantId,
   };
 };
 
@@ -574,40 +497,55 @@ const logPaymentResult = ({
 
 const main = async () => {
   const config = loadScriptConfig();
-  const fallbackRoute: RouteTarget = {
+  const paymentRoute: RouteTarget = {
     method: config.fallbackRouteMethod,
     path: config.fallbackRoutePath,
     apiId: config.apiId || null,
   };
   const attempts = resolveClientPaymentAttempts(config.preferredPayNetworks);
+  const wantsVerification = config.verifySettlement;
+  const canVerify = wantsVerification && Boolean(config.verificationApiKey);
 
   assertRequired(config.clientPrivateKey, "CLIENT_PRIVATE_KEY");
   await waitForHealth(config.facilitatorUrl, config.healthTimeoutMs);
   await waitForHealth(config.merchantUrl, config.healthTimeoutMs);
 
-  const observer = await prepareObserver({
-    config,
-    fallbackRoute,
-  });
+  if (wantsVerification && !config.verificationApiKey) {
+    console.warn(
+      "RB_VERIFICATION_API_KEY (or RB_API_KEY) is not set; Merchant OS verification will be skipped.",
+    );
+  }
 
+  console.log(`Client payment route: ${paymentRoute.method} ${paymentRoute.path}`);
   console.log(`Client payment attempts: ${attempts.map((attempt) => attempt.label).join(", ")}`);
 
   for (const attempt of attempts) {
     console.log(`\n=== Paying from ${attempt.label} ===`);
 
-    const beforeIds =
-      observer.shouldVerify && observer.context
-        ? await getSettlementIdsForObserver({
-            merchantOsUrl: config.merchantOsUrl,
-            apiKey: config.verificationApiKey,
-            merchantId: observer.context.merchantId,
-          })
-        : null;
+    let beforeIds: Set<string> | null = null;
+    let observerContext: ObserverContext | null = null;
+    if (canVerify) {
+      try {
+        observerContext = await prepareObserverContextForVerification({
+          merchantOsUrl: config.merchantOsUrl,
+          apiKey: config.verificationApiKey,
+        });
+        beforeIds = await getSettlementIdsForObserver({
+          merchantOsUrl: config.merchantOsUrl,
+          apiKey: config.verificationApiKey,
+          merchantId: observerContext.merchantId,
+        });
+      } catch (error) {
+        console.warn(
+          `Merchant OS verification unavailable (${formatFetchError(error)}); continuing with client payment only.`,
+        );
+      }
+    }
 
     const payment = await runPureClientPayment({
       facilitatorUrl: config.facilitatorUrl,
       merchantUrl: config.merchantUrl,
-      route: observer.route,
+      route: paymentRoute,
       fallbackSourceNetwork: config.sourceNetwork,
       preferredPayNetwork: attempt.network,
       clientPrivateKey: config.clientPrivateKey,
@@ -616,29 +554,39 @@ const main = async () => {
     logPaymentResult({
       attempt,
       payment,
-      route: observer.route,
+      route: paymentRoute,
       merchantUrl: config.merchantUrl,
     });
 
-    if (!observer.shouldVerify || !observer.context || !beforeIds) {
-      console.log("Skipped Merchant OS verification. Set RB_API_KEY to enable post-payment observation.");
+    if (!canVerify || !observerContext || !beforeIds) {
+      if (wantsVerification) {
+        console.log(
+          "Skipped Merchant OS verification. Set RB_VERIFICATION_API_KEY to enable post-payment observation.",
+        );
+      }
       continue;
     }
 
-    const settlement = await waitForSettlementForObserver({
-      merchantOsUrl: config.merchantOsUrl,
-      apiKey: config.verificationApiKey,
-      merchantId: observer.context.merchantId,
-      beforeIds,
-      timeoutMs: config.verifyTimeoutMs,
-    });
+    try {
+      const settlement = await waitForSettlementForObserver({
+        merchantOsUrl: config.merchantOsUrl,
+        apiKey: config.verificationApiKey,
+        merchantId: observerContext.merchantId,
+        beforeIds,
+        timeoutMs: config.verifyTimeoutMs,
+      });
 
-    console.log(`Settlement observed in Merchant OS (${attempt.label})`);
-    console.log(`- settlementId: ${settlement.settlementId || settlement.id}`);
-    console.log(`- status: ${settlement.status}`);
-    console.log(`- sourceNetwork: ${settlement.sourceNetwork || "-"}`);
-    console.log(`- destinationNetwork: ${settlement.destinationNetwork || "-"}`);
-    console.log(`- amount(base units): ${settlement.amount}`);
+      console.log(`Settlement observed in Merchant OS (${attempt.label})`);
+      console.log(`- settlementId: ${settlement.settlementId || settlement.id}`);
+      console.log(`- status: ${settlement.status}`);
+      console.log(`- sourceNetwork: ${settlement.sourceNetwork || "-"}`);
+      console.log(`- destinationNetwork: ${settlement.destinationNetwork || "-"}`);
+      console.log(`- amount(base units): ${settlement.amount}`);
+    } catch (error) {
+      console.warn(
+        `Merchant OS settlement verification failed (${formatFetchError(error)}); client payment already succeeded.`,
+      );
+    }
   }
 };
 
