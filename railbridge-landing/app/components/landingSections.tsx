@@ -816,6 +816,20 @@ export function MerchantOsSection({ darkMode }: { darkMode: boolean }) {
             })}
           </div>
         </div>
+
+        <div className="overflow-hidden rounded-xl">
+          <div className="relative w-full aspect-video">
+            <iframe
+              className="absolute inset-0 h-full w-full"
+              src="https://www.youtube.com/embed/QzolAXE3xP8"
+              title="RailBridge Merchant OS walkthrough"
+              loading="lazy"
+              allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share"
+              referrerPolicy="strict-origin-when-cross-origin"
+              allowFullScreen
+            />
+          </div>
+        </div>
       </div>
     </Section>
   );
