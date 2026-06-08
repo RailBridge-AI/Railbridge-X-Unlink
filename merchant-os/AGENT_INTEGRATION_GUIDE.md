@@ -1,150 +1,167 @@
-# RailBridge Merchant Integration Guide (Agent-Native)
+# RailBridge Merchant Integration Guide (Beginner, Repo-Free)
 
-Last reviewed: 2026-05-20
+Last reviewed: 2026-06-08
 
-This guide is written so a merchant team or coding agent (Codex, Claude) can integrate RailBridge with minimal ambiguity.
+This guide is for merchant teams building APIs with business logic who want to monetize endpoints with RailBridge.
 
-Goal: merchant accepts USDC payments on protected API routes without handling blockchain, chain routing, or facilitator verify/settle internals.
+You do not need to understand blockchain internals.
+You do not need access to the RailBridge repo.
 
-## 1) Integration Outcome
+## 1) What You Build vs What RailBridge Handles
 
-When integration is complete:
+Merchant team builds:
+1. Your API endpoints and business logic.
+2. A payment gate middleware in front of selected endpoints.
+3. A webhook endpoint to receive settlement/payout updates.
 
-1. Unpaid request to protected route returns `402 Payment Required`.
-2. Agent/client can pay and retry the same route successfully.
-3. Settlement lifecycle appears in Merchant OS (`settled_source`, `bridge_pending`, `bridge_confirmed`, `failed`).
-4. Merchant receives webhook events on their backend URL.
+RailBridge handles:
+1. Payment requirement generation for each paid route.
+2. Multi-chain payment verification and settlement flow.
+3. Cross-chain lifecycle orchestration and status tracking.
+4. Dashboarding in Merchant OS and signed webhook delivery.
 
-## 2) Public Contract (Use This)
+## 2) Where Your Business Logic Should Go
 
-Use only these merchant-facing contracts:
+Keep your business logic exactly where it already belongs: service layer / use-case layer.
 
-1. Session auth:
-   - `POST /v1/auth/login`
-   - `POST /v1/onboarding/start`
-   - `GET /v1/onboarding/checklist`
-   - `GET /v1/onboarding/settings`
-   - `POST /v1/onboarding/api-keys`
-   - `PATCH /v1/onboarding/api-keys/{apiKeyId}`
-   - `POST /v1/onboarding/api-keys/{apiKeyId}/revoke`
-   - `POST /v1/onboarding/webhooks`
-   - `PATCH /v1/onboarding/webhooks/{webhookId}`
-   - `DELETE /v1/onboarding/webhooks/{webhookId}`
-   - `POST /v1/onboarding/webhooks/test`
-   - `POST /v1/onboarding/products`
-2. Merchant runtime (`x-railbridge-api-key`):
-   - `GET /v1/merchants/{merchantId}/balances`
-   - `GET /v1/merchants/{merchantId}/settlements`
-   - `GET /v1/merchants/{merchantId}/products`
-   - `POST /v1/merchants/{merchantId}/products`
-   - `PUT /v1/merchants/{merchantId}/products/{apiProductId}`
-   - `DELETE /v1/merchants/{merchantId}/products/{apiProductId}`
-   - `GET /v1/merchants/{merchantId}/payouts`
-   - `POST /v1/merchants/{merchantId}/payouts`
-3. Merchant SDK requirement resolver:
-   - `POST /v1/sdk/requirements/resolve` (`x-railbridge-api-key`)
+Do not mix payment logic into your domain code.
 
-Do not use internal endpoints in merchant integration code:
+Recommended structure:
+1. `src/services/*` for business logic.
+2. `src/integrations/railbridge/*` for payment/webhook adapter code.
+3. `src/routes/*` only for wiring middleware + handlers.
 
-1. `/v1/internal/*`
-2. facilitator direct `/verify` and `/settle`
-
-## 3) Merchant Setup Sequence
-
-Use this order:
-
-1. Create merchant account and admin user.
-2. Create API key and store token immediately.
-3. Register webhook URL.
-4. Create first paid product (`method`, `path`, `price`).
-5. Integrate backend middleware for protected routes.
-6. Run sandbox payment test.
-
-## 4) Architecture Flow
-
-```mermaid
-sequenceDiagram
-  participant Client as Agent Client/Payer
-  participant Merchant as Merchant Backend
-  participant MOS as Merchant OS API
-  participant Fac as Facilitator
-  participant Console as Merchant Console
-
-  Console->>MOS: Create API key, webhook, product
-  Merchant->>MOS: Resolve requirements (apiId/method/path)
-  Client->>Merchant: Request protected endpoint
-  Merchant-->>Client: 402 Payment Required + requirements
-  Client->>Merchant: Retry with payment payload
-  Merchant->>Fac: Verify + settle (via middleware abstraction)
-  Fac->>MOS: Settlement lifecycle events (platform-to-platform)
-  MOS-->>Console: Updated balances/settlements timeline
-  MOS-->>Merchant: Webhook events
-```
-
-## 5) Backend Integration (Recommended Prototype Path)
-
-Current fastest path is to use the payment guard adapter.
-
-Minimal Express integration shape:
+Example route wiring:
 
 ```ts
-import express from "express";
-import { createMerchantOsPaymentGuard } from "./services/merchantOsPaymentGuard.js";
+import { createRailbridgeFromEnv } from "@railbridgeai/merchant-sdk";
 
-const app = express();
-app.use(express.json());
+const rb = createRailbridgeFromEnv(process.env);
 
-const paymentGuard = await createMerchantOsPaymentGuard({
-  facilitatorUrl: process.env.RB_ENV === "live" ? "https://facilitator.railbridge.xyz" : "http://localhost:4022",
-  merchantOsApiUrl: process.env.RB_ENV === "live" ? "https://api.railbridge.xyz" : "http://localhost:4030",
-  merchantApiKey: process.env.RB_API_KEY,
-  route: { method: "GET", path: "/api/premium" },
-  paywallTestnet: process.env.RB_ENV !== "live"
-});
-
-app.use(paymentGuard.middleware);
-
-app.get("/api/premium", (_req, res) => {
-  res.json({ ok: true, message: "Paid route access granted" });
-});
-
-app.listen(4021);
+await rb.protectExpress(
+  app,
+  {
+    apiId: "premium_report_v1",
+    method: "GET",
+    path: "/api/premium-report",
+  },
+  async (_req, res) => {
+    const report = await buildPremiumReport();
+    return res.json(report);
+  },
+);
 ```
 
-Reference implementation:
+In short:
+1. RailBridge gate decides "paid or not paid".
+2. Your handler only does business work.
 
-1. `facilitator/src/merchant-server-merchant-os-demo.ts`
-2. `facilitator/src/services/merchantOsPaymentGuard.ts`
+## 3) Do I Need the RailBridge Repo?
 
-## 6) Product Defaults (Simplicity-First)
+No.
 
-If merchant omits advanced fields:
+You integrate through the SDK and hosted endpoints.
 
-1. `sourceNetwork` defaults to `any`
-2. `settlementMode` defaults to `cross_chain`
-3. destination network falls back to treasury policy
+Recommended:
+1. `npm install @railbridgeai/merchant-sdk`
+2. Configure `RB_API_KEY`.
+3. Set `RB_ENV` to `local`, `testnet`, or `live`.
+4. Use `createRailbridgeFromEnv(...).protectExpress(...)` on paid routes.
+5. Use `client.webhooks.express(...)` for webhook verification.
 
-This means merchant can accept USDC from supported chains without choosing source/destination manually.
+Public SDK:
+1. `npm install @railbridgeai/merchant-sdk`
+2. No registry auth is required for installation.
 
-## 7) Webhook Contract
+Minimum inputs for the most minimal paid-route integration:
+1. `RB_API_KEY` (merchant runtime key).
+2. `RB_ENV` (`local`, `testnet`, or `live`).
+3. `RB_WEBHOOK_SECRET` only if you are verifying webhook signatures.
 
-Merchant should expose an HTTPS `POST` endpoint such as:
+Additional inputs only if you call runtime/reporting APIs directly:
+1. `merchantId` from onboarding or session responses.
 
-1. `https://api.yourcompany.com/webhooks/railbridge`
+Advanced overrides only:
+1. `RB_MERCHANT_OS_URL`
+2. `RB_FACILITATOR_URL`
 
-Headers:
+## 4) Merchant-Facing API Contract (What You Depend On)
 
-1. `x-railbridge-event`
-2. `x-railbridge-event-id`
-3. `x-railbridge-timestamp`
-4. `x-railbridge-signature`
+Public merchant-facing endpoints:
+1. `POST /v1/sdk/requirements/resolve` with `x-railbridge-api-key`.
+2. Runtime APIs (`/v1/merchants/{merchantId}/*`) with `x-railbridge-api-key`.
+3. Onboarding/session APIs with `Authorization: Bearer <sessionToken>`.
 
-Signature model:
+Do not depend on internal endpoints in merchant code:
+1. `/v1/internal/*`
 
-1. `HMAC_SHA256(signingSecret, timestamp + "." + rawBody)`
+Do not hand-code facilitator settlement logic in business handlers.
+
+### 4.1 SDK-first route protection example
+
+```ts
+import { createRailbridgeFromEnv } from "@railbridgeai/merchant-sdk";
+
+const rb = createRailbridgeFromEnv(process.env);
+
+await rb.protectExpress(
+  app,
+  {
+    apiId: "premium_api",
+    method: "GET",
+    path: "/api/premium",
+  },
+  premiumBusinessHandler,
+);
+```
+
+Note:
+1. RailBridge does not inject `req.user` for your application.
+2. If your app already has auth/session middleware that sets `req.user`, you can keep using it inside your business handler.
+
+## 5) Integration Flow (Simple)
+
+1. Merchant creates a product in Merchant OS:
+   - `apiId`, `method`, `path`, `amountUsdc`.
+2. Merchant backend mounts payment gate middleware before the protected route.
+3. Unpaid request returns `402 Payment Required` automatically.
+4. Client/agent retries with payment proof.
+5. Middleware verifies/settles, then your handler runs.
+6. RailBridge sends async events to your webhook.
+
+## 6) Product Setup Defaults (UX-Friendly)
+
+For fastest integration, omit advanced routing fields initially.
+
+If omitted:
+1. `sourceNetwork` defaults to `any`.
+2. `settlementMode` defaults to `cross_chain`.
+3. Destination behavior follows policy fallback.
+
+This lets merchants launch quickly without chain-by-chain config.
+
+## 7) Minimal Adapter Responsibilities (If You Want Customization)
+
+The SDK already handles these defaults. If you still build a custom adapter, keep it minimal:
+1. Resolve route requirements from `POST /v1/sdk/requirements/resolve`.
+2. Feed those requirements into your payment middleware.
+3. Cache/refresh requirements periodically (for updated product config).
+
+Everything else stays outside your business handlers.
+
+## 8) Webhook Endpoint (Required for Good Ops UX)
+
+Create one HTTPS endpoint:
+1. `POST /webhooks/railbridge`
+
+Verify signature using:
+1. `x-railbridge-timestamp`
+2. `x-railbridge-signature`
+3. `HMAC_SHA256(secret, timestamp + "." + rawBody)`
+
+Return `200` quickly, process async.
 
 Expected events:
-
 1. `payment.settled_source`
 2. `payment.bridge_pending`
 3. `payment.bridge_confirmed`
@@ -153,92 +170,50 @@ Expected events:
 6. `payout.failed`
 7. `webhook.test`
 
-## 8) Agent Task Packet (Machine-Readable)
+## 9) Environment Variables (Merchant Backend)
 
-```yaml
-railbridge_integration_task:
-  version: "2026-05-20"
-  objective: "Integrate RailBridge paid-route acceptance with webhook handling."
-  assumptions:
-    - "Merchant knows HTTP backend development."
-    - "Merchant should not handle blockchain routing logic."
-  required_inputs:
-    - "RB_API_KEY"
-    - "MERCHANT_ID"
-    - "At least one paid product (apiId+method+path+amountUsdc)"
-    - "Webhook URL"
-  do_not_use:
-    - "/v1/internal/*"
-    - "Direct facilitator /verify or /settle calls in merchant code"
-  implementation_steps:
-    - "Mount payment middleware/guard before protected route handlers."
-    - "Protect at least one route (for example GET /api/premium)."
-    - "Return 200 from webhook handler quickly after signature verification."
-  verification:
-    - "GET protected route without payment returns 402."
-    - "Merchant OS settlements API shows lifecycle items."
-    - "Webhook test event reaches merchant webhook endpoint."
-  done_when:
-    - "Paid route works end-to-end."
-    - "Webhook signatures verify successfully."
-    - "Console shows non-empty settlement timeline."
+```env
+RB_API_KEY=rb_live_or_testnet_key
+RB_ENV=testnet
+RB_WEBHOOK_SECRET=whsec_xxx
+RB_SETTLEMENT_MODE_OVERRIDE=
+RB_MAX_REQUIREMENT_OPTIONS=16
 ```
 
-## 9) Copy-Paste Prompt For Codex/Claude
+Advanced overrides only:
 
-Use this prompt in merchant codebase:
-
-```text
-Integrate RailBridge paid-route support in this backend using the existing app framework.
-
-Constraints:
-1) Do not call internal RailBridge endpoints (/v1/internal/*).
-2) Do not implement direct facilitator /verify or /settle calls manually.
-3) Keep blockchain details abstracted from business handlers.
-4) Add one protected route GET /api/premium priced by existing Merchant OS product config.
-5) Add webhook endpoint /webhooks/railbridge with signature verification:
-   signature = HMAC_SHA256(secret, timestamp + "." + rawBody)
-6) Return quick 200 on successful webhook verification.
-
-Environment inputs:
-- RB_ENV=sandbox|live
-- RB_API_KEY=<merchant api key>
-- RB_WEBHOOK_SECRET=<webhook signing secret>
-
-Acceptance tests:
-1) curl -i GET protected route returns 402 when unpaid.
-2) Health route returns 200.
-3) Webhook test event returns 200 and logs event id/type.
-4) Integration code includes a short README section with run commands.
+```env
+RB_MERCHANT_OS_URL=https://api.testnet.railbridge.ai
+RB_FACILITATOR_URL=https://facilitator.testnet.railbridge.ai
 ```
 
-## 10) Verification Checklist
+Notes:
+1. Keep secrets in your own secret manager.
+2. `RB_SETTLEMENT_MODE_OVERRIDE` is optional (`same_chain` or `cross_chain`).
+3. `RB_MAX_REQUIREMENT_OPTIONS` is optional and caps how many payment options are returned in one challenge.
+4. `RB_MERCHANT_OS_URL` and `RB_FACILITATOR_URL` are optional overrides, not normal merchant requirements.
 
-Run these checks:
+## 10) Acceptance Checklist (Merchant POV)
 
-1. Protected route challenge:
-   - `curl -i http://localhost:4021/api/premium`
-   - Expect `HTTP/1.1 402 Payment Required`
-2. Merchant backend health:
-   - `curl -s http://localhost:4021/health`
-3. Merchant OS health:
-   - `curl -s http://localhost:4030/health`
-4. Product exists:
-   - `curl -s -H "x-railbridge-api-key: <API_KEY>" http://localhost:4030/v1/merchants/<MERCHANT_ID>/products`
-5. Webhook delivery test:
-   - `POST /v1/onboarding/webhooks/test` with session token
-6. Settlement timeline:
-   - `curl -s -H "x-railbridge-api-key: <API_KEY>" http://localhost:4030/v1/merchants/<MERCHANT_ID>/settlements`
+1. `GET protected route` without payment returns `402`.
+2. Paid retry returns `200` and your business payload.
+3. Merchant OS timeline shows settlement lifecycle.
+4. Webhook test event is received and signature-verified.
+5. Your business logic file has zero payment-specific code.
 
-## 11) Common Failure Modes
+## 11) Common Mistakes
 
-1. `401 Invalid credentials` on login:
-   - wrong email/password or DB reset without reseeding user
-2. `401 Unauthorized` on merchant runtime APIs:
-   - missing or revoked API key
-3. `source network wallet not found`:
-   - product pins network with no wallet profile
-4. `cannot revoke the last active API key`:
-   - create a replacement key first
-5. webhook signature invalid:
-   - handler parsed JSON before signature verification instead of using raw body
+1. Putting payment verification logic inside business services.
+2. Calling internal RailBridge endpoints from merchant backend.
+3. Parsing JSON before webhook signature check (must verify raw body).
+4. Treating webhook as optional in production operations.
+5. Hardcoding route price in code instead of using Merchant OS product config.
+
+## 12) Practical Answer: "SDK or not?"
+
+Use SDK-first.
+
+Meaning:
+1. Merchant code should depend on `@railbridgeai/merchant-sdk`, not raw endpoint orchestration.
+2. SDK hides requirement resolution and verify/settle wiring.
+3. HTTP contract remains the underlying platform contract, but merchant teams should not need to hand-wire it.

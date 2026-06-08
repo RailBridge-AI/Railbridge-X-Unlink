@@ -157,37 +157,49 @@ Supported lifecycle actions:
 
 ## 7) Merchant Backend Integration Flow
 
-### Current prototype wiring (simplified)
+### Current merchant-facing SDK wiring (simplified)
 
-SDK helpers currently available:
+Current public SDK surface:
 
-1. `protectRoute(...)`
-2. `resolveRequirements(...)`
-3. `verifyWebhook(...)`
-4. `getOnboardingStatus(...)`
+1. `createRailbridge(...)`
+2. `createRailbridgeFromEnv(...)`
+3. `client.protect(...)`
+4. `client.protectExpress(...)`
+5. `client.webhooks.verify(...)`
+6. `client.webhooks.express(...)`
+7. `client.getOnboardingStatus(...)`
 
-For local prototype/demo, use the platform-managed adapter:
+Canonical merchant package:
 
-1. `facilitator/src/services/merchantOsPaymentGuard.ts`
-2. `facilitator/src/merchant-server-merchant-os-demo.ts`
+1. `@railbridgeai/merchant-sdk`
+2. `packages/server-sdk/`
+
+For local demo/reference:
+
+1. `facilitator/src/merchant-server-merchant-os-demo.ts`
+2. `facilitator/src/merchant-server-merchant-os-testnet.ts`
 
 Merchant-facing integration shape:
 
 ```js
-const paymentGuard = await createMerchantOsPaymentGuard({
-  facilitatorUrl,
-  merchantOsApiUrl,
-  merchantApiKey: process.env.RB_API_KEY,
-  route: { method: "GET", path: "/api/premium" }
-});
+import { createRailbridgeFromEnv } from "@railbridgeai/merchant-sdk";
 
-app.use(paymentGuard.middleware);
-app.get("/api/premium", handler);
+const rb = createRailbridgeFromEnv(process.env);
+
+await rb.protectExpress(
+  app,
+  {
+    apiId: "premium_api",
+    method: "GET",
+    path: "/api/premium"
+  },
+  handler
+);
 ```
 
-Prototype note:
+Current note:
 
-1. The adapter resolves requirements via merchant API key.
+1. The SDK resolves requirements via merchant API key.
 2. Merchant code does not need internal tokens or tenant IDs.
 3. Verify/settle stays abstracted in middleware.
 
@@ -238,7 +250,7 @@ Express example:
 
 ```js
 import express from "express";
-import { verifyWebhook } from "@railbridge/sdk";
+import { verifyWebhook } from "@railbridgeai/merchant-sdk";
 
 const app = express();
 app.use("/webhooks/railbridge", express.text({ type: "application/json" }));
@@ -341,6 +353,6 @@ Current prototype keeps this abstraction boundary, while full external MPC backe
 ## 13) Recommended Next Hardening
 
 1. Expose requirements resolution as merchant-public API contract.
-2. Publish/version `@railbridge/sdk` package.
+2. Publish/version `@railbridgeai/merchant-sdk` package.
 3. Add webhook retry policy + dead-letter strategy.
 4. Move payout execution to durable worker model.

@@ -1,6 +1,6 @@
 import express from "express";
 import { loadFacilitatorEnv } from "./load-env.js";
-import { createMerchantOsPaymentGuard } from "./services/merchantOsPaymentGuard.js";
+import { createRailbridgeFromEnv } from "@railbridgeai/merchant-sdk";
 
 loadFacilitatorEnv();
 
@@ -9,31 +9,16 @@ const RB_API_ID = String(process.env.RB_API_ID || "").trim();
 const RB_SETTLEMENT_MODE_OVERRIDE = String(process.env.RB_SETTLEMENT_MODE_OVERRIDE || "")
   .trim()
   .toLowerCase();
-const RB_FACILITATOR_URL = String(
-  process.env.RB_FACILITATOR_URL || "https://facilitator.testnet.railbridge.ai"
-).trim();
-const RB_MERCHANT_OS_API_URL = String(
-  process.env.RB_MERCHANT_OS_API_URL || "https://api.testnet.railbridge.ai"
-).trim();
-const RB_MAX_PAYMENT_OPTIONS = Number.parseInt(process.env.RB_MAX_PAYMENT_OPTIONS || "32", 10);
+const RB_MAX_REQUIREMENT_OPTIONS = Number.parseInt(
+  process.env.RB_MAX_REQUIREMENT_OPTIONS || process.env.RB_MAX_PAYMENT_OPTIONS || "32",
+  10,
+);
 const MERCHANT_PORT = Number.parseInt(process.env.PORT || "4021", 10);
 const PROTECTED_ROUTE_METHOD = "GET";
 const PROTECTED_ROUTE_PATH = "/api/premium";
 
-const isHttpUrl = (value: string) => /^https?:\/\//.test(value);
-
 if (!RB_API_KEY) {
   console.error("RB_API_KEY is required");
-  process.exit(1);
-}
-
-if (!isHttpUrl(RB_FACILITATOR_URL)) {
-  console.error("RB_FACILITATOR_URL must be a valid http(s) URL");
-  process.exit(1);
-}
-
-if (!isHttpUrl(RB_MERCHANT_OS_API_URL)) {
-  console.error("RB_MERCHANT_OS_API_URL must be a valid http(s) URL");
   process.exit(1);
 }
 
@@ -49,57 +34,67 @@ if (
 const app = express();
 app.use(express.json());
 
-const registerRouteHandler = ({ method, path }: { method: string; path: string }) => {
-  const handler = (_req: express.Request, res: express.Response) => {
-    res.json({
-      message: "You successfully paid for this RailBridge-protected endpoint.",
-      route: `${method} ${path}`,
-      timestamp: Date.now()
-    });
-  };
-
-  const normalizedMethod = method.toLowerCase();
-  if (typeof (app as any)[normalizedMethod] === "function") {
-    (app as any)[normalizedMethod](path, handler);
-    return;
-  }
-
-  app.all(path, handler);
-};
-
 const start = async () => {
-  const paymentGuard = await createMerchantOsPaymentGuard({
-    facilitatorUrl: RB_FACILITATOR_URL,
-    merchantOsApiUrl: RB_MERCHANT_OS_API_URL,
-    merchantApiKey: RB_API_KEY,
-    route: {
-      method: PROTECTED_ROUTE_METHOD,
-      path: PROTECTED_ROUTE_PATH
-    },
-    apiId: RB_API_ID || undefined,
-    settlementModeOverride: RB_SETTLEMENT_MODE_OVERRIDE
-      ? (RB_SETTLEMENT_MODE_OVERRIDE as "same_chain" | "cross_chain")
-      : undefined,
-    paywallAppName: "RailBridge Merchant OS Testnet Demo Merchant",
-    paywallTestnet: true,
-    sourceNetworkFilter: "testnet_only",
-    autoRefreshMs: 30_000,
-    maxRequirementOptions: Number.isFinite(RB_MAX_PAYMENT_OPTIONS)
-      ? RB_MAX_PAYMENT_OPTIONS
+  const rb = createRailbridgeFromEnv(process.env, {
+    apiKey: RB_API_KEY,
+    environment: "testnet",
+    maxRequirementOptions: Number.isFinite(RB_MAX_REQUIREMENT_OPTIONS)
+      ? RB_MAX_REQUIREMENT_OPTIONS
       : 32,
-    logPrefix: "[merchant-os-testnet-demo]"
+    logPrefix: "[merchant-os-testnet-demo]",
+    paywallAppName: "RailBridge Merchant OS Testnet Demo Merchant",
   });
 
-  app.use(paymentGuard.middleware);
+  const paymentGuard = await rb.protectExpress(
+    app,
+    {
+      method: PROTECTED_ROUTE_METHOD,
+      path: PROTECTED_ROUTE_PATH,
+      apiId: RB_API_ID || undefined,
+      settlementModeOverride: RB_SETTLEMENT_MODE_OVERRIDE
+        ? (RB_SETTLEMENT_MODE_OVERRIDE as "same_chain" | "cross_chain")
+        : undefined,
+      autoRefreshMs: 30_000,
+      maxRequirementOptions: Number.isFinite(RB_MAX_REQUIREMENT_OPTIONS)
+        ? RB_MAX_REQUIREMENT_OPTIONS
+        : 32,
+      logPrefix: "[merchant-os-testnet-demo]",
+    },
+    (_req: express.Request, res: express.Response) => {
+      /*
+      // Example merchant business logic (replace with your real implementation):
+      const customerId = _req.header("x-customer-id");
+      const hasEntitlement = await entitlementService.canAccessPremiumApi(customerId);
+      if (!hasEntitlement) {
+        return res.status(403).json({ error: "premium entitlement required" });
+      }
 
-  registerRouteHandler({
-    method: paymentGuard.routeMethod,
-    path: paymentGuard.routePath
-  });
+      const report = await premiumReportService.generate({
+        customerId,
+        requestedAt: Date.now(),
+      });
+
+      await analyticsService.trackPremiumApiUsage({
+        customerId,
+        route: PROTECTED_ROUTE_PATH,
+        paid: true,
+      });
+
+      return res.json(report);
+      */
+
+      res.json({
+        message: "You successfully paid for this RailBridge-protected endpoint.",
+        route: `${PROTECTED_ROUTE_METHOD} ${PROTECTED_ROUTE_PATH}`,
+        timestamp: Date.now(),
+        note: "Replace this demo response with your real business logic in this handler.",
+      });
+    },
+  );
 
   app.post("/internal/reload-routes", async (_req, res) => {
     try {
-      const routeInfo = await paymentGuard.refreshRequirements();
+      const routeInfo = await paymentGuard.refreshRequirements?.();
       return res.json({ success: true, routeInfo });
     } catch (error) {
       return res.status(500).json({
@@ -112,29 +107,31 @@ const start = async () => {
   app.get("/health", (_req, res) => {
     res.json({
       status: "ok",
-      route: `${paymentGuard.routeMethod} ${paymentGuard.routePath}`,
-      requirements: paymentGuard.getCurrentRouteInfo()
+      route: `${paymentGuard.routeMethod || PROTECTED_ROUTE_METHOD} ${paymentGuard.routePath || PROTECTED_ROUTE_PATH}`,
+      requirements: paymentGuard.getCurrentRouteInfo?.()
     });
   });
 
   app.listen(MERCHANT_PORT, () => {
     console.log(`Merchant OS testnet demo merchant server listening at http://localhost:${MERCHANT_PORT}`);
-    console.log(`Facilitator URL: ${RB_FACILITATOR_URL}`);
-    console.log(`Merchant OS API URL: ${RB_MERCHANT_OS_API_URL}`);
-    console.log(`Protected route: ${paymentGuard.routeMethod} ${paymentGuard.routePath}`);
+    console.log(`Facilitator URL: ${rb.facilitatorUrl}`);
+    console.log(`Merchant OS API URL: ${rb.merchantOsUrl}`);
+    console.log(
+      `Protected route: ${paymentGuard.routeMethod || PROTECTED_ROUTE_METHOD} ${paymentGuard.routePath || PROTECTED_ROUTE_PATH}`
+    );
     console.log(
       `Settlement mode override: ${
         RB_SETTLEMENT_MODE_OVERRIDE || "auto (use product settlement policy)"
       }`
     );
     console.log(
-      `Max payment options per challenge: ${Number.isFinite(RB_MAX_PAYMENT_OPTIONS) ? RB_MAX_PAYMENT_OPTIONS : 32}`
+      `Max payment options per challenge: ${Number.isFinite(RB_MAX_REQUIREMENT_OPTIONS) ? RB_MAX_REQUIREMENT_OPTIONS : 32}`
     );
-    console.log("Source network filter: testnet_only");
-    console.log("Integration mode: external merchant via public RailBridge testnet URLs");
+    console.log("Source network filter: testnet_only (default for environment=testnet)");
+    console.log("Integration mode: hosted RailBridge testnet defaults with optional URL overrides");
   });
 
-  paymentGuard.startAutoRefresh();
+  paymentGuard.startAutoRefresh?.();
 };
 
 start().catch((error) => {

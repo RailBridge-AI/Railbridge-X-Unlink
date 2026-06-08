@@ -1,1 +1,3 @@
 .DS_Store
+/packages/node_modules
+/packages/server-sdk/node_modules
