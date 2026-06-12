@@ -1,0 +1,53 @@
+{
+  "name": "@railbridgeai/merchant-sdk",
+  "version": "0.1.0",
+  "private": false,
+  "type": "module",
+  "description": "RailBridge SDK for merchant API protection and webhook verification",
+  "scripts": {
+    "check": "node --check src/index.js && node --check src/paymentGuard.js && node --check src/webhooks.js",
+    "test": "node --test \"tests/**/*.test.js\"",
+    "pack:dry-run": "npm pack --dry-run",
+    "publish:public:dry-run": "npm publish --access public --dry-run"
+  },
+  "files": [
+    "src",
+    "README.md"
+  ],
+  "main": "./src/index.js",
+  "types": "./src/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./src/index.d.ts",
+      "default": "./src/index.js"
+    }
+  },
+  "publishConfig": {
+    "access": "public",
+    "registry": "https://registry.npmjs.org/"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/MarcoBrian/RailBridge.git",
+    "directory": "packages/server-sdk"
+  },
+  "bugs": {
+    "url": "https://github.com/MarcoBrian/RailBridge/issues"
+  },
+  "homepage": "https://github.com/MarcoBrian/RailBridge/tree/testnet/packages/server-sdk",
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "@x402/core": "^2.12.0",
+    "@x402/evm": "^2.12.0",
+    "@x402/express": "^2.12.0"
+  },
+  "keywords": [
+    "railbridge",
+    "x402",
+    "merchant",
+    "sdk"
+  ],
+  "license": "MIT"
+}

@@ -1,38 +1,49 @@
-# @railbridge/sdk (Prototype)
+# RailBridge SDK Prototype Notes
 
-Lightweight helpers used in the current Merchant OS integration flow.
+Last reviewed: 2026-06-08
 
-## Exposed Helpers
+This folder contains internal prototype helper functions used by older RailBridge demos.
 
-1. `protectRoute(...)`
-2. `resolveRequirements(...)`
-3. `verifyWebhook(...)`
-4. `getOnboardingStatus(...)`
+Canonical merchant integration package (thin SDK) now lives at:
+1. `packages/server-sdk/`
 
-## Integration Intent
+## Important Status
 
-Merchants use these helpers to:
+This SDK directory is a prototype reference in this repository.
 
-1. Describe paid routes (`protectRoute`).
-2. Resolve payment requirements for a route (`resolveRequirements`).
-3. Verify webhook signatures (`verifyWebhook`).
-4. Read onboarding checklist state (`getOnboardingStatus`).
+If you are an external merchant, use the thin SDK package:
+1. `@railbridgeai/merchant-sdk` (`packages/server-sdk/`)
 
-## Requirement Resolution Contract
+## Important Clarification
 
-`resolveRequirements(...)` calls the merchant-facing endpoint:
+Do not treat the helpers in this folder as the public merchant SDK surface.
 
-1. `POST /v1/sdk/requirements/resolve`
-2. Auth via `x-railbridge-api-key`
-3. No merchant/account IDs or internal platform tokens required in merchant code
+External merchants should use `@railbridgeai/merchant-sdk`, whose current public surface is:
+1. `createRailbridge(...)`
+2. `createRailbridgeFromEnv(...)`
+3. `client.protect(...)`
+4. `client.protectExpress(...)`
+5. `client.webhooks.verify(...)`
+6. `client.webhooks.express(...)`
+7. `client.getOnboardingStatus(...)`
 
-## Example Import
+## Contract Guarantees To Depend On
+
+When building merchant integrations, depend on API contract stability, not repository internals.
+
+Recommended dependency surface:
+1. Merchant-facing HTTP endpoints.
+2. Stable headers (`x-railbridge-api-key`, webhook signature headers).
+3. Event types (`payment.*`, `payout.*`, `webhook.test`).
+
+## Example Import (SDK-first Merchant Integration)
 
 ```js
 import {
-  protectRoute,
-  resolveRequirements,
-  verifyWebhook,
-  getOnboardingStatus
-} from "@railbridge/sdk";
+  createRailbridgeFromEnv
+} from "@railbridgeai/merchant-sdk";
+
+const rb = createRailbridgeFromEnv(process.env);
 ```
+
+This `merchant-os/sdk` folder remains available only for internal reference and legacy prototype helpers.

@@ -1,137 +1,167 @@
 ## Client Quickstart (Buyers)
 
-This guide is for **clients / buyers** who want to integrate RailBridge x402 payments into their applications to pay protected merchant routes.
+Last reviewed: 2026-06-12
 
-### 1. Prerequisites
+This guide is for clients or buyers that need to pay a RailBridge-protected route.
 
-- Node.js 18+ and npm
-- Access to an EVM testnet RPC (for example, Base Sepolia)
-- A funded client wallet on the source chain (for example, Base Sepolia)
-- A merchant server that is already integrated with RailBridge x402
+Important: the Merchant SDK is server-side. Buyer integrations still use the x402 client stack directly:
 
-### 2. Install Client Packages
+- `@x402/core`
+- `@x402/evm`
+- `@x402/fetch`
+- `viem`
 
-In your project, install the required x402 client packages:
+The good news is that buyers still use the normal x402 `exact` flow. They do not need to understand Merchant OS, payout flows, or cross-chain routing internals.
+
+## 1) Prerequisites
+
+- Node.js 18+
+- A wallet private key for the paying account
+- RPC URLs for the networks you want to pay from
+- A merchant endpoint that is already protected by RailBridge
+
+If you are testing locally in this repo:
+
+- use `http://localhost:4025` when paying the SDK-first `merchant-sdk-minimal` example
+- use `http://localhost:4021` only if you are intentionally paying one of the older facilitator demo merchants
+
+## 2) Install Client Packages
+
+In your client project:
 
 ```bash
 npm install @x402/core @x402/evm @x402/fetch viem
 ```
 
-### 3. Configure Environment Variables
+## 3) Configure Environment Variables
 
-Set these environment variables in your environment (for example, `.env`):
+Example environment:
 
-```bash
-CLIENT_PRIVATE_KEY=0xYourClientPrivateKey
+```env
+CLIENT_PRIVATE_KEY=0xYourPrivateKeyHere
 CLIENT_RPC_OVERRIDES_JSON={"eip155:84532":"https://sepolia.base.org","eip155:421614":"https://arbitrum-sepolia-rpc.publicnode.com"}
 CLIENT_DEFAULT_RPC_URL=https://sepolia.base.org
-MERCHANT_URL=http://localhost:4021
+MERCHANT_URL=http://localhost:4025
 ```
 
-- `CLIENT_PRIVATE_KEY` - Private key for the client wallet (testnet)
-- `CLIENT_RPC_OVERRIDES_JSON` - per-network RPC map used for multi-chain payment options
-- `CLIENT_DEFAULT_RPC_URL` - optional fallback RPC if a network is missing from the map
-- `MERCHANT_URL` - Base URL of the merchant server you are paying
+Variable meanings:
 
-### 4. Basic Client Setup
+- `CLIENT_PRIVATE_KEY`: private key for the payer wallet
+- `CLIENT_RPC_OVERRIDES_JSON`: per-network RPC map for offered payment options
+- `CLIENT_DEFAULT_RPC_URL`: fallback RPC when a network is not present in the map
+- `MERCHANT_URL`: base URL of the merchant backend you are paying
 
-Create an x402 client that can pay EVM `exact` scheme requirements:
+Recommendation:
 
-```typescript
-import { x402Client } from "@x402/core/client";
-import { registerExactEvmScheme } from "@x402/evm/exact/client";
+1. Add explicit RPCs for every network the merchant is likely to offer.
+2. Do not rely on a single fallback RPC for a multi-network payment flow.
+
+## 4) Basic Client Setup
+
+This is the core pattern:
+
+```ts
 import { wrapFetchWithPayment } from "@x402/fetch";
+import { x402Client } from "@x402/core/client";
+import type { PaymentRequirements } from "@x402/core/types";
+import { registerExactEvmScheme } from "@x402/evm/exact/client";
 import { privateKeyToAccount } from "viem/accounts";
-import { createWalletClient, http } from "viem";
-import { baseSepolia } from "viem/chains";
 
-// Create signer from private key
+const merchantUrl = process.env.MERCHANT_URL || "http://localhost:4025";
 const signer = privateKeyToAccount(process.env.CLIENT_PRIVATE_KEY as `0x${string}`);
 
-const rpcByNetwork = JSON.parse(process.env.CLIENT_RPC_OVERRIDES_JSON || "{}");
-const resolveRpcUrl = (network: string) =>
-  rpcByNetwork[network] || process.env.CLIENT_DEFAULT_RPC_URL || "https://sepolia.base.org";
-const createClientForNetwork = (network: string) =>
-  createWalletClient({
-    account: signer,
-    chain: baseSepolia,
-    transport: http(resolveRpcUrl(network)),
-  });
-
-// Create x402 client
-const client = new x402Client();
-
-// Register EVM scheme - works for both same-chain and cross-chain
-registerExactEvmScheme(client, { signer });
-
-// Wrap fetch with payment handling
-const fetchWithPayment = wrapFetchWithPayment(fetch, client);
-```
-
-### 5. Making a Payment-Protected Request
-
-Use `fetchWithPayment` instead of `fetch` for routes that require payment:
-
-```typescript
-const merchantUrl = process.env.MERCHANT_URL || "http://localhost:4021";
-
-async function getPremiumContent() {
-  const response = await fetchWithPayment(`${merchantUrl}/api/premium`);
-
-  console.log("Status:", response.status);
-
-  if (response.ok) {
-    const data = await response.json();
-    console.log("Premium content:", data);
-  } else {
-    console.error("Request failed:", response.status, await response.text());
+const parseRpcOverrides = (raw: string) => {
+  if (!raw) return {} as Record<string, string>;
+  try {
+    const parsed = JSON.parse(raw) as Record<string, unknown>;
+    return Object.fromEntries(
+      Object.entries(parsed)
+        .filter(([network, url]) => /^eip155:[0-9]+$/.test(network) && typeof url === "string")
+        .map(([network, url]) => [network, String(url).trim()])
+        .filter(([, url]) => /^https?:\/\//.test(url)),
+    ) as Record<string, string>;
+  } catch {
+    return {} as Record<string, string>;
   }
-}
+};
 
-getPremiumContent().catch(console.error);
-```
+const rpcByNetwork = parseRpcOverrides(String(process.env.CLIENT_RPC_OVERRIDES_JSON || "").trim());
+const fallbackRpc = String(process.env.CLIENT_DEFAULT_RPC_URL || "").trim();
+const resolveRpcForNetwork = (network: string) => rpcByNetwork[network] || fallbackRpc;
 
-The client will:
-
-1. Receive a `402 Payment Required` response from the merchant.
-2. Read the x402 payment requirements from the `Payment-Required` header.
-3. Select a compatible `exact` EVM requirement.
-4. Construct and sign a `paymentPayload` using your wallet.
-5. Retry the request with the signed payment attached.
-
-### 6. Selecting Preferred Networks (Optional)
-
-If the merchant offers multiple networks, you can provide a custom network selector:
-
-```typescript
-import type { PaymentRequirements } from "@x402/core/types";
-import { x402Client } from "@x402/core/client";
+const preferredNetworks: Array<`${string}:${string}`> = [
+  "eip155:84532",
+  "eip155:421614",
+  "eip155:8453",
+  "eip155:1",
+  "eip155:137",
+];
 
 const networkSelector = (
   _x402Version: number,
   options: PaymentRequirements[],
 ): PaymentRequirements => {
-  const preferredNetworks = ["eip155:84532", "eip155:8453"]; // Base Sepolia, Base Mainnet
-
   for (const preferredNetwork of preferredNetworks) {
-    const match = options.find((opt) => opt.network === preferredNetwork);
+    const match = options.find(
+      (opt) => opt.network === preferredNetwork && Boolean(resolveRpcForNetwork(opt.network)),
+    );
     if (match) return match;
   }
 
-  // Fallback to first available option
+  const firstRpcBacked = options.find((opt) => Boolean(resolveRpcForNetwork(opt.network)));
+  if (firstRpcBacked) return firstRpcBacked;
+
   return options[0];
 };
 
 const client = new x402Client(networkSelector);
 registerExactEvmScheme(client, { signer });
+
+const fetchWithPayment = wrapFetchWithPayment(fetch, client);
 ```
 
-### 7. Reading Payment Receipts
+What this setup does:
 
-After a successful payment, the merchant returns a `PAYMENT-RESPONSE` header with settlement details:
+1. selects a preferred payment option when multiple networks are offered
+2. avoids picking a network that has no configured RPC when possible
+3. retries automatically after the initial `402 Payment Required`
 
-```typescript
-import { httpClient } from "@x402/core/http";
+## 5) Make a Paid Request
+
+Use `fetchWithPayment(...)` instead of raw `fetch(...)`:
+
+```ts
+async function getPremiumContent() {
+  const response = await fetchWithPayment(`${merchantUrl}/api/premium`, {
+    method: "GET",
+  });
+
+  if (!response.ok) {
+    console.error("Request failed:", response.status, await response.text());
+    return;
+  }
+
+  const data = await response.json();
+  console.log("Premium content:", data);
+}
+
+getPremiumContent().catch(console.error);
+```
+
+Behind the scenes:
+
+1. the first request returns `402 Payment Required`
+2. the client reads the payment options
+3. the client selects an `exact` EVM requirement
+4. the client signs the payment payload
+5. the client retries the request with payment attached
+
+## 6) Read the Payment Receipt
+
+After a successful payment, the merchant returns settlement data in response headers.
+
+```ts
+import { x402HTTPClient } from "@x402/core/client";
 
 async function getPremiumContentWithReceipt() {
   const response = await fetchWithPayment(`${merchantUrl}/api/premium`);
@@ -141,14 +171,16 @@ async function getPremiumContentWithReceipt() {
     return;
   }
 
-  try {
-    const receipt = httpClient.getPaymentSettleResponse(response);
-    console.log("Payment successful");
+  const httpClient = new x402HTTPClient(client);
+  const receipt = httpClient.getPaymentSettleResponse(
+    (name) => response.headers.get(name),
+  );
+
+  if (receipt) {
     console.log("Transaction:", receipt.transaction);
     console.log("Network:", receipt.network);
+    console.log("Success:", receipt.success);
     console.log("Payer:", receipt.payer);
-  } catch (error) {
-    console.warn("Could not extract payment receipt:", error);
   }
 
   const data = await response.json();
@@ -156,35 +188,115 @@ async function getPremiumContentWithReceipt() {
 }
 ```
 
-### 8. Cross-Chain Transparency
-
 For cross-chain payments:
 
-- The client only sees `scheme: "exact"` and a source `network` (for example, `eip155:84532`).
-- The cross-chain details are encoded in extensions and handled by the merchant and facilitator.
-- The client does not need any cross-chain-specific logic; it simply pays the requirement it selects.
+1. the receipt transaction is still the source-chain settlement transaction
+2. any bridge step happens asynchronously after settlement
 
-### 9. Error Handling
+## 7) Cross-Chain Still Looks Normal to the Buyer
 
-Common client-side issues:
+When a merchant uses cross-chain settlement:
 
-- **402 Payment Required loops**:
-  - Ensure the client is correctly registered with `registerExactEvmScheme`.
-  - Confirm the client supports the network and asset advertised by the merchant.
+- the client still sees a normal `exact` payment option on the source network
+- the client still signs a normal payment payload
+- the facilitator handles routing and any bridge behavior after settlement
 
-- **Signature or gas errors**:
-  - Check that `CLIENT_PRIVATE_KEY` and `CLIENT_RPC_OVERRIDES_JSON` are correct.
-  - Ensure the client wallet has enough funds for gas and the payment amount.
+The buyer does not need separate cross-chain logic.
 
-### 10. Next Steps
+## 8) Important USDC Domain Note
 
-- Review the example client in this repository: `src/client-example.ts`.
-- Add UI around the payment flow (for example, showing progress, errors, and receipts).
-- Integrate with your application's routing and state management.
+The simple `registerExactEvmScheme(client, { signer })` path is still a good starting point.
 
+However, the runnable repo example in [client-example.ts](src/client-example.ts) now uses a domain-aware exact scheme helper from [exact-evm-domain.ts](src/schemes/exact-evm-domain.ts).
 
+Why:
 
+1. some USDC routes include extra EIP-712 domain metadata
+2. some networks need custom domain fields beyond the simplest exact-EVM client path
+3. the domain-aware helper avoids a class of signature failures that show up as `invalid_payment`
 
+If you are working inside this repo, follow the runnable client example.
 
+If you are integrating outside this repo and hit domain/signature issues on USDC routes:
 
+1. compare your client against `facilitator/src/client-example.ts`
+2. mirror the logic in `facilitator/src/schemes/exact-evm-domain.ts`
 
+## 9) Local Repo Flow
+
+If you want a current end-to-end local test using the SDK-first merchant path:
+
+### 9.1 Start local services
+
+From the repo root:
+
+```bash
+npm --prefix merchant-os install
+npm --prefix facilitator install
+```
+
+In separate terminals:
+
+```bash
+npm --prefix merchant-os run start:api
+```
+
+```bash
+npm --prefix facilitator run dev
+```
+
+### 9.2 Start the local SDK merchant example
+
+From `examples/merchant-sdk-minimal`:
+
+```bash
+cp .env.example .env
+npm install
+npm run bootstrap:local
+npm start
+```
+
+This starts the protected merchant route on `http://localhost:4025`.
+
+### 9.3 Point the client at that merchant
+
+In `facilitator/.env` or your client environment:
+
+```env
+MERCHANT_URL=http://localhost:4025
+CLIENT_PRIVATE_KEY=0xYourPrivateKeyHere
+CLIENT_RPC_OVERRIDES_JSON={"eip155:84532":"https://sepolia.base.org"}
+CLIENT_DEFAULT_RPC_URL=https://sepolia.base.org
+```
+
+### 9.4 Run the runnable client example
+
+From the repo root:
+
+```bash
+npm --prefix facilitator run example:client
+```
+
+## 10) Troubleshooting
+
+Common failures and what to check:
+
+- `402 Payment Required` loop:
+  - confirm `registerExactEvmScheme(...)` or your domain-aware exact client is registered
+  - confirm the merchant offered at least one network your client can actually pay on
+- no compatible network works:
+  - check `CLIENT_RPC_OVERRIDES_JSON`
+  - make sure you have RPC coverage for the offered networks
+- `invalid_payment`:
+  - check domain metadata, signer setup, and USDC EIP-712 handling
+  - compare against `src/client-example.ts`
+- insufficient funds:
+  - make sure the payer wallet has enough USDC and native gas
+- settlement still fails after signing:
+  - the facilitator relayer may be missing gas on the selected source network
+
+## 11) Next Steps
+
+- Review the runnable client example: [client-example.ts](src/client-example.ts)
+- Review supported networks and USDC addresses: [SUPPORTED_NETWORKS.md](documentation/SUPPORTED_NETWORKS.md)
+- Review the merchant-side integration path: [quickstart.md](quickstart.md)

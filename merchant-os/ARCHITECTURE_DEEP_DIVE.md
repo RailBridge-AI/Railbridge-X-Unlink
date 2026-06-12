@@ -93,7 +93,7 @@ flowchart LR
 | Bridge durability layer | Persist bridge jobs + retry processing across restarts | `facilitator/src/services/bridgeJobStore.ts`, `facilitator/src/services/bridgeJobWorker.ts` |
 | Facilitator bridge execution | Run Circle CCTP bridge for queued jobs | `facilitator/src/services/circleCCTPBridgeService.ts` |
 | Event publisher | Push settlement lifecycle events into Merchant OS ingest endpoint | `facilitator/src/services/merchantOsPublisher.ts` |
-| Merchant integration SDK | `protectRoute`, `resolveRequirements`, `verifyWebhook`, `getOnboardingStatus` | `merchant-os/sdk/index.js` |
+| Merchant integration SDK | `createRailbridge`, `createRailbridgeFromEnv`, `protect` / `protectExpress`, webhook helpers | `packages/server-sdk/` |
 
 ## 4) Runtime Boundaries and Trust Zones
 
@@ -172,7 +172,7 @@ sequenceDiagram
   participant Agent as Agent Client
   participant Fac as Facilitator
 
-  Backend->>Adapter: mount protectRoute middleware once
+  Backend->>Adapter: mount protectExpress/protect middleware once
   Adapter->>MOS: requirements resolve (platform-managed)
   MOS-->>Adapter: requirement + optional crossChain
   Adapter-->>Backend: paid route guard ready
@@ -441,4 +441,5 @@ Frontend:
 
 SDK:
 
-1. `merchant-os/sdk/index.js`
+1. `packages/server-sdk/src/index.js`
+2. `packages/server-sdk/README.md`

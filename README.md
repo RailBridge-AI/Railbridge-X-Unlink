@@ -164,6 +164,8 @@ Notes:
 ## Additional Documentation
 
 - Merchant OS guide: `merchant-os/README.md`
+- SDK-first merchant integration guide: `merchant-os/AGENT_INTEGRATION_GUIDE.md`
+- Thin SDK package: `packages/server-sdk/README.md`
 - Facilitator guide: `facilitator/README.md`
 - Testnet deploy guide: `deploy/testnet/README.md`
 - Merchant OS runtime config guide: `merchant-os/config/README.md`

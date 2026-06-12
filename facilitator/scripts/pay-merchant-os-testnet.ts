@@ -15,9 +15,13 @@ dotenv.config({ path: join(__dirname, "..", ".env") });
 
 type MerchantLogin = {
   token: string;
-  apiKey: string;
+  apiKey?: string;
   merchantId: string;
   accountId: string;
+};
+
+type CreatedApiKey = {
+  token: string;
 };
 
 type MerchantProduct = {
@@ -158,6 +162,29 @@ const ensureMerchantLogin = async (): Promise<MerchantLogin> => {
     },
   });
   return onboard.data;
+};
+
+const ensureMerchantApiKey = async (merchant: MerchantLogin): Promise<string> => {
+  const existingApiKey = String(merchant.apiKey || "").trim();
+  if (existingApiKey) {
+    return existingApiKey;
+  }
+
+  const created = await requestJson<CreatedApiKey>({
+    method: "POST",
+    url: `${cfg.merchantOsUrl}/v1/onboarding/api-keys`,
+    headers: {
+      authorization: `Bearer ${merchant.token}`,
+    },
+    body: {
+      name: `Smoke Test API Key ${new Date().toISOString()}`,
+      role: "admin",
+    },
+  });
+
+  const apiKey = String(created.data.token || "").trim();
+  assertRequired(apiKey, "created api key token");
+  return apiKey;
 };
 
 const findExistingProduct = (items: MerchantProduct[]) =>
@@ -365,8 +392,12 @@ const main = async () => {
   await waitForHealth(cfg.facilitatorUrl, 15_000);
 
   const merchant = await ensureMerchantLogin();
-  const product = await ensurePaidProduct(merchant);
-  const beforeIds = await getSettlementIds(merchant.merchantId, merchant.apiKey);
+  const merchantApiKey = await ensureMerchantApiKey(merchant);
+  const product = await ensurePaidProduct({
+    ...merchant,
+    apiKey: merchantApiKey,
+  });
+  const beforeIds = await getSettlementIds(merchant.merchantId, merchantApiKey);
 
   console.log("Merchant context");
   console.log(`- merchantId: ${merchant.merchantId}`);
@@ -380,7 +411,7 @@ const main = async () => {
 
   let merchantServer: ChildProcess | null = null;
   try {
-    merchantServer = await startMerchantServer(merchant.apiKey);
+    merchantServer = await startMerchantServer(merchantApiKey);
     const payment = await runPayment({
       signerKey: cfg.clientPrivateKey,
       targetUrl: `${merchantAppUrl}${cfg.routePath}`,
@@ -396,7 +427,7 @@ const main = async () => {
 
     const settlement = await waitForSettlement({
       merchantId: merchant.merchantId,
-      apiKey: merchant.apiKey,
+      apiKey: merchantApiKey,
       beforeIds,
     });
     console.log("Settlement observed in Merchant OS");
