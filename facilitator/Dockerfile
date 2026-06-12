@@ -1,6 +1,8 @@
 FROM node:22-bookworm-slim AS deps
 WORKDIR /app/facilitator
 COPY facilitator/package.json facilitator/package-lock.json ./
+COPY facilitator/scripts/link-local-package-deps.mjs ./scripts/link-local-package-deps.mjs
+COPY packages/server-sdk /app/packages/server-sdk
 RUN npm ci
 
 FROM deps AS builder
@@ -16,10 +18,10 @@ RUN apt-get update \
 WORKDIR /app/facilitator
 
 COPY --from=builder /app/facilitator ./
+COPY --from=builder /app/packages /app/packages
 
 ENV NODE_ENV=production
 EXPOSE 4022
 
 ENTRYPOINT ["/usr/bin/tini", "--"]
 CMD ["node", "dist/facilitator-implementation.js"]
-
