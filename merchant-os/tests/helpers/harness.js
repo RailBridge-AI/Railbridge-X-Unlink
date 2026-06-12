@@ -123,7 +123,7 @@ export const startWebhookCaptureServer = async () => {
   };
 };
 
-export const startMerchantOsServer = async ({ cwd }) => {
+export const startMerchantOsServer = async ({ cwd, runtimeConfigOverrides = {} }) => {
   const port = await getFreePort();
   const tempRoot = mkdtempSync(join(tmpdir(), "merchant-os-tests-"));
   const dbPath = join(tempRoot, "merchant-os.db");
@@ -152,7 +152,8 @@ export const startMerchantOsServer = async ({ cwd }) => {
     facilitatorAddress: "0x1111111111111111111111111111111111111111",
     onchainReadTimeoutMs: 20,
     onchainReadTotalBudgetMs: 20,
-    chainCatalogSyncMs: 300000
+    chainCatalogSyncMs: 300000,
+    ...runtimeConfigOverrides
   };
   writeFileSync(runtimeConfigLocalPath, `${JSON.stringify(testRuntimeConfig, null, 2)}\n`, "utf8");
 

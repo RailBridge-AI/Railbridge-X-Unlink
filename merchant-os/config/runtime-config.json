@@ -4,9 +4,7 @@
   "dbPath": "data/merchant-os.db",
   "sessionHours": 24,
   "onboardingAutoApprove": true,
-  "onboardingAllowlistDomains": [
-    "example.com"
-  ],
+  "onboardingAllowlistDomains": [],
   "custodyMode": "mpc",
   "custodyAddress": "",
   "realConsolidationBridgeEnabled": true,

@@ -325,7 +325,7 @@ This is platform-to-platform plumbing. Merchants do not call this endpoint.
 
 ### Domain gating
 
-Signup can be limited to allowlisted domains unless auto-approve is enabled.
+Signup is open when `onboardingAllowlistDomains` is empty. When the allowlist contains domains, signup is limited to those domains unless auto-approve is enabled.
 
 Config:
 
@@ -342,7 +342,7 @@ Current prototype keeps this abstraction boundary, while full external MPC backe
 ## 12) Troubleshooting Quick List
 
 1. `403 domain_not_allowlisted`:
-   Set allowlist domains or enable auto-approve.
+   Leave allowlist empty for open signup, or set allowlist domains, or enable auto-approve.
 2. Missing webhook deliveries:
    Verify URL reachability, signature secret, and test event result.
 3. `insufficient source balance` during consolidation:

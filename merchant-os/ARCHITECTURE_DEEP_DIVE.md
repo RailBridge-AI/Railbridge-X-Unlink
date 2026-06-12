@@ -147,7 +147,7 @@ sequenceDiagram
   participant DB as SQLite
 
   Console->>API: POST /v1/onboarding/start
-  API->>API: allowlist or auto-approve check
+  API->>API: open-signup, allowlist, or auto-approve check
   API->>Catalog: read active chains
   API->>DB: create merchant, account, admin user
   API->>DB: create wallet profile per chain
