@@ -68,6 +68,7 @@ Recommended:
 3. Set `RB_ENV` to `local`, `testnet`, or `live`.
 4. Use `createRailbridgeFromEnv(...).protectExpress(...)` on paid routes.
 5. Use `client.webhooks.express(...)` for webhook verification.
+6. If you want a runnable repo example, see [examples/merchant-sdk-minimal](/Users/marcobrian/Documents/Personal%20Projects/RailBridge%20AI/examples/merchant-sdk-minimal/README.md).
 
 Public SDK:
 1. `npm install @railbridgeai/merchant-sdk`

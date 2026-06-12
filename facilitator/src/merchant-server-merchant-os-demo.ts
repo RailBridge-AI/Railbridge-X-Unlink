@@ -60,7 +60,6 @@ const start = async () => {
       ? RB_MAX_REQUIREMENT_OPTIONS
       : defaultMaxPaymentOptions,
     logPrefix: "[merchant-os-demo]",
-    paywallAppName: "RailBridge Merchant OS Demo Merchant",
   });
 
   const paymentGuard = await rb.protectExpress(

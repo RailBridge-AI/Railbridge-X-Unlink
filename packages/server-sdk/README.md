@@ -13,6 +13,9 @@ Goal:
 npm install @railbridgeai/merchant-sdk
 ```
 
+Runnable repo example:
+1. [examples/merchant-sdk-minimal](/Users/marcobrian/Documents/Personal%20Projects/RailBridge%20AI/examples/merchant-sdk-minimal/README.md)
+
 Repo contributor note:
 1. In this repository, `facilitator` consumes the SDK through a local `file:` dependency.
 2. Running `npm --prefix facilitator install` also creates `packages/node_modules -> facilitator/node_modules` for local dependency resolution.

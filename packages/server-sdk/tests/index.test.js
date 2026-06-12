@@ -32,12 +32,10 @@ describe("@railbridgeai/merchant-sdk", () => {
       RB_ENV: "testnet",
       RB_MERCHANT_OS_URL: "https://merchant.example.com",
       RB_FACILITATOR_URL: "https://facilitator.example.com",
-      RB_PAYWALL_TESTNET: "true",
       RB_MAX_REQUIREMENT_OPTIONS: "12",
       RB_AUTO_REFRESH_MS: "45000",
       RB_SOURCE_NETWORK_FILTER: "testnet_only",
       RB_LOG_PREFIX: "[merchant-sdk]",
-      RB_PAYWALL_APP_NAME: "Merchant Backend",
     });
 
     assert.equal(client.environment, "testnet");
@@ -52,18 +50,6 @@ describe("@railbridgeai/merchant-sdk", () => {
           RB_API_KEY: "rb_env_key",
         }),
       /RB_ENV or RAILBRIDGE_ENV is required/,
-    );
-  });
-
-  test("createRailbridgeFromEnv validates boolean env values", () => {
-    assert.throws(
-      () =>
-        createRailbridgeFromEnv({
-          RB_API_KEY: "rb_env_key",
-          RB_ENV: "testnet",
-          RB_PAYWALL_TESTNET: "maybe",
-        }),
-      /RB_PAYWALL_TESTNET must be a boolean-like value/,
     );
   });
 

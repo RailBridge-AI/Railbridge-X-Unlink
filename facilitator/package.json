@@ -17,6 +17,7 @@
     "test:merchant-os-testnet": "node --preserve-symlinks ./node_modules/tsx/dist/cli.mjs src/merchant-server-merchant-os-testnet.ts",
     "test:accept-payment-merchant-os": "node --preserve-symlinks ./node_modules/tsx/dist/cli.mjs scripts/pay-merchant-os-testnet.ts",
     "test:accept-payment-existing-merchant-os": "node --preserve-symlinks ./node_modules/tsx/dist/cli.mjs scripts/pay-existing-merchant-testnet.ts",
+    "test:merchant-sdk-minimal": "node scripts/smoke-merchant-sdk-minimal.mjs",
     "test:accept-payment-existing-merchant-public-testnet": "node --preserve-symlinks ./node_modules/tsx/dist/cli.mjs scripts/pay-existing-merchant-public-testnet.ts",
     "test:bridge-merchant-os": "node --preserve-symlinks ./node_modules/tsx/dist/cli.mjs scripts/manual-bridge-merchant-os.ts",
     "test:merchant-same-chain": "node --preserve-symlinks ./node_modules/tsx/dist/cli.mjs src/merchant-server-same-chain.ts",

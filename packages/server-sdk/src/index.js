@@ -4,19 +4,16 @@ const ENVIRONMENT_DEFAULTS = {
   local: {
     merchantOsUrl: "http://localhost:4030",
     facilitatorUrl: "http://localhost:4022",
-    paywallTestnet: true,
     sourceNetworkFilter: "all",
   },
   testnet: {
     merchantOsUrl: "https://api.testnet.railbridge.ai",
     facilitatorUrl: "https://facilitator.testnet.railbridge.ai",
-    paywallTestnet: true,
     sourceNetworkFilter: "testnet_only",
   },
   live: {
     merchantOsUrl: "https://api.railbridge.xyz",
     facilitatorUrl: "https://facilitator.railbridge.xyz",
-    paywallTestnet: false,
     sourceNetworkFilter: "all",
   },
 };
@@ -54,23 +51,6 @@ const ensureNonEmpty = (value, fieldName) => {
     throw new Error(`${fieldName} is required`);
   }
   return text;
-};
-
-const parseBoolean = (value, fieldName) => {
-  if (value === undefined || value === null || value === "") {
-    return undefined;
-  }
-  if (typeof value === "boolean") {
-    return value;
-  }
-  const normalized = String(value).trim().toLowerCase();
-  if (["1", "true", "yes", "y", "on"].includes(normalized)) {
-    return true;
-  }
-  if (["0", "false", "no", "n", "off"].includes(normalized)) {
-    return false;
-  }
-  throw new Error(`${fieldName} must be a boolean-like value`);
 };
 
 const parseOptionalFiniteNumber = (value, fieldName) => {
@@ -113,19 +93,11 @@ const mergeDefaults = (config = {}) => {
     facilitatorUrl: String(
       advanced.facilitatorUrl || config.facilitatorUrl || defaults.facilitatorUrl,
     ).trim(),
-    paywallTestnet:
-      typeof advanced.paywallTestnet === "boolean"
-        ? advanced.paywallTestnet
-        : typeof config.paywallTestnet === "boolean"
-          ? config.paywallTestnet
-        : defaults.paywallTestnet,
     sourceNetworkFilter:
       advanced.sourceNetworkFilter || config.sourceNetworkFilter || defaults.sourceNetworkFilter,
     maxRequirementOptions: advanced.maxRequirementOptions ?? config.maxRequirementOptions,
     autoRefreshMs: advanced.autoRefreshMs ?? config.autoRefreshMs,
     logPrefix: advanced.logPrefix || config.logPrefix || "[railbridge-sdk]",
-    paywallAppName:
-      advanced.paywallAppName || config.paywallAppName || "RailBridge Merchant Integration",
     supportedSourceNetworks: advanced.supportedSourceNetworks || config.supportedSourceNetworks,
     logger: advanced.logger || config.logger || console,
     logLevel: advanced.logLevel || config.logLevel || "warn",
@@ -251,13 +223,6 @@ export const createRailbridge = (config = {}) => {
         apiId: routeConfig.apiId,
         apiProductId: routeConfig.apiProductId,
         settlementModeOverride: routeConfig.settlementModeOverride,
-        paywallAppName: advanced.paywallAppName || routeConfig.paywallAppName || base.paywallAppName,
-        paywallTestnet:
-          typeof advanced.paywallTestnet === "boolean"
-            ? advanced.paywallTestnet
-            : typeof routeConfig.paywallTestnet === "boolean"
-              ? routeConfig.paywallTestnet
-            : base.paywallTestnet,
         autoRefreshMs:
           Number.isFinite(advanced.autoRefreshMs)
             ? advanced.autoRefreshMs
@@ -330,10 +295,6 @@ export const createRailbridgeFromEnv = (env = process.env, overrides = {}) => {
       merchantOsUrl: overrides.advanced?.merchantOsUrl ?? overrides.merchantOsUrl ?? env.RB_MERCHANT_OS_URL,
       facilitatorUrl:
         overrides.advanced?.facilitatorUrl ?? overrides.facilitatorUrl ?? env.RB_FACILITATOR_URL,
-      paywallTestnet:
-        overrides.advanced?.paywallTestnet ??
-        overrides.paywallTestnet ??
-        parseBoolean(env.RB_PAYWALL_TESTNET, "RB_PAYWALL_TESTNET"),
       sourceNetworkFilter:
         overrides.advanced?.sourceNetworkFilter ??
         overrides.sourceNetworkFilter ??
@@ -347,8 +308,6 @@ export const createRailbridgeFromEnv = (env = process.env, overrides = {}) => {
         overrides.autoRefreshMs ??
         parseOptionalFiniteNumber(env.RB_AUTO_REFRESH_MS, "RB_AUTO_REFRESH_MS"),
       logPrefix: overrides.advanced?.logPrefix ?? overrides.logPrefix ?? env.RB_LOG_PREFIX,
-      paywallAppName:
-        overrides.advanced?.paywallAppName ?? overrides.paywallAppName ?? env.RB_PAYWALL_APP_NAME,
       logLevel: overrides.advanced?.logLevel ?? overrides.logLevel ?? env.RB_LOG_LEVEL,
       logger: overrides.advanced?.logger ?? overrides.logger,
     },

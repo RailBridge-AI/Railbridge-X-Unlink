@@ -2,8 +2,6 @@ import { paymentMiddleware } from "@x402/express";
 import { x402ResourceServer } from "@x402/core/server";
 import { HTTPFacilitatorClient } from "@x402/core/http";
 import { registerExactEvmScheme } from "@x402/evm/exact/server";
-import { createPaywall } from "@x402/paywall";
-import { evmPaywall } from "@x402/paywall/evm";
 import { CROSS_CHAIN, declareCrossChainExtension } from "./crossChain.js";
 
 const DEFAULT_SUPPORTED_NETWORKS = [
@@ -332,14 +330,6 @@ export const createRailbridgePaymentGuard = async (config) => {
     networks: supportedSourceNetworks,
   });
 
-  const paywall = createPaywall()
-    .withNetwork(evmPaywall)
-    .withConfig({
-      appName: config.paywallAppName || "RailBridge Merchant Integration",
-      testnet: config.paywallTestnet ?? true,
-    })
-    .build();
-
   const routeKey = `${routeMethod} ${routePath}`;
 
   const fetchResolvedRequirement = async () => {
@@ -498,7 +488,7 @@ export const createRailbridgePaymentGuard = async (config) => {
 
   await refreshRequirementsInternal({ reason: "startup" });
 
-  const baseMiddleware = paymentMiddleware(routes, resourceServer, undefined, paywall, true);
+  const baseMiddleware = paymentMiddleware(routes, resourceServer, undefined, undefined, true);
 
   const shouldRefreshForRequest = (req) =>
     normalizeMethod(req.method || "GET") === routeMethod &&

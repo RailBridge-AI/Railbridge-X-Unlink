@@ -14,12 +14,10 @@ export type RailbridgeLogger = {
 export type RailbridgeAdvancedConfig = {
   merchantOsUrl?: string;
   facilitatorUrl?: string;
-  paywallTestnet?: boolean;
   sourceNetworkFilter?: "all" | "testnet_only" | "mainnet_only";
   maxRequirementOptions?: number;
   autoRefreshMs?: number;
   logPrefix?: string;
-  paywallAppName?: string;
   supportedSourceNetworks?: string[];
   logger?: RailbridgeLogger;
   logLevel?: RailbridgeLogLevel;

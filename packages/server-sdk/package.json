@@ -41,8 +41,7 @@
   "dependencies": {
     "@x402/core": "^2.12.0",
     "@x402/evm": "^2.12.0",
-    "@x402/express": "^2.12.0",
-    "@x402/paywall": "^2.12.0"
+    "@x402/express": "^2.12.0"
   },
   "keywords": [
     "railbridge",

@@ -252,7 +252,10 @@ const loadScriptConfig = (): ExistingMerchantScriptConfig => {
     ...toPlainObject(baseConfig[configSection]),
     ...toPlainObject(localConfig[configSection]),
   };
-  const configuredPayNetworksRaw = (existingMerchantPaymentConfig as Record<string, unknown>).preferredPayNetworks
+  const configuredPayNetworksRaw =
+    process.env.RB_PREFERRED_PAY_NETWORKS
+    ?? process.env.RB_PREFERRED_PAY_NETWORK
+    ?? (existingMerchantPaymentConfig as Record<string, unknown>).preferredPayNetworks
     ?? (existingMerchantPaymentConfig as Record<string, unknown>).preferredPayNetwork;
 
   const preferredPayNetworks = parseStringArray(
