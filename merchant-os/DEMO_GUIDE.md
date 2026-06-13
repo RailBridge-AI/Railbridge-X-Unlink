@@ -93,7 +93,7 @@ Create local non-sensitive overrides for reliable demo behavior:
 cat > merchant-os/config/runtime-config.local.json <<'JSON'
 {
   "onboardingAutoApprove": true,
-  "onboardingAllowlistDomains": ["example.com"],
+  "onboardingAllowlistDomains": [],
   "realConsolidationBridgeEnabled": false,
   "realPayoutsEnabled": false
 }
@@ -499,7 +499,8 @@ lsof -i :4022
 ```
 
 2. Onboarding blocked by allowlist:
-   - set `onboardingAutoApprove=true` in runtime config
+   - leave `onboardingAllowlistDomains` empty for open signup
+   - or set `onboardingAutoApprove=true` in runtime config
    - or include your email domain in `onboardingAllowlistDomains`
 
 3. Consolidation/payout failures:

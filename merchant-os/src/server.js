@@ -161,7 +161,7 @@ const isOnboardingAllowlisted = (email) => {
     return true;
   }
   if (!config.onboardingAllowlistDomains.size) {
-    return false;
+    return true;
   }
   const domain = emailDomain(email);
   return domain ? config.onboardingAllowlistDomains.has(domain) : false;

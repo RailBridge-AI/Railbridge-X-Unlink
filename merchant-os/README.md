@@ -41,13 +41,14 @@ Merchants can still use advanced routing controls when they want explicit source
 ## Documentation Map
 
 1. Demo runbook: `merchant-os/DEMO_GUIDE.md`
-2. Agent-native merchant integration guide: `merchant-os/AGENT_INTEGRATION_GUIDE.md`
+2. Beginner merchant integration guide (repo-free): `merchant-os/AGENT_INTEGRATION_GUIDE.md`
 3. Merchant onboarding + integration technical guide: `merchant-os/ONBOARDING_TECHNICAL.md`
 4. Webhook setup guide: `merchant-os/WEBHOOK_SETUP_GUIDE.md`
 5. Reality status matrix: `merchant-os/REALITY_CHECK.md`
 6. Architecture overview: `merchant-os/ARCHITECTURE.md`
 7. Deep architecture diagrams: `merchant-os/ARCHITECTURE_DEEP_DIVE.md`
 8. Runtime config guide: `merchant-os/config/README.md`
+9. Thin SDK package: `packages/server-sdk/README.md`
 
 ## Local Run
 

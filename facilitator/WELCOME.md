@@ -1,72 +1,75 @@
-# Welcome to RailBridge Cross-Chain x402 Facilitator
+# Welcome to RailBridge
 
-Welcome! You've found the documentation for **RailBridge**, a cross-chain payment facilitator that extends the x402 protocol to enable seamless payments across different EVM blockchains.
+Last reviewed: 2026-06-12
 
-## What is RailBridge?
+RailBridge helps merchants accept USDC payments from supported EVM chains using x402. Today the product is made up of two layers:
 
-RailBridge is a facilitator service that makes it possible for users to pay on one blockchain (like Base) while merchants receive funds on another (like Ethereum or Polygon). Built on top of Coinbase's x402 protocol, RailBridge handles all the complexity of cross-chain payments so that merchants and clients don't have to.
+- **Merchant OS**: the merchant-facing control plane for onboarding, API keys, products, balances, settlements, payouts, and webhooks
+- **Facilitator**: the payment plane that verifies x402 payments, settles them on-chain, and handles same-chain or cross-chain routing
 
-## Why RailBridge?
+## What RailBridge Is Today
 
-In today's multi-chain world, users often hold assets on different blockchains. Traditional payment systems require users to bridge tokens themselves, pay gas on multiple chains, and navigate complex DeFi protocols. RailBridge solves this by:
+RailBridge is no longer just a raw cross-chain facilitator. The current integration model is:
 
-- **Seamless Cross-Chain Payments**: Users pay on their preferred chain, merchants receive on theirs
-- **Client Transparency**: Clients don't need to know anything about cross-chain mechanics; they just pay
-- **Merchant Control**: Merchants specify where they want to receive payments via simple configuration
-- **Secure**: Built on battle-tested x402 protocol with Coinbase's security standards
-- **Easy Integration**: Standard REST APIs that work with any x402-compatible client
+1. Merchants define paid products and routes in Merchant OS.
+2. Merchant backends protect those routes with `@railbridgeai/merchant-sdk`.
+3. Buyers pay with the standard x402 `exact` flow on a supported source chain.
+4. The facilitator verifies and settles the payment, then handles routing if funds need to move across chains.
+5. Merchant OS tracks the lifecycle and can deliver signed webhook events back to the merchant.
+
+In the normal hosted flow, merchants should not manually call facilitator `/verify` or `/settle`; the SDK and payment middleware handle that wiring.
+
+## Why Teams Use RailBridge
+
+- **SDK-first integration**: Protect paid routes without mixing payment logic into business handlers
+- **USDC-first simplicity**: Current merchant-facing flows are centered on USDC across supported networks
+- **Same-chain and cross-chain support**: Accept payments where buyers already have funds and settle according to merchant routing needs
+- **Merchant-facing operations**: Manage products, balances, settlements, payouts, API keys, and webhooks in one place
+- **x402 compatibility**: Buyers still use normal x402 flows; cross-chain complexity stays behind the scenes
 
 ## How It Works
 
-RailBridge uses an **extension-based design** that is elegant and flexible:
+1. A merchant creates a paid product or route in Merchant OS.
+2. The merchant backend mounts RailBridge route protection with the merchant SDK.
+3. An unpaid request receives a standard `402 Payment Required` response.
+4. The buyer retries with a signed x402 payment.
+5. RailBridge verifies and settles the payment through the facilitator.
+6. Merchant OS records lifecycle events and can notify the merchant via webhooks.
 
-1. **Merchants** define payment requirements with a `cross-chain` extension specifying the destination chain
-2. **Clients** pay using the standard `exact` scheme; no cross-chain awareness needed
-3. **RailBridge Facilitator** verifies the payment, settles on the source chain, and automatically bridges funds to the destination chain
-4. **Merchants** receive funds on their preferred chain, all handled automatically
+## Who This Documentation Is For
 
-## What You'll Find Here
+- **Merchant teams** adding paid routes to APIs or agent backends
+- **Platform engineers** who want x402 payments without building chain-specific infrastructure
+- **Buyer/client developers** paying RailBridge-protected routes from supported EVM wallets
+- **Operators** running or evaluating the facilitator and testnet stack
 
-This documentation will guide you through:
+## Start Here
 
-- **Quickstart**: Get up and running in minutes
-- **Architecture**: Understand how RailBridge works under the hood
-- **Integration Guides**: Step-by-step instructions for merchants and clients
-- **API Reference**: Complete facilitator endpoint documentation
-- **Examples**: Working code examples you can copy and adapt
-
-## Who Is This For?
-
-- **Merchants** who want to accept payments on their preferred chain while allowing users to pay from any supported chain
-- **Developers** building payment-enabled applications that need cross-chain flexibility
-- **Integrators** looking to add x402 payment support with cross-chain capabilities
-
-## Getting Started
-
-Ready to dive in? Here's where to start:
-
-1. **New to RailBridge?**: Start with the [Quickstart Guide](quickstart.md) to see it in action
-2. **Building a merchant?**: Check out the [Merchant Integration Guide](merchant-integration.md)
-3. **Building a client?**: See the [Client Integration Guide](client-integration.md)
-4. **Want to understand the architecture?**: Read the [Architecture Overview](architecture.md)
+- **Fastest merchant path**: [Merchant Integration Guide](../merchant-os/AGENT_INTEGRATION_GUIDE.md)
+- **Merchant SDK reference**: [@railbridgeai/merchant-sdk](../packages/server-sdk/README.md)
+- **Runnable minimal example**: [Merchant SDK Minimal Example](../examples/merchant-sdk-minimal/README.md)
+- **Facilitator setup and API surface**: [Facilitator README](README.md)
+- **Local facilitator walkthrough**: [Quickstart](quickstart.md)
+- **Buyer/client flow**: [Client Quickstart](QUICKSTART_CLIENT.md)
+- **Architecture deep dive**: [Facilitator Architecture](documentation/ARCHITECTURE.md)
+- **Supported chains and USDC addresses**: [Supported Networks](documentation/SUPPORTED_NETWORKS.md)
 
 ## Key Concepts
 
-Before diving in, it's helpful to understand a few key concepts:
-
-- **x402 Protocol**: An open payment protocol for web3 that enables pay-per-use APIs and content
-- **Facilitator**: A service that verifies and settles payments on-chain
-- **Extension-Based Design**: Cross-chain is implemented as an extension to the base `exact` scheme, not a separate scheme
-- **Source Chain**: Where the user pays (e.g., Base Sepolia)
-- **Destination Chain**: Where the merchant receives (e.g., Ethereum Sepolia)
+- **Merchant OS**: the merchant control plane and merchant-facing API surface
+- **Facilitator**: the x402 payment plane for verification, settlement, and routing
+- **Merchant SDK**: the preferred merchant integration surface for route protection and webhook verification
+- **x402 `exact` scheme**: the current buyer payment flow used by RailBridge integrations
+- **Same-chain settlement**: funds stay on the network where the buyer paid
+- **Cross-chain settlement**: funds are routed toward the merchant's preferred destination network
 
 ## Need Help?
 
-- Check the [Common Issues](common-issues.md) section for troubleshooting
-- Review the [API Reference](api-reference.md) for detailed endpoint documentation
-- Explore the [Example Implementations](examples.md) to see working code
+- Start with the [repo overview](../README.md) for local development and public testnet URLs
+- Review [Merchant OS](../merchant-os/README.md) for the merchant-facing product model
+- Use the [Quickstart](quickstart.md) if you want to run the facilitator locally
+- Explore the example servers in `src/` if you are working inside this repository
 
 ---
 
-**Ready to get started?** Head over to the [Quickstart Guide](quickstart.md) and have RailBridge running in minutes!
-
+**Ready to build?** Start with the [Merchant Integration Guide](../merchant-os/AGENT_INTEGRATION_GUIDE.md) if you are integrating a backend, or the [Client Quickstart](QUICKSTART_CLIENT.md) if you are building a payer.

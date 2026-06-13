@@ -263,14 +263,13 @@ export default function OnboardingPage() {
               </span>
             </div>
             <p className="mt-1 text-xs text-slate-500">
-              Your backend uses the API key to request payment requirements for your paid route. RailBridge returns
-              payment options, then handles verification and settlement after customer payment.
+              Add the RailBridge merchant SDK in front of your paid route. RailBridge returns the payment challenge,
+              verifies payment, settles funds, and then lets your existing business logic run.
             </p>
             <div className="mt-3 rounded-xl border border-slate-200 bg-slate-50 p-3">
               <p className="text-xs font-semibold text-slate-700">Backend integration snippet</p>
               <p className="mt-1 text-[11px] text-slate-500">
-                Use <span className="font-mono">x-railbridge-api-key</span> on server-to-server calls to resolve payment
-                requirements.
+                Start with the SDK-first snippet. The curl example is only for low-level connectivity checks.
               </p>
               <SyntaxCodeBlock className="mt-2" language="javascript" code={BACKEND_REQUIREMENTS_SNIPPET} />
               <SyntaxCodeBlock className="mt-2" language="bash" code={BACKEND_REQUIREMENTS_CURL} />

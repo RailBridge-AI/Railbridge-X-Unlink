@@ -496,8 +496,7 @@ export default function OnboardingFlowModal({
                 <div className="mt-3 space-y-2 rounded-xl border border-slate-200 bg-white p-3">
                   <p className="text-xs font-semibold text-slate-700">Backend integration snippet</p>
                   <p className="text-[11px] text-slate-500">
-                    Use <span className="font-mono">x-railbridge-api-key</span> from your backend to resolve payment
-                    requirements for protected routes.
+                    Start with the SDK-first snippet. The curl example is only for low-level connectivity checks.
                   </p>
                   <SyntaxCodeBlock language="javascript" code={BACKEND_REQUIREMENTS_SNIPPET} />
                   <SyntaxCodeBlock language="bash" code={BACKEND_REQUIREMENTS_CURL} />

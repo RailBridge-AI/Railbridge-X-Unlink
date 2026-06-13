@@ -63,7 +63,7 @@ References:
 
 1. `merchant-os/src/webhookService.js`
 2. `merchant-os/src/db.js`
-3. `merchant-os/sdk/index.js` (`verifyWebhook`)
+3. `packages/server-sdk/src/webhooks.js`
 
 ### 4) Product/Route Configuration
 
@@ -94,8 +94,8 @@ Why this matters:
 References:
 
 1. `merchant-os/src/server.js`
-2. `merchant-os/sdk/README.md`
-3. `merchant-os/sdk/index.js`
+2. `packages/server-sdk/README.md`
+3. `packages/server-sdk/src/index.js`
 
 ### 6) Settlement Lifecycle + Timeline
 

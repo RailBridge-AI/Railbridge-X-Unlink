@@ -50,7 +50,7 @@ Signature model:
 
 ```js
 import express from "express";
-import { verifyWebhook } from "@railbridge/sdk";
+import { verifyWebhook } from "@railbridgeai/merchant-sdk";
 
 const app = express();
 
@@ -82,7 +82,7 @@ app.post("/webhooks/railbridge", (req, res) => {
 ## 5) Next.js route handler example
 
 ```js
-import { verifyWebhook } from "@railbridge/sdk";
+import { verifyWebhook } from "@railbridgeai/merchant-sdk";
 
 export async function POST(req) {
   const body = await req.text();

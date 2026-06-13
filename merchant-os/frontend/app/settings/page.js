@@ -64,7 +64,7 @@ const PolicyNetworkOptionIcon = ({ network, displayName }) => {
 };
 
 const EXPRESS_WEBHOOK_SNIPPET = `import express from "express";
-import { verifyWebhook } from "@railbridge/sdk";
+import { verifyWebhook } from "@railbridgeai/merchant-sdk";
 
 const app = express();
 
@@ -92,7 +92,7 @@ app.post("/webhooks/railbridge", (req, res) => {
   return res.status(200).json({ ok: true });
 });`;
 
-const NEXT_WEBHOOK_SNIPPET = `import { verifyWebhook } from "@railbridge/sdk";
+const NEXT_WEBHOOK_SNIPPET = `import { verifyWebhook } from "@railbridgeai/merchant-sdk";
 
 export async function POST(req) {
   const body = await req.text();
