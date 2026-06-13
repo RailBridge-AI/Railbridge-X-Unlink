@@ -37,3 +37,9 @@ jobs:
         run: npm publish --access public
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+      - name: Deprecate 0.1.0
+        if: github.ref_name == 'sdk-v0.1.1'
+        run: npm deprecate @railbridgeai/merchant-sdk@0.1.0 "Pulls in heavy @x402/paywall browser wallet dependencies; upgrade to 0.1.1 or later."
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
