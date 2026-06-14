@@ -3275,6 +3275,7 @@ const server = createServer(async (req, res) => {
           asOf: overview.asOf,
           onchainMode: overview.onchainMode,
           treasuryMode: overview.policy?.treasuryMode || "public",
+          privateHomeNetwork: overview.policy?.privateHomeNetwork || null,
           availableUsd: overview.availableUsd,
           projectedUsd: overview.projectedUsd,
           pendingBridgeUsd: overview.pendingBridgeUsd,

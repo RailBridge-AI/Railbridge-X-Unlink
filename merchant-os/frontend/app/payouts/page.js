@@ -49,6 +49,24 @@ const parseUsdcInputToBaseUnits = (value) => {
 
 const isLikelyEvmAddress = (value) => /^0x[a-fA-F0-9]{40}$/.test(String(value || "").trim());
 
+const resolveSpendableBaseUnits = (balanceRow, treasuryMode) => {
+  if (!balanceRow) {
+    return 0n;
+  }
+  if (treasuryMode === "private") {
+    return parseBaseUnitsSafe(balanceRow.privateAvailableAmount ?? balanceRow.amount ?? "0");
+  }
+  return parseBaseUnitsSafe(balanceRow.amount ?? "0");
+};
+
+const privacyStageLabel = (value) => {
+  const stage = String(value || "").trim();
+  if (!stage) {
+    return null;
+  }
+  return stage.replaceAll("_", " ");
+};
+
 const baseUnitsToUsdcInput = (value) => {
   const text = String(value || "0").replace(/[^0-9]/g, "");
   if (!text) {
@@ -102,6 +120,8 @@ export default function PayoutsPage() {
   const [events, setEvents] = useState([]);
   const [networkOptions, setNetworkOptions] = useState([]);
   const [balances, setBalances] = useState([]);
+  const [treasuryMode, setTreasuryMode] = useState("public");
+  const [privateHomeNetwork, setPrivateHomeNetwork] = useState("");
   const [addressBookEntries, setAddressBookEntries] = useState([]);
   const [chainsByNetwork, setChainsByNetwork] = useState({});
   const [networkDropdownOpen, setNetworkDropdownOpen] = useState(false);
@@ -131,7 +151,12 @@ export default function PayoutsPage() {
     [balances]
   );
 
-  const selectedBalanceBaseUnits = parseBaseUnitsSafe(balancesByNetwork[form.network]?.amount || "0");
+  const isPrivateTreasury = treasuryMode === "private";
+
+  const selectedBalanceBaseUnits = resolveSpendableBaseUnits(
+    balancesByNetwork[form.network],
+    treasuryMode
+  );
   const selectedBalanceUsdc = baseUnitsToUsdcInput(selectedBalanceBaseUnits.toString());
   const requestedBaseUnits = parseUsdcInputToBaseUnits(form.amountUsdc);
   const insufficientFunds =
@@ -144,9 +169,11 @@ export default function PayoutsPage() {
       networkOptions.map((network) => ({
         network,
         name: getNetworkInfo(network).name,
-        balanceLabel: `${formatUsdcBaseUnits(balancesByNetwork[network]?.amount || "0")} USDC`
+        balanceLabel: `${formatUsdcBaseUnits(
+          resolveSpendableBaseUnits(balancesByNetwork[network], treasuryMode).toString()
+        )} USDC`
       })),
-    [balancesByNetwork, networkOptions]
+    [balancesByNetwork, networkOptions, treasuryMode]
   );
 
   const selectedPayoutNetwork = useMemo(() => {
@@ -194,10 +221,17 @@ export default function PayoutsPage() {
           (item) => item?.network && String(item.asset || "USDC").toUpperCase() === "USDC"
         )
       : [];
-    const spendableBalances = nextBalances.filter((item) => parseBaseUnitsSafe(item.amount) > 0n);
-    const nextNetworkOptions = [
-      ...new Set(spendableBalances.map((item) => item.network).filter(Boolean))
-    ];
+    const nextTreasuryMode = String(balancesPayload.treasuryMode || "public");
+    const nextPrivateHomeNetwork = String(balancesPayload.privateHomeNetwork || "").trim();
+    const spendableBalances = nextBalances.filter(
+      (item) => resolveSpendableBaseUnits(item, nextTreasuryMode) > 0n
+    );
+    let nextNetworkOptions;
+    if (nextTreasuryMode === "private" && nextPrivateHomeNetwork) {
+      nextNetworkOptions = [nextPrivateHomeNetwork];
+    } else {
+      nextNetworkOptions = [...new Set(spendableBalances.map((item) => item.network).filter(Boolean))];
+    }
 
     setEvents(nextEvents);
     setPagination(
@@ -211,6 +245,8 @@ export default function PayoutsPage() {
       }
     );
     setBalances(nextBalances);
+    setTreasuryMode(nextTreasuryMode);
+    setPrivateHomeNetwork(nextPrivateHomeNetwork);
     setNetworkOptions(nextNetworkOptions);
     setAddressBookEntries(Array.isArray(addressBookPayload.items) ? addressBookPayload.items : []);
     setChainsByNetwork(mapChainsByNetwork(chainsPayload.items));
@@ -314,6 +350,8 @@ export default function PayoutsPage() {
       setMessage({
         status: payout?.status || "submitted",
         txHash: String(payout?.txHash || "").trim(),
+        providerTxId: String(payout?.providerTxId || "").trim(),
+        privacyStage: payout?.privacyStage || (isPrivateTreasury ? "private_withdrawal" : null),
         explorerUrl
       });
       setForm((current) => ({
@@ -330,6 +368,16 @@ export default function PayoutsPage() {
 
   return (
     <PlatformShell title="Payouts" auth={auth} onLogout={logout}>
+      {isPrivateTreasury ? (
+        <div className="mb-3 rounded-xl border border-violet-200 bg-violet-50 px-3 py-2 text-sm text-violet-900">
+          <p className="font-semibold">Private treasury payouts</p>
+          <p className="mt-1 text-xs text-violet-800">
+            Withdrawals run through Unlink on{" "}
+            {privateHomeNetwork ? getNetworkInfo(privateHomeNetwork).name : "your private home network"}.
+            Settlement activity appears in Activity with private lifecycle stages.
+          </p>
+        </div>
+      ) : null}
       <form className="grid gap-2 rounded-2xl border border-slate-200 bg-slate-50 p-3.5" onSubmit={submitPayout}>
         <p className="text-base font-semibold">Request payout</p>
         <label className="text-xs text-slate-500">
@@ -342,7 +390,7 @@ export default function PayoutsPage() {
                 setNetworkDropdownOpen((open) => !open);
                 setAddressPickerOpen(false);
               }}
-              disabled={!payoutNetworkItems.length}
+              disabled={!payoutNetworkItems.length || (isPrivateTreasury && !privateHomeNetwork)}
             >
               {selectedPayoutNetwork ? (
                 <span className="inline-flex items-center gap-2">
@@ -495,10 +543,16 @@ export default function PayoutsPage() {
       {message ? (
         <p className="mt-3 rounded-xl border border-emerald-200 bg-emerald-50 px-3 py-2 text-sm text-emerald-700">
           Payout {message.status}
+          {message.providerTxId ? (
+            <>
+              {" · provider "}
+              <span className="font-mono text-xs">{message.providerTxId}</span>
+            </>
+          ) : null}
           {message.txHash ? (
             <>
               {" · tx "}
-              {message.explorerUrl ? (
+              {message.explorerUrl && !message.privacyStage ? (
                 <a
                   href={message.explorerUrl}
                   target="_blank"
@@ -509,7 +563,7 @@ export default function PayoutsPage() {
                   {message.txHash}
                 </a>
               ) : (
-                message.txHash
+                <span className="font-mono text-xs">{message.txHash}</span>
               )}
             </>
           ) : null}
@@ -518,7 +572,11 @@ export default function PayoutsPage() {
       ) : null}
       {error ? <p className="mt-3 rounded-xl border border-rose-300 bg-rose-50 px-3 py-2 text-sm text-rose-700">{error}</p> : null}
       {!networkOptions.length ? (
-        <p className="mt-2 text-xs text-slate-500">No payout-capable network yet. Receive a settlement first.</p>
+        <p className="mt-2 text-xs text-slate-500">
+          {isPrivateTreasury
+            ? "No private spendable balance yet. Wait for intake sweep to complete, then retry."
+            : "No payout-capable network yet. Receive a settlement first."}
+        </p>
       ) : null}
 
       <div className="mt-4">
@@ -530,17 +588,25 @@ export default function PayoutsPage() {
           const networkKey = String(item.sourceNetwork || item.network || "").trim();
           const network = getNetworkInfo(networkKey);
           const token = getTokenInfo(item.asset || "USDC");
-          const payoutExplorerUrl = buildExplorerTransactionUrl(
-            chainsByNetwork[networkKey]?.explorerUrl,
-            item.txHash
-          );
+          const payoutExplorerUrl =
+            item.privacyStage === "private_withdrawal"
+              ? null
+              : buildExplorerTransactionUrl(chainsByNetwork[networkKey]?.explorerUrl, item.txHash);
+          const stageLabel = privacyStageLabel(item.privacyStage);
           return (
             <article key={item.id} className="rounded-xl border border-slate-200 bg-slate-50 p-3 text-sm">
               <div className="flex flex-wrap items-center justify-between gap-2">
                 <p className="font-semibold">
                   {formatUsdcBaseUnits(item.amount)} {token.symbol} · {item.status}
                 </p>
-                <p className="text-xs text-slate-500">{formatDate(item.createdAt)}</p>
+                <div className="flex items-center gap-2">
+                  {stageLabel ? (
+                    <span className="rounded-full border border-violet-200 bg-violet-50 px-2 py-0.5 text-[11px] font-medium text-violet-800">
+                      {stageLabel}
+                    </span>
+                  ) : null}
+                  <p className="text-xs text-slate-500">{formatDate(item.createdAt)}</p>
+                </div>
               </div>
               <p className="mt-1 flex items-center gap-1 text-xs text-slate-500">
                 {network.logo ? (
@@ -555,23 +621,31 @@ export default function PayoutsPage() {
                 <span>{token.symbol}</span>
               </p>
               <p className="mt-1 break-all font-mono text-xs text-slate-500">
-                tx:{" "}
+                {item.providerTxId ? (
+                  <>
+                    provider: <span className="text-slate-600">{item.providerTxId}</span>
+                  </>
+                ) : null}
+                {item.providerTxId && item.txHash ? " · " : null}
                 {item.txHash ? (
-                  payoutExplorerUrl ? (
-                    <a
-                      href={payoutExplorerUrl}
-                      target="_blank"
-                      rel="noopener noreferrer"
-                      className="text-slate-600 underline decoration-slate-300 underline-offset-4 transition hover:text-slate-900 hover:decoration-slate-500"
-                      title="Open payout transaction in block explorer"
-                    >
-                      {item.txHash}
-                    </a>
-                  ) : (
-                    item.txHash
-                  )
-                ) : (
-                  "-"
+                  <>
+                    tx:{" "}
+                    {payoutExplorerUrl ? (
+                      <a
+                        href={payoutExplorerUrl}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="text-slate-600 underline decoration-slate-300 underline-offset-4 transition hover:text-slate-900 hover:decoration-slate-500"
+                        title="Open payout transaction in block explorer"
+                      >
+                        {item.txHash}
+                      </a>
+                    ) : (
+                      <span className="text-slate-600">{item.txHash}</span>
+                    )}
+                  </>
+                ) : item.providerTxId ? null : (
+                  "tx: -"
                 )}
               </p>
               {item.failReason ? <InlineErrorNotice>Reason: {item.failReason}</InlineErrorNotice> : null}

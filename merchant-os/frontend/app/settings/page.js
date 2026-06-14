@@ -137,6 +137,8 @@ export default function SettingsPage() {
   const [apiKeyCreateBusy, setApiKeyCreateBusy] = useState(false);
   const [webhookTestBusy, setWebhookTestBusy] = useState(false);
   const [treasuryPreferredNetwork, setTreasuryPreferredNetwork] = useState("");
+  const [treasuryMode, setTreasuryMode] = useState("public");
+  const [privateHomeNetwork, setPrivateHomeNetwork] = useState("");
   const [treasuryAutoBridgeEnabled, setTreasuryAutoBridgeEnabled] = useState(true);
   const [policyBusy, setPolicyBusy] = useState(false);
   const [showTestnetsOnly, setShowTestnetsOnly] = useState(false);
@@ -206,6 +208,8 @@ export default function SettingsPage() {
     if (settings.policy?.preferredNetwork) {
       setTreasuryPreferredNetwork(String(settings.policy.preferredNetwork));
     }
+    setTreasuryMode(String(settings.policy?.treasuryMode || "public"));
+    setPrivateHomeNetwork(String(settings.policy?.privateHomeNetwork || ""));
     setTreasuryAutoBridgeEnabled(Boolean(settings.policy?.autoBridgeEnabled ?? true));
   }, [settings]);
 
@@ -591,6 +595,10 @@ export default function SettingsPage() {
       setError("Choose a preferred treasury network first.");
       return;
     }
+    if (treasuryMode === "private" && !privateHomeNetwork) {
+      setError("Choose a private home network when private treasury mode is enabled.");
+      return;
+    }
     setError("");
     setMessage("");
     setPolicyBusy(true);
@@ -601,6 +609,8 @@ export default function SettingsPage() {
         method: "PATCH",
         body: {
           preferredNetwork: treasuryPreferredNetwork,
+          treasuryMode,
+          privateHomeNetwork: treasuryMode === "private" ? privateHomeNetwork : null,
           autoBridgeEnabled: treasuryAutoBridgeEnabled
         }
       });
@@ -1004,6 +1014,60 @@ export default function SettingsPage() {
                 Choose "{SAME_CHAIN_POLICY_LABEL}" if you want cross-chain products without explicit destination to stay on source chain.
               </p>
               <form className="mt-2 grid gap-2" onSubmit={saveTreasuryPolicy}>
+                <fieldset className="grid gap-1.5 text-xs text-slate-600">
+                  <legend className="font-medium text-slate-700">Treasury mode</legend>
+                  <label className="inline-flex items-center gap-2">
+                    <input
+                      type="radio"
+                      name="treasury-mode"
+                      value="public"
+                      checked={treasuryMode === "public"}
+                      onChange={() => setTreasuryMode("public")}
+                    />
+                    Public — funds stay on-chain in merchant wallets
+                  </label>
+                  <label className="inline-flex items-center gap-2">
+                    <input
+                      type="radio"
+                      name="treasury-mode"
+                      value="private"
+                      checked={treasuryMode === "private"}
+                      onChange={() => {
+                        setTreasuryMode("private");
+                        if (!privateHomeNetwork) {
+                          const defaultPrivateNetwork =
+                            policyChainOptions.find((chain) => chain.network === "eip155:84532")?.network ||
+                            policyChainOptions[0]?.network ||
+                            "";
+                          setPrivateHomeNetwork(defaultPrivateNetwork);
+                        }
+                      }}
+                    />
+                    Private — sweep intake into Unlink private treasury
+                  </label>
+                </fieldset>
+                {treasuryMode === "private" ? (
+                  <label className="grid gap-1 text-xs text-slate-600">
+                    Private home network
+                    <select
+                      className="rounded-xl border border-slate-300 bg-white px-3 py-2 text-sm"
+                      value={privateHomeNetwork}
+                      onChange={(event) => setPrivateHomeNetwork(event.target.value)}
+                      required
+                    >
+                      <option value="">Select network</option>
+                      {policyChainOptions.map((chain) => (
+                        <option key={`private-home-${chain.network}`} value={chain.network}>
+                          {chain.displayName}
+                        </option>
+                      ))}
+                    </select>
+                    <span className="text-[11px] text-slate-500">
+                      Private balances and payouts are scoped to this network. MVP supports Base Sepolia
+                      end-to-end.
+                    </span>
+                  </label>
+                ) : null}
                 <label className="grid gap-1 text-xs text-slate-600">
                   Preferred treasury network
                   <div className="relative" ref={policyDropdownRef}>
