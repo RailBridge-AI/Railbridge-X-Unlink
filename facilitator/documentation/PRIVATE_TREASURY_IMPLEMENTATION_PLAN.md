@@ -390,9 +390,23 @@ For `public` mode:
 For `private` mode:
 
 - stop treating public wallet reads as the primary merchant balance
-- return private ledger balances first
+- read the merchant's current private Unlink balance live when available
+- use the ledger as the workflow source of truth for pending sweep, pending withdrawal, and reconciliation state
 - keep public intake balances and public intake tx hashes as optional audit detail
 - store and return Unlink operation references such as `unlink_tx_id` and `unlink_tx_hash` when the provider returns them
+
+Recommended response model for private mode:
+
+- `privateAvailableBalance`: live provider balance from Unlink `getBalances()` when available
+- `pendingSweepBalance`: internal ledger amount that has settled publicly but not yet become private available balance
+- `pendingWithdrawalBalance`: internal ledger amount reserved for queued or submitted withdrawals
+- `balanceFreshness`: `live`, `cached`, or `degraded`
+
+If the live Unlink read fails temporarily:
+
+- fall back to the latest stored `private_balance_snapshots` value plus the internal ledger state
+- mark the response as `balanceFreshness = degraded`
+- do not silently pretend the fallback value is a live provider read
 
 Important history rule:
 
@@ -402,7 +416,7 @@ Important history rule:
 
 ### Deliverable
 
-Merchant OS can return a real private-mode balance view even before private withdrawals are complete.
+Merchant OS can return a real private-mode balance view with live Unlink-backed private available balance when the provider is reachable, while still showing pending workflow state even before private withdrawals are complete.
 
 ## Step 5: branch requirement resolution by treasury mode
 

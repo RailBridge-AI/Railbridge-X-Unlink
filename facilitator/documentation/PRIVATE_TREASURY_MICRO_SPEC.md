@@ -413,6 +413,7 @@ That means `privacyVaultService.getBalances(...)` should:
 - treat provider balance reads as first-class
 - not infer balances only from transaction history
 - still reconcile provider balance snapshots against the internal ledger
+- support a freshness indicator so Merchant OS can distinguish live provider reads from fallback values
 
 ## 4.7 Secrets rule
 
@@ -430,8 +431,14 @@ MVP recommendation:
 For private-mode merchants:
 
 - public RPC balance reads are not the primary balance source
-- the internal private ledger is the product source of truth
-- Unlink balance reads are used for reconciliation and operator confidence
+- the live spendable private balance inside Unlink should come from `getBalances()` when available
+- the internal private ledger is the workflow source of truth for pending sweep, pending withdrawal, and reconciliation state
+- Unlink balance reads and internal ledger state should be presented together, not as competing views
+
+In practice, private mode has two related balance truths:
+
+- `privateAvailableBalance`: provider-first, live when possible
+- `treasuryWorkflowState`: ledger-first for amounts still moving through intake, sweep, transfer, or withdrawal states
 
 ## 5.2 New tables
 
@@ -501,9 +508,21 @@ Minimum entry types:
 
 For private mode:
 
-- `privateAvailableBalance` comes from confirmed credits minus confirmed and reserved debits
+- `privateAvailableBalance` should come from a live Unlink balance read when available, filtered to the relevant token
 - `pendingSweepBalance` comes from public intake rows not yet privately credited
 - `pendingWithdrawalBalance` comes from requested or submitted withdrawals not yet confirmed
+
+If the provider read is unavailable:
+
+- use the most recent `private_balance_snapshots` record as a fallback
+- continue deriving pending balances from the internal ledger
+- expose a freshness field so the UI can label the balance as non-live
+
+Suggested freshness values:
+
+- `live`
+- `cached`
+- `degraded`
 
 ## Contract 6: route behavior by privacy coverage
 
@@ -590,6 +609,14 @@ Recommended `historyKind` values:
 
 This can be added without breaking the existing high-level item buckets of settlement and payout.
 
+Balance responses should expose:
+
+- `privateAvailableBalance`
+- `pendingSweepBalance`
+- `pendingWithdrawalBalance`
+- `balanceFreshness`
+- `lastProviderSyncAt`
+
 ## Contract 9: implementation order
 
 Implementation should follow this exact sequence:
@@ -613,4 +640,4 @@ This micro-spec is complete enough to start coding when the team agrees to these
 - `paymentContextId` is the canonical private-mode settlement attribution handle
 - `privacyVaultService` lives in Merchant OS
 - private-mode unsupported routes use `public_fallback`
-- private balances are ledger-first, provider-read-second
+- private available balance is provider-first when live reads succeed, while pending workflow state remains ledger-first
