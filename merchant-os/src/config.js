@@ -106,6 +106,18 @@ const parseStringList = (value) => {
   return [];
 };
 
+const parseJsonObjectEnv = (value, fallback = {}) => {
+  if (value === undefined || value === null || String(value).trim() === "") {
+    return fallback;
+  }
+  try {
+    const parsed = JSON.parse(String(value));
+    return toPlainObject(parsed);
+  } catch {
+    return fallback;
+  }
+};
+
 const parseBooleanValue = (value, fallback) => {
   if (value === undefined || value === null) {
     return fallback;
@@ -303,6 +315,16 @@ export const config = {
   mpcCustodyEnabled: custodyMode !== "legacy",
   custodyMasterKey: process.env.MERCHANT_OS_CUSTODY_MASTER_KEY || "",
   custodyAddress: String(runtimeConfig.custodyAddress ?? ""),
+
+  unlinkEnabled: parseBooleanValue(process.env.UNLINK_ENABLED, false),
+  unlinkApiKey: String(process.env.UNLINK_API_KEY || "").trim(),
+  unlinkEngineUrl: String(process.env.UNLINK_ENGINE_URL || "").trim(),
+  unlinkDefaultEnvironment: String(process.env.UNLINK_DEFAULT_ENVIRONMENT || "base-sepolia").trim(),
+  unlinkEnvironmentByNetwork: {
+    "eip155:84532": "base-sepolia",
+    "eip155:11155111": "ethereum-sepolia",
+    ...parseJsonObjectEnv(process.env.UNLINK_ENVIRONMENT_BY_NETWORK_JSON, {})
+  },
 
   realConsolidationBridgeEnabled: parseBooleanValue(
     runtimeConfig.realConsolidationBridgeEnabled,

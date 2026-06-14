@@ -309,6 +309,45 @@ const runSchemaMigrations = () => {
       ON payment_requirement_contexts(settlement_id);
   `);
   run(`
+    CREATE TABLE IF NOT EXISTS private_accounts (
+      id TEXT PRIMARY KEY,
+      merchant_id TEXT REFERENCES merchants(id),
+      account_id TEXT REFERENCES merchant_accounts(id),
+      provider TEXT NOT NULL,
+      environment TEXT NOT NULL,
+      network TEXT NOT NULL,
+      role TEXT NOT NULL,
+      unlink_address TEXT,
+      key_reference TEXT,
+      status TEXT NOT NULL DEFAULT 'active',
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+  `);
+  run(`
+    CREATE INDEX IF NOT EXISTS idx_private_accounts_tenant
+      ON private_accounts(merchant_id, account_id, provider, environment, role);
+  `);
+  run(`
+    CREATE TABLE IF NOT EXISTS private_balance_snapshots (
+      id TEXT PRIMARY KEY,
+      merchant_id TEXT NOT NULL REFERENCES merchants(id),
+      account_id TEXT NOT NULL REFERENCES merchant_accounts(id),
+      provider TEXT NOT NULL,
+      environment TEXT NOT NULL,
+      network TEXT NOT NULL,
+      asset TEXT NOT NULL,
+      amount TEXT NOT NULL,
+      freshness TEXT NOT NULL,
+      recorded_at TEXT NOT NULL,
+      source_updated_at TEXT
+    );
+  `);
+  run(`
+    CREATE INDEX IF NOT EXISTS idx_private_balance_snapshots_tenant_recorded
+      ON private_balance_snapshots(merchant_id, account_id, network, recorded_at DESC);
+  `);
+  run(`
     CREATE TABLE IF NOT EXISTS chain_catalog (
       network TEXT PRIMARY KEY,
       chain_name TEXT NOT NULL,
@@ -2407,6 +2446,184 @@ export const resolvePaymentRequirementContextForSettlement = ({
     ok: true,
     context: getPaymentRequirementContext(context.paymentContextId)
   };
+};
+
+export const getPrivateAccount = ({
+  merchantId,
+  accountId,
+  provider = "unlink",
+  environment,
+  role = "merchant"
+}) =>
+  one(`
+    SELECT
+      id,
+      merchant_id AS merchantId,
+      account_id AS accountId,
+      provider,
+      environment,
+      network,
+      role,
+      unlink_address AS unlinkAddress,
+      key_reference AS keyReference,
+      status,
+      created_at AS createdAt,
+      updated_at AS updatedAt
+    FROM private_accounts
+    WHERE merchant_id ${merchantId ? `= ${sqlLiteral(merchantId)}` : "IS NULL"}
+      AND account_id ${accountId ? `= ${sqlLiteral(accountId)}` : "IS NULL"}
+      AND provider = ${sqlLiteral(provider)}
+      AND environment = ${sqlLiteral(environment)}
+      AND role = ${sqlLiteral(role)}
+    ORDER BY updated_at DESC
+    LIMIT 1;
+  `);
+
+export const upsertPrivateAccount = (input) => {
+  const existing = getPrivateAccount(input) || null;
+  const id = existing?.id || newId();
+  const createdAt = existing?.createdAt || nowIso();
+  const updatedAt = nowIso();
+
+  run(`
+    INSERT OR REPLACE INTO private_accounts (
+      id,
+      merchant_id,
+      account_id,
+      provider,
+      environment,
+      network,
+      role,
+      unlink_address,
+      key_reference,
+      status,
+      created_at,
+      updated_at
+    ) VALUES (
+      ${sqlLiteral(id)},
+      ${sqlLiteral(input.merchantId || null)},
+      ${sqlLiteral(input.accountId || null)},
+      ${sqlLiteral(input.provider || "unlink")},
+      ${sqlLiteral(input.environment)},
+      ${sqlLiteral(input.network)},
+      ${sqlLiteral(input.role || "merchant")},
+      ${sqlLiteral(input.unlinkAddress || null)},
+      ${sqlLiteral(input.keyReference || null)},
+      ${sqlLiteral(input.status || "active")},
+      ${sqlLiteral(createdAt)},
+      ${sqlLiteral(updatedAt)}
+    );
+  `);
+
+  return getPrivateAccount({
+    merchantId: input.merchantId || null,
+    accountId: input.accountId || null,
+    provider: input.provider || "unlink",
+    environment: input.environment,
+    role: input.role || "merchant"
+  });
+};
+
+export const getLatestPrivateBalanceSnapshot = ({
+  merchantId,
+  accountId,
+  network,
+  asset = "USDC",
+  provider = "unlink"
+}) =>
+  one(`
+    SELECT
+      id,
+      merchant_id AS merchantId,
+      account_id AS accountId,
+      provider,
+      environment,
+      network,
+      asset,
+      amount,
+      freshness,
+      recorded_at AS recordedAt,
+      source_updated_at AS sourceUpdatedAt
+    FROM private_balance_snapshots
+    WHERE merchant_id = ${sqlLiteral(merchantId)}
+      AND account_id = ${sqlLiteral(accountId)}
+      AND network = ${sqlLiteral(network)}
+      AND asset = ${sqlLiteral(asset)}
+      AND provider = ${sqlLiteral(provider)}
+    ORDER BY recorded_at DESC
+    LIMIT 1;
+  `);
+
+export const insertPrivateBalanceSnapshot = (input) => {
+  const id = newId();
+  const recordedAt = String(input.recordedAt || nowIso()).trim();
+  run(`
+    INSERT INTO private_balance_snapshots (
+      id,
+      merchant_id,
+      account_id,
+      provider,
+      environment,
+      network,
+      asset,
+      amount,
+      freshness,
+      recorded_at,
+      source_updated_at
+    ) VALUES (
+      ${sqlLiteral(id)},
+      ${sqlLiteral(input.merchantId)},
+      ${sqlLiteral(input.accountId)},
+      ${sqlLiteral(input.provider || "unlink")},
+      ${sqlLiteral(input.environment)},
+      ${sqlLiteral(input.network)},
+      ${sqlLiteral(input.asset || "USDC")},
+      ${sqlLiteral(input.amount)},
+      ${sqlLiteral(input.freshness || "cached")},
+      ${sqlLiteral(recordedAt)},
+      ${sqlLiteral(input.sourceUpdatedAt || null)}
+    );
+  `);
+
+  return getLatestPrivateBalanceSnapshot({
+    merchantId: input.merchantId,
+    accountId: input.accountId,
+    network: input.network,
+    asset: input.asset || "USDC",
+    provider: input.provider || "unlink"
+  });
+};
+
+export const getPendingPrivateIntakeBalances = (merchantId, accountId) => {
+  const rows = all(`
+    SELECT
+      COALESCE(private_home_network, source_network) AS network,
+      amount
+    FROM payment_requirement_contexts
+    WHERE merchant_id = ${sqlLiteral(merchantId)}
+      AND account_id = ${sqlLiteral(accountId)}
+      AND treasury_mode = 'private'
+      AND privacy_coverage_mode = 'full_private'
+      AND settlement_id IS NOT NULL
+      AND consumed_at IS NULL
+      AND status IN ('settled', 'consumed')
+    ORDER BY network ASC;
+  `);
+
+  const totals = new Map();
+  rows.forEach((row) => {
+    const network = String(row.network || "").trim();
+    if (!network) {
+      return;
+    }
+    const amount = BigInt(String(row.amount || "0"));
+    totals.set(network, (totals.get(network) || 0n) + amount);
+  });
+
+  return [...totals.entries()].map(([network, totalAmount]) => ({
+    network,
+    totalAmount: totalAmount.toString()
+  }));
 };
 
 export const hasSettlementEvent = (eventId) =>

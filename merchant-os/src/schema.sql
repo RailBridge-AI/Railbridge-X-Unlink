@@ -210,6 +210,41 @@ CREATE TABLE IF NOT EXISTS treasury_payout_requests (
   updated_at TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS private_accounts (
+  id TEXT PRIMARY KEY,
+  merchant_id TEXT REFERENCES merchants(id),
+  account_id TEXT REFERENCES merchant_accounts(id),
+  provider TEXT NOT NULL,
+  environment TEXT NOT NULL,
+  network TEXT NOT NULL,
+  role TEXT NOT NULL,
+  unlink_address TEXT,
+  key_reference TEXT,
+  status TEXT NOT NULL DEFAULT 'active',
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_private_accounts_tenant
+  ON private_accounts(merchant_id, account_id, provider, environment, role);
+
+CREATE TABLE IF NOT EXISTS private_balance_snapshots (
+  id TEXT PRIMARY KEY,
+  merchant_id TEXT NOT NULL REFERENCES merchants(id),
+  account_id TEXT NOT NULL REFERENCES merchant_accounts(id),
+  provider TEXT NOT NULL,
+  environment TEXT NOT NULL,
+  network TEXT NOT NULL,
+  asset TEXT NOT NULL,
+  amount TEXT NOT NULL,
+  freshness TEXT NOT NULL,
+  recorded_at TEXT NOT NULL,
+  source_updated_at TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_private_balance_snapshots_tenant_recorded
+  ON private_balance_snapshots(merchant_id, account_id, network, recorded_at DESC);
+
 CREATE TABLE IF NOT EXISTS payout_address_book_entries (
   id TEXT PRIMARY KEY,
   merchant_id TEXT NOT NULL REFERENCES merchants(id),

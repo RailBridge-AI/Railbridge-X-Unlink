@@ -14,6 +14,7 @@ import {
 import { ConsolidationBridgeError, ConsolidationBridgeService } from "./consolidationBridgeService.js";
 import { GasSponsorService } from "./gasSponsorService.js";
 import { transferUsdcOnchain, UsdcTransferError } from "./usdcTransferService.js";
+import { privacyVaultService } from "./privacyVaultService.js";
 import {
   acquireTenantMutationDbLock,
   authenticatePlatformUser,
@@ -45,6 +46,7 @@ import {
   getWebhookEndpointById,
   hasSettlementLifecycleEvent,
   getPayoutRequest,
+  getPendingPrivateIntakeBalances,
   getPolicy,
   getSession,
   queryTimeline,
@@ -595,9 +597,122 @@ const buildOverviewResponse = async (merchantId, accountId, options = {}) => {
   const onchainMode = BALANCES_ONCHAIN_MODES.has(options.onchainMode)
     ? options.onchainMode
     : "priority";
+  const policy = getPolicy(merchantId, accountId);
+  if (policy?.treasuryMode === "private") {
+    const privateHomeNetwork = String(policy.privateHomeNetwork || "").trim() || String(policy.preferredNetwork || "").trim();
+    const projectedPublicBalances = getBalances(merchantId, accountId);
+    const projectedPublicByNetwork = new Map(
+      projectedPublicBalances.map((row) => [row.network, BigInt(String(row.amount || "0"))])
+    );
+    const liveBalance = privateHomeNetwork
+      ? await privacyVaultService.getPrivateBalance({
+          merchantId,
+          accountId,
+          network: privateHomeNetwork
+        })
+      : {
+          provider: "unlink",
+          environment: null,
+          network: null,
+          amount: "0",
+          freshness: "degraded",
+          lastProviderSyncAt: null,
+          readStatus: "private_home_network_missing"
+        };
+    const pendingRows = getPendingPrivateIntakeBalances(merchantId, accountId);
+    const pendingByNetwork = new Map(
+      pendingRows.map((row) => [row.network, BigInt(String(row.totalAmount || "0"))])
+    );
+    const networks = new Set([
+      ...projectedPublicByNetwork.keys(),
+      ...pendingByNetwork.keys(),
+      ...(privateHomeNetwork ? [privateHomeNetwork] : [])
+    ]);
+    const balances = [...networks]
+      .filter(Boolean)
+      .map((network) => {
+        const privateAvailable =
+          network === privateHomeNetwork ? BigInt(String(liveBalance.amount || "0")) : 0n;
+        const projectedPublicAmount = projectedPublicByNetwork.get(network) || 0n;
+        const pendingSweepAmount = pendingByNetwork.get(network) || 0n;
+        const publicFallbackAmount =
+          projectedPublicAmount > pendingSweepAmount ? projectedPublicAmount - pendingSweepAmount : 0n;
+        const pendingWithdrawalAmount = 0n;
+        const availableAmount = privateAvailable + publicFallbackAmount;
+        const projectedAmount = availableAmount + pendingSweepAmount;
+        return {
+          network,
+          asset: "USDC",
+          amount: availableAmount.toString(),
+          decimals: 6,
+          usdValue: toDecimalUsdcString(availableAmount),
+          projectedAmount: projectedAmount.toString(),
+          projectedUsdValue: toDecimalUsdcString(projectedAmount),
+          pendingAmount: pendingSweepAmount.toString(),
+          pendingUsdValue: toDecimalUsdcString(pendingSweepAmount),
+          privateAvailableAmount: privateAvailable.toString(),
+          privateAvailableUsdValue: toDecimalUsdcString(privateAvailable),
+          publicFallbackAmount: publicFallbackAmount.toString(),
+          publicFallbackUsdValue: toDecimalUsdcString(publicFallbackAmount),
+          pendingSweepAmount: pendingSweepAmount.toString(),
+          pendingSweepUsdValue: toDecimalUsdcString(pendingSweepAmount),
+          pendingWithdrawalAmount: pendingWithdrawalAmount.toString(),
+          pendingWithdrawalUsdValue: toDecimalUsdcString(pendingWithdrawalAmount),
+          onchainAmount: null,
+          source:
+            privateAvailable > 0n && publicFallbackAmount > 0n
+              ? "hybrid_private_public_fallback"
+              : privateAvailable > 0n
+                ? "private"
+                : publicFallbackAmount > 0n
+                  ? "public_fallback"
+                  : "private_pending",
+          readStatus:
+            network === privateHomeNetwork
+              ? liveBalance.readStatus
+              : publicFallbackAmount > 0n
+                ? "public_fallback_balance"
+                : "ledger_pending_private_intake",
+          balanceFreshness:
+            network === privateHomeNetwork ? liveBalance.freshness : "cached",
+          lastProviderSyncAt:
+            network === privateHomeNetwork ? liveBalance.lastProviderSyncAt : null,
+          updatedAt:
+            network === privateHomeNetwork && liveBalance.lastProviderSyncAt
+              ? liveBalance.lastProviderSyncAt
+              : nowIso()
+        };
+      })
+      .sort((left, right) => left.network.localeCompare(right.network));
+
+    const availableBaseUnits = balances.reduce((sum, row) => sum + BigInt(row.amount), 0n);
+    const projectedBaseUnits = balances.reduce((sum, row) => sum + BigInt(row.projectedAmount), 0n);
+    const pendingSweepBaseUnits = balances.reduce((sum, row) => sum + BigInt(row.pendingSweepAmount), 0n);
+    const pendingWithdrawalBaseUnits = balances.reduce(
+      (sum, row) => sum + BigInt(row.pendingWithdrawalAmount),
+      0n
+    );
+
+    return {
+      merchantId,
+      accountId,
+      asOf: nowIso(),
+      onchainMode: "private",
+      unifiedUsd: toDecimalUsdcString(availableBaseUnits),
+      availableUsd: toDecimalUsdcString(availableBaseUnits),
+      projectedUsd: toDecimalUsdcString(projectedBaseUnits),
+      pendingBridgeUsd: toDecimalUsdcString(pendingSweepBaseUnits),
+      pendingSweepUsd: toDecimalUsdcString(pendingSweepBaseUnits),
+      pendingWithdrawalUsd: toDecimalUsdcString(pendingWithdrawalBaseUnits),
+      balanceFreshness: liveBalance.freshness,
+      lastProviderSyncAt: liveBalance.lastProviderSyncAt,
+      policy,
+      balances
+    };
+  }
+
   const runtimeMaps = resolveRuntimeChainMaps();
   const projectedBalances = getBalances(merchantId, accountId);
-  const policy = getPolicy(merchantId, accountId);
   const wallets = getWallets(merchantId, accountId);
   const walletByNetwork = new Map(wallets.map((wallet) => [wallet.network, wallet]));
   const projectedByNetwork = new Map(
@@ -2996,9 +3111,14 @@ const server = createServer(async (req, res) => {
           accountId: key.accountId,
           asOf: overview.asOf,
           onchainMode: overview.onchainMode,
+          treasuryMode: overview.policy?.treasuryMode || "public",
           availableUsd: overview.availableUsd,
           projectedUsd: overview.projectedUsd,
           pendingBridgeUsd: overview.pendingBridgeUsd,
+          pendingSweepUsd: overview.pendingSweepUsd || "0",
+          pendingWithdrawalUsd: overview.pendingWithdrawalUsd || "0",
+          balanceFreshness: overview.balanceFreshness || null,
+          lastProviderSyncAt: overview.lastProviderSyncAt || null,
           balances: overview.balances
         });
       }
