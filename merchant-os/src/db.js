@@ -11,6 +11,7 @@ import {
   generateCustodyWallet,
   isValidCustodyMasterKey
 } from "./custodyKeyManager.js";
+import { normalizeUsdcAsset } from "./services/usdcRoutingService.js";
 import { addHoursIso, newId, nowIso, statusPrecedence, toDecimalUsdcString } from "./utils.js";
 
 const __filename = fileURLToPath(import.meta.url);
@@ -82,6 +83,14 @@ const normalizePaymentContextPayTo = (value) => {
 
 const normalizeTreasuryMode = (value) =>
   String(value || "").trim().toLowerCase() === "private" ? "private" : "public";
+
+const normalizePaymentContextAsset = (value) => {
+  const normalizedUsdc = normalizeUsdcAsset(value);
+  if (normalizedUsdc) {
+    return normalizedUsdc;
+  }
+  return String(value || "").trim().toLowerCase();
+};
 
 const CUSTODY_MASTER_KEY_ERROR =
   "MERCHANT_OS_CUSTODY_MASTER_KEY is required and must be a 32-byte hex string (64 hex chars, optional 0x prefix)";
@@ -327,6 +336,36 @@ const runSchemaMigrations = () => {
   run(`
     CREATE INDEX IF NOT EXISTS idx_private_accounts_tenant
       ON private_accounts(merchant_id, account_id, provider, environment, role);
+  `);
+  run(`
+    CREATE TABLE IF NOT EXISTS private_ledger_entries (
+      id TEXT PRIMARY KEY,
+      merchant_id TEXT NOT NULL REFERENCES merchants(id),
+      account_id TEXT NOT NULL REFERENCES merchant_accounts(id),
+      provider TEXT NOT NULL,
+      environment TEXT NOT NULL,
+      network TEXT NOT NULL,
+      asset TEXT NOT NULL,
+      entry_type TEXT NOT NULL,
+      direction TEXT NOT NULL,
+      amount TEXT NOT NULL,
+      available_delta TEXT NOT NULL,
+      pending_sweep_delta TEXT NOT NULL,
+      pending_withdrawal_delta TEXT NOT NULL,
+      reference_type TEXT NOT NULL,
+      reference_id TEXT NOT NULL,
+      idempotency_key TEXT NOT NULL UNIQUE,
+      metadata_json TEXT,
+      created_at TEXT NOT NULL
+    );
+  `);
+  run(`
+    CREATE INDEX IF NOT EXISTS idx_private_ledger_entries_tenant_created
+      ON private_ledger_entries(merchant_id, account_id, network, created_at DESC);
+  `);
+  run(`
+    CREATE INDEX IF NOT EXISTS idx_private_ledger_entries_reference
+      ON private_ledger_entries(reference_type, reference_id);
   `);
   run(`
     CREATE TABLE IF NOT EXISTS private_balance_snapshots (
@@ -2400,14 +2439,14 @@ export const resolvePaymentRequirementContextForSettlement = ({
   const expectedValues = {
     scheme: String(context.scheme || "").trim(),
     sourceNetwork: String(context.sourceNetwork || "").trim(),
-    asset: String(context.asset || "").trim().toLowerCase(),
+    asset: normalizePaymentContextAsset(context.asset),
     amount: String(context.amount || "").trim(),
     publicPayTo: normalizePaymentContextPayTo(context.publicPayTo)
   };
   const actualValues = {
     scheme: String(scheme || "").trim(),
     sourceNetwork: String(sourceNetwork || "").trim(),
-    asset: String(asset || "").trim().toLowerCase(),
+    asset: normalizePaymentContextAsset(asset),
     amount: String(amount || "").trim(),
     publicPayTo: normalizePaymentContextPayTo(publicPayTo)
   };
@@ -2439,12 +2478,29 @@ export const resolvePaymentRequirementContextForSettlement = ({
           ELSE 'settled'
         END,
         settled_at = COALESCE(settled_at, ${sqlLiteral(settledAt)})
-    WHERE payment_context_id = ${sqlLiteral(context.paymentContextId)};
+    WHERE payment_context_id = ${sqlLiteral(context.paymentContextId)}
+      AND (settlement_id IS NULL OR settlement_id = ${sqlLiteral(settlementId)});
   `);
+
+  const resolvedContext = getPaymentRequirementContext(context.paymentContextId);
+  if (!resolvedContext) {
+    return {
+      ok: false,
+      code: "not_found",
+      error: "paymentContextId was not found after settlement binding"
+    };
+  }
+  if (resolvedContext.settlementId && resolvedContext.settlementId !== settlementId) {
+    return {
+      ok: false,
+      code: "reused",
+      error: "paymentContextId is already bound to another settlement"
+    };
+  }
 
   return {
     ok: true,
-    context: getPaymentRequirementContext(context.paymentContextId)
+    context: resolvedContext
   };
 };
 
@@ -2524,6 +2580,165 @@ export const upsertPrivateAccount = (input) => {
   });
 };
 
+const parsePrivateLedgerEntryRow = (row) => {
+  if (!row) {
+    return null;
+  }
+
+  let metadata = null;
+  if (row.metadataJson) {
+    try {
+      metadata = JSON.parse(String(row.metadataJson));
+    } catch {
+      metadata = null;
+    }
+  }
+
+  return {
+    ...row,
+    metadata
+  };
+};
+
+export const getPrivateLedgerEntryByIdempotencyKey = (idempotencyKey) =>
+  parsePrivateLedgerEntryRow(
+    one(`
+      SELECT
+        id,
+        merchant_id AS merchantId,
+        account_id AS accountId,
+        provider,
+        environment,
+        network,
+        asset,
+        entry_type AS entryType,
+        direction,
+        amount,
+        available_delta AS availableDelta,
+        pending_sweep_delta AS pendingSweepDelta,
+        pending_withdrawal_delta AS pendingWithdrawalDelta,
+        reference_type AS referenceType,
+        reference_id AS referenceId,
+        idempotency_key AS idempotencyKey,
+        metadata_json AS metadataJson,
+        created_at AS createdAt
+      FROM private_ledger_entries
+      WHERE idempotency_key = ${sqlLiteral(String(idempotencyKey || "").trim())}
+      LIMIT 1;
+    `)
+  );
+
+export const insertPrivateLedgerEntry = (input) => {
+  const idempotencyKey = String(input.idempotencyKey || "").trim();
+  if (!idempotencyKey) {
+    throw new Error("idempotencyKey is required");
+  }
+
+  const existing = getPrivateLedgerEntryByIdempotencyKey(idempotencyKey);
+  if (existing) {
+    return existing;
+  }
+
+  const id = String(input.id || newId()).trim();
+  const createdAt = String(input.createdAt || nowIso()).trim();
+  const metadataJson =
+    input.metadata && typeof input.metadata === "object" ? JSON.stringify(input.metadata) : null;
+
+  run(`
+    INSERT OR IGNORE INTO private_ledger_entries (
+      id,
+      merchant_id,
+      account_id,
+      provider,
+      environment,
+      network,
+      asset,
+      entry_type,
+      direction,
+      amount,
+      available_delta,
+      pending_sweep_delta,
+      pending_withdrawal_delta,
+      reference_type,
+      reference_id,
+      idempotency_key,
+      metadata_json,
+      created_at
+    ) VALUES (
+      ${sqlLiteral(id)},
+      ${sqlLiteral(input.merchantId)},
+      ${sqlLiteral(input.accountId)},
+      ${sqlLiteral(input.provider || "unlink")},
+      ${sqlLiteral(input.environment)},
+      ${sqlLiteral(input.network)},
+      ${sqlLiteral(input.asset || "USDC")},
+      ${sqlLiteral(input.entryType)},
+      ${sqlLiteral(input.direction)},
+      ${sqlLiteral(input.amount)},
+      ${sqlLiteral(input.availableDelta || "0")},
+      ${sqlLiteral(input.pendingSweepDelta || "0")},
+      ${sqlLiteral(input.pendingWithdrawalDelta || "0")},
+      ${sqlLiteral(input.referenceType)},
+      ${sqlLiteral(input.referenceId)},
+      ${sqlLiteral(idempotencyKey)},
+      ${sqlLiteral(metadataJson)},
+      ${sqlLiteral(createdAt)}
+    );
+  `);
+
+  return getPrivateLedgerEntryByIdempotencyKey(idempotencyKey);
+};
+
+export const getPrivateLedgerWorkflowBalances = (merchantId, accountId) => {
+  const rows = all(`
+    SELECT
+      network,
+      available_delta AS availableDelta,
+      pending_sweep_delta AS pendingSweepDelta,
+      pending_withdrawal_delta AS pendingWithdrawalDelta
+    FROM private_ledger_entries
+    WHERE merchant_id = ${sqlLiteral(merchantId)}
+      AND account_id = ${sqlLiteral(accountId)}
+      AND asset = 'USDC'
+    ORDER BY created_at ASC;
+  `);
+
+  const parseAmount = (value) => {
+    try {
+      return BigInt(String(value || "0"));
+    } catch {
+      return 0n;
+    }
+  };
+
+  const totals = new Map();
+  rows.forEach((row) => {
+    const network = String(row.network || "").trim();
+    if (!network) {
+      return;
+    }
+    const current = totals.get(network) || {
+      network,
+      availableAmount: 0n,
+      pendingSweepAmount: 0n,
+      pendingWithdrawalAmount: 0n
+    };
+    current.availableAmount += parseAmount(row.availableDelta);
+    current.pendingSweepAmount += parseAmount(row.pendingSweepDelta);
+    current.pendingWithdrawalAmount += parseAmount(row.pendingWithdrawalDelta);
+    totals.set(network, current);
+  });
+
+  return [...totals.values()]
+    .map((row) => ({
+      network: row.network,
+      availableAmount: row.availableAmount.toString(),
+      pendingSweepAmount: row.pendingSweepAmount.toString(),
+      pendingWithdrawalAmount: row.pendingWithdrawalAmount.toString()
+    }))
+    .sort((left, right) => left.network.localeCompare(right.network));
+};
+
 export const getLatestPrivateBalanceSnapshot = ({
   merchantId,
   accountId,
@@ -2595,35 +2810,25 @@ export const insertPrivateBalanceSnapshot = (input) => {
 };
 
 export const getPendingPrivateIntakeBalances = (merchantId, accountId) => {
-  const rows = all(`
-    SELECT
-      COALESCE(private_home_network, source_network) AS network,
-      amount
-    FROM payment_requirement_contexts
-    WHERE merchant_id = ${sqlLiteral(merchantId)}
-      AND account_id = ${sqlLiteral(accountId)}
-      AND treasury_mode = 'private'
-      AND privacy_coverage_mode = 'full_private'
-      AND settlement_id IS NOT NULL
-      AND consumed_at IS NULL
-      AND status IN ('settled', 'consumed')
-    ORDER BY network ASC;
-  `);
-
-  const totals = new Map();
-  rows.forEach((row) => {
-    const network = String(row.network || "").trim();
-    if (!network) {
-      return;
-    }
-    const amount = BigInt(String(row.amount || "0"));
-    totals.set(network, (totals.get(network) || 0n) + amount);
-  });
-
-  return [...totals.entries()].map(([network, totalAmount]) => ({
-    network,
-    totalAmount: totalAmount.toString()
-  }));
+  return getPrivateLedgerWorkflowBalances(merchantId, accountId)
+    .map((row) => {
+      try {
+        return {
+          network: row.network,
+          totalAmount: BigInt(String(row.pendingSweepAmount || "0"))
+        };
+      } catch {
+        return {
+          network: row.network,
+          totalAmount: 0n
+        };
+      }
+    })
+    .filter((row) => row.totalAmount > 0n)
+    .map((row) => ({
+      network: row.network,
+      totalAmount: row.totalAmount.toString()
+    }));
 };
 
 export const hasSettlementEvent = (eventId) =>

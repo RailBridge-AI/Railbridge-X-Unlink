@@ -228,6 +228,33 @@ CREATE TABLE IF NOT EXISTS private_accounts (
 CREATE INDEX IF NOT EXISTS idx_private_accounts_tenant
   ON private_accounts(merchant_id, account_id, provider, environment, role);
 
+CREATE TABLE IF NOT EXISTS private_ledger_entries (
+  id TEXT PRIMARY KEY,
+  merchant_id TEXT NOT NULL REFERENCES merchants(id),
+  account_id TEXT NOT NULL REFERENCES merchant_accounts(id),
+  provider TEXT NOT NULL,
+  environment TEXT NOT NULL,
+  network TEXT NOT NULL,
+  asset TEXT NOT NULL,
+  entry_type TEXT NOT NULL,
+  direction TEXT NOT NULL,
+  amount TEXT NOT NULL,
+  available_delta TEXT NOT NULL,
+  pending_sweep_delta TEXT NOT NULL,
+  pending_withdrawal_delta TEXT NOT NULL,
+  reference_type TEXT NOT NULL,
+  reference_id TEXT NOT NULL,
+  idempotency_key TEXT NOT NULL UNIQUE,
+  metadata_json TEXT,
+  created_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_private_ledger_entries_tenant_created
+  ON private_ledger_entries(merchant_id, account_id, network, created_at DESC);
+
+CREATE INDEX IF NOT EXISTS idx_private_ledger_entries_reference
+  ON private_ledger_entries(reference_type, reference_id);
+
 CREATE TABLE IF NOT EXISTS private_balance_snapshots (
   id TEXT PRIMARY KEY,
   merchant_id TEXT NOT NULL REFERENCES merchants(id),

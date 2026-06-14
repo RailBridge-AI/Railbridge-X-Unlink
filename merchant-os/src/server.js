@@ -49,6 +49,7 @@ import {
   getPendingPrivateIntakeBalances,
   getPolicy,
   getSession,
+  insertPrivateLedgerEntry,
   queryTimeline,
   resolvePaymentRequirementContextForSettlement,
   getTimeline,
@@ -641,6 +642,8 @@ const buildOverviewResponse = async (merchantId, accountId, options = {}) => {
         const pendingWithdrawalAmount = 0n;
         const availableAmount = privateAvailable + publicFallbackAmount;
         const projectedAmount = availableAmount + pendingSweepAmount;
+        const hasPendingOnly =
+          pendingSweepAmount > 0n && privateAvailable === 0n && publicFallbackAmount === 0n;
         return {
           network,
           asset: "USDC",
@@ -669,7 +672,9 @@ const buildOverviewResponse = async (merchantId, accountId, options = {}) => {
                   ? "public_fallback"
                   : "private_pending",
           readStatus:
-            network === privateHomeNetwork
+            hasPendingOnly
+              ? "ledger_pending_private_intake"
+              : network === privateHomeNetwork
               ? liveBalance.readStatus
               : publicFallbackAmount > 0n
                 ? "public_fallback_balance"
@@ -2607,7 +2612,7 @@ const server = createServer(async (req, res) => {
           publicPayTo
         });
         if (!resolved.ok) {
-          return sendJson(res, 400, {
+          return sendJson(res, resolved.code === "reused" ? 409 : 400, {
             error: resolved.error,
             code: resolved.code,
             paymentContextId
@@ -2685,6 +2690,43 @@ const server = createServer(async (req, res) => {
             bridgeTxHash,
             destinationTxHash,
             confirmations
+          }
+        });
+      }
+
+      if (
+        paymentContextId &&
+        resolvedPaymentContext?.treasuryMode === "private" &&
+        resolvedPaymentContext?.privacyCoverageMode === "full_private" &&
+        status === "settled_source"
+      ) {
+        const privateLedgerNetwork =
+          String(resolvedPaymentContext.privateHomeNetwork || "").trim() || sourceNetwork;
+        const environment =
+          privacyVaultService.getEnvironmentForNetwork(privateLedgerNetwork) || config.unlinkDefaultEnvironment;
+        insertPrivateLedgerEntry({
+          merchantId: resolvedMerchantId,
+          accountId: resolvedAccountId,
+          provider: "unlink",
+          environment,
+          network: privateLedgerNetwork,
+          asset: "USDC",
+          entryType: "payment.settled_public_intake",
+          direction: "credit",
+          amount,
+          availableDelta: "0",
+          pendingSweepDelta: amount,
+          pendingWithdrawalDelta: "0",
+          referenceType: "settlement",
+          referenceId: settlementId,
+          idempotencyKey: `private:intake:${settlementId}`,
+          metadata: {
+            paymentContextId,
+            sourceNetwork,
+            privateHomeNetwork: resolvedPaymentContext.privateHomeNetwork || null,
+            txHash,
+            sourceTxHash,
+            publicPayTo: resolvedPaymentContext.publicPayTo || publicPayTo
           }
         });
       }

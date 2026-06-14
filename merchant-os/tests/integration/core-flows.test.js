@@ -563,4 +563,139 @@ describe("Merchant OS core integration flows", () => {
     assert.equal(listResponse.status, 200);
     assert.equal(listResponse.body.items.length, 0);
   });
+
+  test("private intake settlements create pending private ledger balances", async () => {
+    const onboarding = await call({
+      path: "/v1/onboarding/start",
+      method: "POST",
+      body: {
+        merchantName: "Private Intake Merchant",
+        adminEmail: `private.${Date.now()}@example.com`,
+        adminPassword: "StrongPass123!",
+        complianceProfile: { country: "US" }
+      }
+    });
+    assert.equal(onboarding.status, 201);
+    const privateToken = onboarding.body.token;
+    const privateApiKey = onboarding.body.apiKey;
+    const privateMerchantId = onboarding.body.merchantId;
+    const privateAccountId = onboarding.body.accountId;
+
+    const policyResponse = await call({
+      path: "/v1/onboarding/policy",
+      method: "PATCH",
+      headers: {
+        authorization: `Bearer ${privateToken}`
+      },
+      body: {
+        treasuryMode: "private",
+        privateHomeNetwork: "eip155:84532"
+      }
+    });
+    assert.equal(policyResponse.status, 200);
+    assert.equal(policyResponse.body.policy.treasuryMode, "private");
+    assert.equal(policyResponse.body.policy.privateHomeNetwork, "eip155:84532");
+
+    const createProduct = await call({
+      path: `/v1/merchants/${privateMerchantId}/products`,
+      method: "POST",
+      headers: {
+        "x-railbridge-api-key": privateApiKey
+      },
+      body: {
+        apiId: "private_intake_product",
+        apiName: "Private Intake Product",
+        method: "GET",
+        path: "/api/private-intake",
+        sourceNetwork: "eip155:84532",
+        amountUsdc: "0.02"
+      }
+    });
+    assert.equal(createProduct.status, 201);
+
+    const resolved = await call({
+      path: "/v1/internal/requirements/resolve",
+      method: "POST",
+      headers: {
+        "x-merchant-os-internal-token": "test-internal-token"
+      },
+      body: {
+        merchantId: privateMerchantId,
+        accountId: privateAccountId,
+        method: "GET",
+        path: "/api/private-intake"
+      }
+    });
+    assert.equal(resolved.status, 200);
+    assert.equal(resolved.body.requirement.network, "eip155:84532");
+    assert.equal(resolved.body.requirement.extra.rbPrivacy.treasuryMode, "private");
+    assert.equal(resolved.body.requirement.extra.rbPrivacy.privacyCoverageMode, "full_private");
+    assert.ok(resolved.body.requirement.extra.rbPrivacy.paymentContextId);
+    assert.equal(resolved.body.requirement.price.extra.merchantId, undefined);
+    assert.equal(resolved.body.requirement.extra.merchantId, undefined);
+
+    const paymentContextId = resolved.body.requirement.extra.rbPrivacy.paymentContextId;
+    const settlementId = `stl_private_${Date.now()}`;
+    const ingest = await call({
+      path: "/v1/internal/events/settlements",
+      method: "POST",
+      headers: {
+        "x-merchant-os-ingest-token": "test-ingest-token"
+      },
+      body: {
+        eventId: `evt_private_${Date.now()}`,
+        settlementId,
+        paymentContextId,
+        sourceNetwork: "eip155:84532",
+        asset: "USDC",
+        amount: "20000",
+        status: "settled_source",
+        txHash: "0xprivateintake000000000000000000000000000001",
+        publicPayTo: resolved.body.requirement.payTo
+      }
+    });
+    assert.equal(ingest.status, 200);
+    assert.equal(ingest.body.duplicate, false);
+    assert.equal(ingest.body.merchantId, privateMerchantId);
+    assert.equal(ingest.body.accountId, privateAccountId);
+
+    const reuseAttempt = await call({
+      path: "/v1/internal/events/settlements",
+      method: "POST",
+      headers: {
+        "x-merchant-os-ingest-token": "test-ingest-token"
+      },
+      body: {
+        eventId: `evt_private_reuse_${Date.now()}`,
+        settlementId: `stl_private_reuse_${Date.now()}`,
+        paymentContextId,
+        sourceNetwork: "eip155:84532",
+        asset: "USDC",
+        amount: "20000",
+        status: "settled_source",
+        txHash: "0xprivateintake000000000000000000000000000002",
+        publicPayTo: resolved.body.requirement.payTo
+      }
+    });
+    assert.equal(reuseAttempt.status, 409);
+    assert.equal(reuseAttempt.body.code, "reused");
+
+    const balances = await call({
+      path: `/v1/merchants/${privateMerchantId}/balances`,
+      headers: {
+        "x-railbridge-api-key": privateApiKey
+      }
+    });
+    assert.equal(balances.status, 200);
+    assert.equal(balances.body.treasuryMode, "private");
+    assert.equal(balances.body.availableUsd, "0");
+    assert.equal(balances.body.projectedUsd, "0.02");
+    assert.equal(balances.body.pendingSweepUsd, "0.02");
+    const privateBalance = balances.body.balances.find((item) => item.network === "eip155:84532");
+    assert.ok(privateBalance);
+    assert.equal(privateBalance.pendingSweepAmount, "20000");
+    assert.equal(privateBalance.publicFallbackAmount, "0");
+    assert.equal(privateBalance.privateAvailableAmount, "0");
+    assert.equal(privateBalance.readStatus, "ledger_pending_private_intake");
+  });
 });
