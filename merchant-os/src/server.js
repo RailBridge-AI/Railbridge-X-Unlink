@@ -541,8 +541,8 @@ const ensureAccountExists = (res, merchantId, accountId) => {
 
 const BALANCES_ONCHAIN_MODES = new Set(["skip", "priority", "all"]);
 const TIMELINE_FILTER_TO_ITEM_TYPES = {
-  treasury: ["consolidation"],
-  payment: ["settlement"],
+  treasury: ["consolidation", "private_sweep", "private_transfer"],
+  payment: ["settlement", "private_sweep", "private_transfer"],
   payouts: ["payout"]
 };
 

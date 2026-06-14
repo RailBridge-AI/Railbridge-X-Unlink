@@ -729,5 +729,32 @@ describe("Merchant OS core integration flows", () => {
     assert.equal(privateBalanceAfterSweep.publicFallbackAmount, "0");
     assert.equal(privateBalanceAfterSweep.privateAvailableAmount, "20000");
     assert.equal(privateBalanceAfterSweep.readStatus, "snapshot_fallback");
+
+    const settlements = await call({
+      path: `/v1/merchants/${privateMerchantId}/settlements`,
+      headers: {
+        "x-railbridge-api-key": privateApiKey
+      }
+    });
+    assert.equal(settlements.status, 200);
+    const settlementItem = settlements.body.items.find(
+      (item) => item.itemType === "settlement" && item.settlementId === settlementId
+    );
+    assert.ok(settlementItem);
+    assert.equal(settlementItem.privacyStage, "public_intake");
+
+    const sweepItem = settlements.body.items.find(
+      (item) => item.itemType === "private_sweep" && item.settlementId === settlementId
+    );
+    assert.ok(sweepItem);
+    assert.equal(sweepItem.status, "confirmed");
+    assert.ok(sweepItem.providerTxId);
+
+    const transferItem = settlements.body.items.find(
+      (item) => item.itemType === "private_transfer" && item.settlementId === settlementId
+    );
+    assert.ok(transferItem);
+    assert.equal(transferItem.status, "confirmed");
+    assert.ok(transferItem.providerTxId);
   });
 });

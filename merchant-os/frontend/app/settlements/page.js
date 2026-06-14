@@ -31,6 +31,16 @@ const statusLabel = (itemType, status) => {
     bridge_confirmed: "Transfer Complete",
     failed: "Failed"
   };
+  const privateSweepMap = {
+    submitted: "Sweep Submitted",
+    confirmed: "Sweep Complete",
+    failed: "Sweep Failed"
+  };
+  const privateTransferMap = {
+    submitted: "Transfer Submitted",
+    confirmed: "Private Credit",
+    failed: "Transfer Failed"
+  };
   const consolidationMap = {
     submitted: "Submitted",
     confirmed: "Transfer Complete",
@@ -47,7 +57,11 @@ const statusLabel = (itemType, status) => {
       ? consolidationMap
       : itemType === "payout"
         ? payoutMap
-        : settlementMap;
+        : itemType === "private_sweep"
+          ? privateSweepMap
+          : itemType === "private_transfer"
+            ? privateTransferMap
+            : settlementMap;
   return map[normalizedStatus] || normalizedStatus || "Unknown";
 };
 
@@ -74,7 +88,8 @@ const resolvePrimaryTransactionNetwork = (item) => {
   return String(network || "").trim();
 };
 
-const itemTypeBadge = (itemType) => {
+const itemTypeBadge = (item) => {
+  const itemType = item?.itemType;
   if (itemType === "consolidation") {
     return {
       label: "Treasury Bridge",
@@ -87,18 +102,46 @@ const itemTypeBadge = (itemType) => {
       tone: "border-amber-200 bg-amber-50 text-amber-800"
     };
   }
+  if (itemType === "private_sweep") {
+    return {
+      label: "Private Sweep",
+      tone: "border-violet-200 bg-violet-50 text-violet-800"
+    };
+  }
+  if (itemType === "private_transfer") {
+    return {
+      label: "Private Transfer",
+      tone: "border-fuchsia-200 bg-fuchsia-50 text-fuchsia-800"
+    };
+  }
+  if (item?.privacyStage === "public_intake") {
+    return {
+      label: "Public Intake",
+      tone: "border-emerald-200 bg-emerald-50 text-emerald-800"
+    };
+  }
   return {
     label: "Payment",
     tone: "border-emerald-200 bg-emerald-50 text-emerald-800"
   };
 };
 
-const itemHeadline = (itemType) => {
+const itemHeadline = (item) => {
+  const itemType = item?.itemType;
   if (itemType === "consolidation") {
     return "Treasury transfer";
   }
   if (itemType === "payout") {
     return "Payout";
+  }
+  if (itemType === "private_sweep") {
+    return "Omnibus sweep";
+  }
+  if (itemType === "private_transfer") {
+    return "Private treasury credit";
+  }
+  if (item?.privacyStage === "public_intake") {
+    return "Public intake payment";
   }
   return "Customer payment";
 };
@@ -183,7 +226,7 @@ const buildTransactionEntries = (item, chainsByNetwork) => {
     }
   } else if (item.itemType === "settlement") {
     pushEntry({
-      label: "Payment tx",
+      label: item.privacyStage === "public_intake" ? "Public intake tx" : "Payment tx",
       txHash: item.sourceTxHash,
       network: item.sourceNetwork
     });
@@ -206,7 +249,30 @@ const buildTransactionEntries = (item, chainsByNetwork) => {
         network: item.destinationNetwork || item.sourceNetwork
       });
     }
-  } else {
+  } else if (item.itemType === "private_sweep" || item.itemType === "private_transfer") {
+    if (String(item.providerTxId || "").trim()) {
+      entries.push({
+        label: "Unlink tx id",
+        txHash: String(item.providerTxId).trim(),
+        network: "",
+        networkName: "",
+        explorerUrl: null,
+        isProviderReference: true
+      });
+    }
+    if (String(item.txHash || "").trim()) {
+      const chain = chainsByNetwork[item.sourceNetwork];
+      const networkInfo = item.sourceNetwork ? getNetworkInfo(item.sourceNetwork) : null;
+      entries.push({
+        label: item.itemType === "private_sweep" ? "Sweep tx hash" : "Transfer tx hash",
+        txHash: String(item.txHash).trim(),
+        network: item.sourceNetwork,
+        networkName: networkInfo?.name || "",
+        explorerUrl: buildExplorerTransactionUrl(chain?.explorerUrl, item.txHash),
+        isProviderReference: !chain?.explorerUrl
+      });
+    }
+  } else if (item.itemType === "payout") {
     pushEntry({
       label: "Payout tx",
       txHash: item.sourceTxHash || item.txHash,
@@ -401,7 +467,7 @@ export default function SettlementsPage() {
           const destination = item.destinationNetwork ? getNetworkInfo(item.destinationNetwork) : null;
           const token = getTokenInfo(item.asset || "USDC");
           const transactionEntries = buildTransactionEntries(item, chainsByNetwork);
-          const badge = itemTypeBadge(item.itemType);
+          const badge = itemTypeBadge(item);
           return (
             <article key={item.id} className="rounded-xl border border-slate-200 bg-slate-50 p-3 text-sm">
               <div className="flex flex-wrap items-center justify-between gap-2">
@@ -410,7 +476,7 @@ export default function SettlementsPage() {
                     {badge.label}
                   </span>
                   <p className="font-semibold">
-                    {itemHeadline(item.itemType)} · {statusLabel(item.itemType, item.status)}
+                    {itemHeadline(item)} · {statusLabel(item.itemType, item.status)}
                   </p>
                 </div>
                 <p className="text-xs text-slate-500">{formatDate(item.createdAt)}</p>

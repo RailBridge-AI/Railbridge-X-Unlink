@@ -3710,6 +3710,8 @@ const buildTimelineUnionSql = (merchantId, accountId) => `
     block_number AS blockNumber,
     log_index AS logIndex,
     confirmations,
+    NULL AS providerTxId,
+    NULL AS privacyStage,
     created_at AS createdAt
   FROM treasury_settlement_events
   WHERE merchant_id = ${sqlLiteral(merchantId)}
@@ -3738,6 +3740,8 @@ const buildTimelineUnionSql = (merchantId, accountId) => `
     NULL AS blockNumber,
     NULL AS logIndex,
     NULL AS confirmations,
+    NULL AS providerTxId,
+    NULL AS privacyStage,
     created_at AS createdAt
   FROM treasury_consolidations
   WHERE merchant_id = ${sqlLiteral(merchantId)}
@@ -3766,11 +3770,112 @@ const buildTimelineUnionSql = (merchantId, accountId) => `
     NULL AS blockNumber,
     NULL AS logIndex,
     NULL AS confirmations,
+    NULL AS providerTxId,
+    NULL AS privacyStage,
     created_at AS createdAt
   FROM treasury_payout_requests
   WHERE merchant_id = ${sqlLiteral(merchantId)}
     AND account_id = ${sqlLiteral(accountId)}
+
+  UNION ALL
+
+  SELECT
+    'private_sweep' AS itemType,
+    id,
+    settlement_id AS settlementId,
+    NULL AS apiId,
+    NULL AS apiRoute,
+    NULL AS apiName,
+    network AS sourceNetwork,
+    NULL AS destinationNetwork,
+    NULL AS destinationAddress,
+    asset,
+    amount,
+    status,
+    fail_reason AS failReason,
+    provider_tx_hash AS txHash,
+    provider_tx_hash AS sourceTxHash,
+    NULL AS bridgeTxHash,
+    NULL AS destinationTxHash,
+    NULL AS blockNumber,
+    NULL AS logIndex,
+    NULL AS confirmations,
+    provider_tx_id AS providerTxId,
+    'private_sweep' AS privacyStage,
+    created_at AS createdAt
+  FROM omnibus_sweeps
+  WHERE merchant_id = ${sqlLiteral(merchantId)}
+    AND account_id = ${sqlLiteral(accountId)}
+
+  UNION ALL
+
+  SELECT
+    'private_transfer' AS itemType,
+    id,
+    settlement_id AS settlementId,
+    NULL AS apiId,
+    NULL AS apiRoute,
+    NULL AS apiName,
+    network AS sourceNetwork,
+    NULL AS destinationNetwork,
+    to_unlink_address AS destinationAddress,
+    asset,
+    amount,
+    status,
+    fail_reason AS failReason,
+    provider_tx_hash AS txHash,
+    provider_tx_hash AS sourceTxHash,
+    NULL AS bridgeTxHash,
+    NULL AS destinationTxHash,
+    NULL AS blockNumber,
+    NULL AS logIndex,
+    NULL AS confirmations,
+    provider_tx_id AS providerTxId,
+    'private_transfer' AS privacyStage,
+    created_at AS createdAt
+  FROM private_transfers
+  WHERE merchant_id = ${sqlLiteral(merchantId)}
+    AND account_id = ${sqlLiteral(accountId)}
 `;
+
+const enrichTimelinePrivacyStages = (merchantId, accountId, items) => {
+  if (!Array.isArray(items) || items.length === 0) {
+    return items;
+  }
+
+  const settlementIds = [
+    ...new Set(
+      items
+        .map((item) => String(item?.settlementId || "").trim())
+        .filter(Boolean)
+    )
+  ];
+  if (!settlementIds.length) {
+    return items;
+  }
+
+  const intakeRows = all(`
+    SELECT reference_id AS settlementId
+    FROM private_ledger_entries
+    WHERE merchant_id = ${sqlLiteral(merchantId)}
+      AND account_id = ${sqlLiteral(accountId)}
+      AND entry_type = 'payment.settled_public_intake'
+      AND reference_id IN (${settlementIds.map((value) => sqlLiteral(value)).join(", ")});
+  `);
+  const intakeSettlementIds = new Set(
+    intakeRows.map((row) => String(row.settlementId || "").trim()).filter(Boolean)
+  );
+
+  return items.map((item) => {
+    if (item.itemType !== "settlement" || !intakeSettlementIds.has(String(item.settlementId || "").trim())) {
+      return item;
+    }
+    return {
+      ...item,
+      privacyStage: "public_intake"
+    };
+  });
+};
 
 export const queryTimeline = (
   merchantId,
@@ -3781,7 +3886,13 @@ export const queryTimeline = (
   const safePage = Number.isFinite(page) ? Math.max(1, Math.floor(page)) : 1;
   const offset = (safePage - 1) * safePageSize;
 
-  const allowedItemTypes = new Set(["settlement", "consolidation", "payout"]);
+  const allowedItemTypes = new Set([
+    "settlement",
+    "consolidation",
+    "payout",
+    "private_sweep",
+    "private_transfer"
+  ]);
   const normalizedItemTypes = Array.isArray(itemTypes)
     ? itemTypes
         .map((value) => String(value || "").trim().toLowerCase())
@@ -3830,7 +3941,7 @@ export const queryTimeline = (
   const totalPages = Math.max(1, Math.ceil(total / safePageSize));
 
   return {
-    items,
+    items: enrichTimelinePrivacyStages(merchantId, accountId, items),
     page: safePage,
     pageSize: safePageSize,
     total,
