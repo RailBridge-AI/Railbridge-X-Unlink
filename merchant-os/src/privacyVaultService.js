@@ -615,6 +615,114 @@ export const privacyVaultService = {
     }
   },
 
+  async withdrawToEvm({
+    environment,
+    network,
+    amount,
+    idempotencyKey,
+    merchantAccountRef,
+    recipientEvmAddress,
+    payoutId
+  }) {
+    const normalizedEnvironment = String(environment || "").trim() || null;
+    const normalizedNetwork =
+      String(network || "").trim() || resolveNetworkForEnvironment(normalizedEnvironment) || null;
+    if (!normalizedEnvironment || !idempotencyKey) {
+      throw new Error("environment and idempotencyKey are required");
+    }
+
+    if (simulationEnabled()) {
+      return {
+        provider: DEFAULT_PROVIDER,
+        environment: normalizedEnvironment,
+        txId: `sim_withdraw_${hashSuffix(idempotencyKey)}`,
+        txHash: buildSimulatedTxHash("withdraw", idempotencyKey),
+        status: "processed",
+        errorCode: null,
+        errorMessage: null,
+        raw: {
+          simulated: true,
+          amount: String(amount || "0"),
+          payoutId: payoutId || null,
+          recipientEvmAddress: recipientEvmAddress || null
+        }
+      };
+    }
+
+    if (!providerWritesConfigured()) {
+      return buildMutationFailure({
+        environment: normalizedEnvironment,
+        code: "provider_write_not_configured",
+        message: "Unlink provider writes are not configured"
+      });
+    }
+
+    const merchantAccount = merchantAccountRef;
+    const destinationAddress = String(recipientEvmAddress || "").trim();
+    const token = resolveUsdcTokenAddress(normalizedNetwork);
+
+    if (!merchantAccount?.keyReference) {
+      return buildMutationFailure({
+        environment: normalizedEnvironment,
+        code: "merchant_account_missing",
+        message: "Merchant Unlink account is not available"
+      });
+    }
+    if (!destinationAddress || !/^0x[a-fA-F0-9]{40}$/.test(destinationAddress)) {
+      return buildMutationFailure({
+        environment: normalizedEnvironment,
+        code: "recipient_invalid",
+        message: "A valid destination EVM address is required"
+      });
+    }
+    if (!token) {
+      return buildMutationFailure({
+        environment: normalizedEnvironment,
+        code: "usdc_token_missing",
+        message: "USDC token address is not configured for this network"
+      });
+    }
+
+    try {
+      const client = await buildUnlinkClient({
+        role: "merchant",
+        keyReference: merchantAccount.keyReference,
+        environment: normalizedEnvironment
+      });
+      const submitted = await client.withdraw({
+        recipientEvmAddress: destinationAddress,
+        token,
+        amount: String(amount || "0")
+      });
+      const finalized = await normalizeProviderMutationResult(client, submitted);
+
+      return {
+        provider: DEFAULT_PROVIDER,
+        environment: normalizedEnvironment,
+        txId: finalized.txId,
+        txHash: finalized.txHash,
+        status: finalized.status,
+        errorCode: finalized.status === "processed" ? null : "withdraw_not_processed",
+        errorMessage:
+          finalized.status === "processed"
+            ? null
+            : `Withdrawal finished in status ${finalized.providerStatus || "unknown"}`,
+        raw: finalized.raw
+      };
+    } catch (error) {
+      return buildMutationFailure({
+        environment: normalizedEnvironment,
+        code: "withdraw_failed",
+        message: error instanceof Error ? error.message : String(error),
+        raw: {
+          idempotencyKey,
+          payoutId: payoutId || null,
+          recipientEvmAddress: destinationAddress
+        }
+      });
+    }
+  },
+
   async getPrivateBalance({ merchantId, accountId, network, token }) {
     const environment = resolveEnvironmentForNetwork(network);
     const snapshot = getLatestPrivateBalanceSnapshot({

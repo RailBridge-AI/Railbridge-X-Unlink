@@ -422,6 +422,36 @@ const runSchemaMigrations = () => {
       ON private_transfers(merchant_id, account_id, created_at DESC);
   `);
   run(`
+    CREATE TABLE IF NOT EXISTS withdrawal_batches (
+      id TEXT PRIMARY KEY,
+      merchant_id TEXT NOT NULL REFERENCES merchants(id),
+      account_id TEXT NOT NULL REFERENCES merchant_accounts(id),
+      provider TEXT NOT NULL,
+      environment TEXT NOT NULL,
+      network TEXT NOT NULL,
+      asset TEXT NOT NULL,
+      payout_id TEXT NOT NULL,
+      destination_address TEXT NOT NULL,
+      amount TEXT NOT NULL,
+      from_account_id TEXT,
+      provider_tx_id TEXT,
+      provider_tx_hash TEXT,
+      status TEXT NOT NULL,
+      fail_reason TEXT,
+      idempotency_key TEXT NOT NULL UNIQUE,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+  `);
+  run(`
+    CREATE INDEX IF NOT EXISTS idx_withdrawal_batches_tenant_created
+      ON withdrawal_batches(merchant_id, account_id, created_at DESC);
+  `);
+  run(`
+    CREATE INDEX IF NOT EXISTS idx_withdrawal_batches_payout
+      ON withdrawal_batches(payout_id);
+  `);
+  run(`
     CREATE TABLE IF NOT EXISTS private_balance_snapshots (
       id TEXT PRIMARY KEY,
       merchant_id TEXT NOT NULL REFERENCES merchants(id),
@@ -3054,6 +3084,114 @@ export const upsertPrivateTransfer = (input) => {
   return getPrivateTransferByIdempotencyKey(idempotencyKey);
 };
 
+const getWithdrawalBatchByIdempotencyKey = (idempotencyKey) =>
+  one(`
+    SELECT
+      id,
+      merchant_id AS merchantId,
+      account_id AS accountId,
+      provider,
+      environment,
+      network,
+      asset,
+      payout_id AS payoutId,
+      destination_address AS destinationAddress,
+      amount,
+      from_account_id AS fromAccountId,
+      provider_tx_id AS providerTxId,
+      provider_tx_hash AS providerTxHash,
+      status,
+      fail_reason AS failReason,
+      idempotency_key AS idempotencyKey,
+      created_at AS createdAt,
+      updated_at AS updatedAt
+    FROM withdrawal_batches
+    WHERE idempotency_key = ${sqlLiteral(String(idempotencyKey || "").trim())}
+    LIMIT 1;
+  `);
+
+export const getWithdrawalBatchByPayoutId = (payoutId) =>
+  one(`
+    SELECT
+      id,
+      merchant_id AS merchantId,
+      account_id AS accountId,
+      provider,
+      environment,
+      network,
+      asset,
+      payout_id AS payoutId,
+      destination_address AS destinationAddress,
+      amount,
+      from_account_id AS fromAccountId,
+      provider_tx_id AS providerTxId,
+      provider_tx_hash AS providerTxHash,
+      status,
+      fail_reason AS failReason,
+      idempotency_key AS idempotencyKey,
+      created_at AS createdAt,
+      updated_at AS updatedAt
+    FROM withdrawal_batches
+    WHERE payout_id = ${sqlLiteral(String(payoutId || "").trim())}
+    ORDER BY updated_at DESC
+    LIMIT 1;
+  `);
+
+export const upsertWithdrawalBatch = (input) => {
+  const idempotencyKey = String(input.idempotencyKey || "").trim();
+  if (!idempotencyKey) {
+    throw new Error("idempotencyKey is required");
+  }
+  const existing = getWithdrawalBatchByIdempotencyKey(idempotencyKey);
+  const id = existing?.id || String(input.id || newId()).trim();
+  const createdAt = existing?.createdAt || String(input.createdAt || nowIso()).trim();
+  const updatedAt = nowIso();
+
+  run(`
+    INSERT OR REPLACE INTO withdrawal_batches (
+      id,
+      merchant_id,
+      account_id,
+      provider,
+      environment,
+      network,
+      asset,
+      payout_id,
+      destination_address,
+      amount,
+      from_account_id,
+      provider_tx_id,
+      provider_tx_hash,
+      status,
+      fail_reason,
+      idempotency_key,
+      created_at,
+      updated_at
+    ) VALUES (
+      ${sqlLiteral(id)},
+      ${sqlLiteral(input.merchantId)},
+      ${sqlLiteral(input.accountId)},
+      ${sqlLiteral(input.provider || "unlink")},
+      ${sqlLiteral(input.environment)},
+      ${sqlLiteral(input.network)},
+      ${sqlLiteral(input.asset || "USDC")},
+      ${sqlLiteral(input.payoutId)},
+      ${sqlLiteral(input.destinationAddress)},
+      ${sqlLiteral(input.amount)},
+      ${sqlLiteral(input.fromAccountId || null)},
+      ${sqlLiteral(input.providerTxId || null)},
+      ${sqlLiteral(input.providerTxHash || null)},
+      ${sqlLiteral(input.status || "submitted")},
+      ${sqlLiteral(input.failReason || null)},
+      ${sqlLiteral(idempotencyKey)},
+      ${sqlLiteral(createdAt)},
+      ${sqlLiteral(updatedAt)}
+    );
+  `);
+
+  return getWithdrawalBatchByIdempotencyKey(idempotencyKey);
+};
+
 export const getLatestPrivateBalanceSnapshot = ({
   merchantId,
   accountId,
@@ -3836,6 +3974,36 @@ const buildTimelineUnionSql = (merchantId, accountId) => `
   FROM private_transfers
   WHERE merchant_id = ${sqlLiteral(merchantId)}
     AND account_id = ${sqlLiteral(accountId)}
+
+  UNION ALL
+
+  SELECT
+    'private_withdrawal' AS itemType,
+    id,
+    payout_id AS settlementId,
+    NULL AS apiId,
+    NULL AS apiRoute,
+    NULL AS apiName,
+    network AS sourceNetwork,
+    NULL AS destinationNetwork,
+    destination_address AS destinationAddress,
+    asset,
+    amount,
+    status,
+    fail_reason AS failReason,
+    provider_tx_hash AS txHash,
+    provider_tx_hash AS sourceTxHash,
+    NULL AS bridgeTxHash,
+    NULL AS destinationTxHash,
+    NULL AS blockNumber,
+    NULL AS logIndex,
+    NULL AS confirmations,
+    provider_tx_id AS providerTxId,
+    'private_withdrawal' AS privacyStage,
+    created_at AS createdAt
+  FROM withdrawal_batches
+  WHERE merchant_id = ${sqlLiteral(merchantId)}
+    AND account_id = ${sqlLiteral(accountId)}
 `;
 
 const enrichTimelinePrivacyStages = (merchantId, accountId, items) => {
@@ -3866,14 +4034,54 @@ const enrichTimelinePrivacyStages = (merchantId, accountId, items) => {
     intakeRows.map((row) => String(row.settlementId || "").trim()).filter(Boolean)
   );
 
+  const payoutIds = [
+    ...new Set(
+      items
+        .filter((item) => item.itemType === "payout")
+        .map((item) => String(item?.settlementId || item?.id || "").trim())
+        .filter(Boolean)
+    )
+  ];
+  const withdrawalByPayoutId = new Map();
+  if (payoutIds.length > 0) {
+    const withdrawalRows = all(`
+      SELECT
+        payout_id AS payoutId,
+        provider_tx_id AS providerTxId,
+        provider_tx_hash AS providerTxHash,
+        status
+      FROM withdrawal_batches
+      WHERE merchant_id = ${sqlLiteral(merchantId)}
+        AND account_id = ${sqlLiteral(accountId)}
+        AND payout_id IN (${payoutIds.map((value) => sqlLiteral(value)).join(", ")});
+    `);
+    withdrawalRows.forEach((row) => {
+      withdrawalByPayoutId.set(String(row.payoutId || "").trim(), row);
+    });
+  }
+
   return items.map((item) => {
-    if (item.itemType !== "settlement" || !intakeSettlementIds.has(String(item.settlementId || "").trim())) {
-      return item;
+    if (item.itemType === "settlement" && intakeSettlementIds.has(String(item.settlementId || "").trim())) {
+      return {
+        ...item,
+        privacyStage: "public_intake"
+      };
     }
-    return {
-      ...item,
-      privacyStage: "public_intake"
-    };
+    if (item.itemType === "payout") {
+      const payoutId = String(item.settlementId || item.id || "").trim();
+      const withdrawal = withdrawalByPayoutId.get(payoutId);
+      if (!withdrawal) {
+        return item;
+      }
+      return {
+        ...item,
+        privacyStage: "private_withdrawal",
+        providerTxId: withdrawal.providerTxId || item.providerTxId || null,
+        providerTxHash: withdrawal.providerTxHash || null,
+        withdrawalStatus: withdrawal.status || null
+      };
+    }
+    return item;
   });
 };
 
@@ -3891,7 +4099,8 @@ export const queryTimeline = (
     "consolidation",
     "payout",
     "private_sweep",
-    "private_transfer"
+    "private_transfer",
+    "private_withdrawal"
   ]);
   const normalizedItemTypes = Array.isArray(itemTypes)
     ? itemTypes

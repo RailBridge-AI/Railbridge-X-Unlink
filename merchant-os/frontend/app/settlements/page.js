@@ -41,6 +41,11 @@ const statusLabel = (itemType, status) => {
     confirmed: "Private Credit",
     failed: "Transfer Failed"
   };
+  const privateWithdrawalMap = {
+    submitted: "Withdrawal Submitted",
+    confirmed: "Withdrawal Complete",
+    failed: "Withdrawal Failed"
+  };
   const consolidationMap = {
     submitted: "Submitted",
     confirmed: "Transfer Complete",
@@ -61,7 +66,9 @@ const statusLabel = (itemType, status) => {
           ? privateSweepMap
           : itemType === "private_transfer"
             ? privateTransferMap
-            : settlementMap;
+            : itemType === "private_withdrawal"
+              ? privateWithdrawalMap
+              : settlementMap;
   return map[normalizedStatus] || normalizedStatus || "Unknown";
 };
 
@@ -114,6 +121,12 @@ const itemTypeBadge = (item) => {
       tone: "border-fuchsia-200 bg-fuchsia-50 text-fuchsia-800"
     };
   }
+  if (itemType === "private_withdrawal") {
+    return {
+      label: "Private Withdrawal",
+      tone: "border-amber-200 bg-amber-50 text-amber-800"
+    };
+  }
   if (item?.privacyStage === "public_intake") {
     return {
       label: "Public Intake",
@@ -139,6 +152,9 @@ const itemHeadline = (item) => {
   }
   if (itemType === "private_transfer") {
     return "Private treasury credit";
+  }
+  if (itemType === "private_withdrawal") {
+    return "Private treasury withdrawal";
   }
   if (item?.privacyStage === "public_intake") {
     return "Public intake payment";
@@ -249,7 +265,7 @@ const buildTransactionEntries = (item, chainsByNetwork) => {
         network: item.destinationNetwork || item.sourceNetwork
       });
     }
-  } else if (item.itemType === "private_sweep" || item.itemType === "private_transfer") {
+  } else if (item.itemType === "private_sweep" || item.itemType === "private_transfer" || item.itemType === "private_withdrawal") {
     if (String(item.providerTxId || "").trim()) {
       entries.push({
         label: "Unlink tx id",
@@ -264,7 +280,12 @@ const buildTransactionEntries = (item, chainsByNetwork) => {
       const chain = chainsByNetwork[item.sourceNetwork];
       const networkInfo = item.sourceNetwork ? getNetworkInfo(item.sourceNetwork) : null;
       entries.push({
-        label: item.itemType === "private_sweep" ? "Sweep tx hash" : "Transfer tx hash",
+        label:
+          item.itemType === "private_sweep"
+            ? "Sweep tx hash"
+            : item.itemType === "private_withdrawal"
+              ? "Withdrawal tx hash"
+              : "Transfer tx hash",
         txHash: String(item.txHash).trim(),
         network: item.sourceNetwork,
         networkName: networkInfo?.name || "",

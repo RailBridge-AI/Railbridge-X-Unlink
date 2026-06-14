@@ -16,6 +16,7 @@ import { GasSponsorService } from "./gasSponsorService.js";
 import { transferUsdcOnchain, UsdcTransferError } from "./usdcTransferService.js";
 import { privacyVaultService } from "./privacyVaultService.js";
 import { PrivacySweepWorker } from "./privacySweepWorker.js";
+import { executePrivatePayout } from "./privatePayoutService.js";
 import {
   acquireTenantMutationDbLock,
   authenticatePlatformUser,
@@ -543,7 +544,7 @@ const BALANCES_ONCHAIN_MODES = new Set(["skip", "priority", "all"]);
 const TIMELINE_FILTER_TO_ITEM_TYPES = {
   treasury: ["consolidation", "private_sweep", "private_transfer"],
   payment: ["settlement", "private_sweep", "private_transfer"],
-  payouts: ["payout"]
+  payouts: ["payout", "private_withdrawal"]
 };
 
 const parseBalancesOnchainMode = (searchParams) => {
@@ -1677,6 +1678,33 @@ const executePayout = async ({
   destinationAddress,
   amount
 }) => {
+  const policy = getPolicy(merchantId, accountId);
+  if (policy?.treasuryMode === "private") {
+    const chain = getChainCatalogByNetwork(network);
+    if (chain?.status === "paused") {
+      return {
+        ok: false,
+        statusCode: 400,
+        payload: {
+          error: "network is paused by RailBridge operations",
+          network
+        }
+      };
+    }
+    const result = await executePrivatePayout({
+      merchantId,
+      accountId,
+      network,
+      destinationAddress,
+      amount,
+      publishTenantWebhookEvent
+    });
+    if (result.ok) {
+      recomputeBalances(merchantId, accountId);
+    }
+    return result;
+  }
+
   const sourceWallet = getWalletByNetwork(merchantId, accountId, network);
   if (!sourceWallet) {
     return {

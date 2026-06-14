@@ -756,5 +756,60 @@ describe("Merchant OS core integration flows", () => {
     assert.ok(transferItem);
     assert.equal(transferItem.status, "confirmed");
     assert.ok(transferItem.providerTxId);
+
+    const payout = await call({
+      path: `/v1/merchants/${privateMerchantId}/payouts`,
+      method: "POST",
+      headers: {
+        "x-railbridge-api-key": privateApiKey
+      },
+      body: {
+        network: "eip155:84532",
+        amountUsdc: "0.01",
+        destinationAddress: "0x1234567890123456789012345678901234567890"
+      }
+    });
+    assert.equal(payout.status, 201);
+    assert.equal(payout.body.status, "completed");
+    assert.ok(payout.body.txHash);
+
+    const balancesAfterPayout = await call({
+      path: `/v1/merchants/${privateMerchantId}/balances`,
+      headers: {
+        "x-railbridge-api-key": privateApiKey
+      }
+    });
+    assert.equal(balancesAfterPayout.status, 200);
+    assert.equal(balancesAfterPayout.body.pendingWithdrawalUsd, "0");
+    const privateBalanceAfterPayout = balancesAfterPayout.body.balances.find(
+      (item) => item.network === "eip155:84532"
+    );
+    assert.ok(privateBalanceAfterPayout);
+    assert.equal(privateBalanceAfterPayout.privateAvailableAmount, "10000");
+
+    const payouts = await call({
+      path: `/v1/merchants/${privateMerchantId}/payouts`,
+      headers: {
+        "x-railbridge-api-key": privateApiKey
+      }
+    });
+    assert.equal(payouts.status, 200);
+    const payoutItem = payouts.body.items.find((item) => item.id === payout.body.id);
+    assert.ok(payoutItem);
+    assert.equal(payoutItem.privacyStage, "private_withdrawal");
+    assert.ok(payoutItem.providerTxId);
+
+    const settlementsAfterPayout = await call({
+      path: `/v1/merchants/${privateMerchantId}/settlements`,
+      headers: {
+        "x-railbridge-api-key": privateApiKey
+      }
+    });
+    assert.equal(settlementsAfterPayout.status, 200);
+    const withdrawalItem = settlementsAfterPayout.body.items.find(
+      (item) => item.itemType === "private_withdrawal" && item.settlementId === payout.body.id
+    );
+    assert.ok(withdrawalItem);
+    assert.equal(withdrawalItem.status, "confirmed");
   });
 });

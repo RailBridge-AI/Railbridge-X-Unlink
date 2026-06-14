@@ -305,6 +305,33 @@ CREATE TABLE IF NOT EXISTS private_transfers (
 CREATE INDEX IF NOT EXISTS idx_private_transfers_tenant_created
   ON private_transfers(merchant_id, account_id, created_at DESC);
 
+CREATE TABLE IF NOT EXISTS withdrawal_batches (
+  id TEXT PRIMARY KEY,
+  merchant_id TEXT NOT NULL REFERENCES merchants(id),
+  account_id TEXT NOT NULL REFERENCES merchant_accounts(id),
+  provider TEXT NOT NULL,
+  environment TEXT NOT NULL,
+  network TEXT NOT NULL,
+  asset TEXT NOT NULL,
+  payout_id TEXT NOT NULL,
+  destination_address TEXT NOT NULL,
+  amount TEXT NOT NULL,
+  from_account_id TEXT,
+  provider_tx_id TEXT,
+  provider_tx_hash TEXT,
+  status TEXT NOT NULL,
+  fail_reason TEXT,
+  idempotency_key TEXT NOT NULL UNIQUE,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_withdrawal_batches_tenant_created
+  ON withdrawal_batches(merchant_id, account_id, created_at DESC);
+
+CREATE INDEX IF NOT EXISTS idx_withdrawal_batches_payout
+  ON withdrawal_batches(payout_id);
+
 CREATE TABLE IF NOT EXISTS private_balance_snapshots (
   id TEXT PRIMARY KEY,
   merchant_id TEXT NOT NULL REFERENCES merchants(id),
