@@ -1,3 +1,29 @@
 .DS_Store
 /packages/node_modules
 /packages/server-sdk/node_modules
+
+# Local secret files
+.env
+.env.*
+!.env.example
+!.env.local.example
+
+# App-local env files
+/merchant-os/.env
+/merchant-os/frontend/.env.local
+/facilitator/.env
+
+# Local runtime overrides
+/merchant-os/config/runtime-config.local.json
+/facilitator/config/runtime-config.local.json
+/facilitator/config/payment-test-config.local.json
+
+# Deploy-time secret material
+/deploy/testnet/config/*.env
+!/deploy/testnet/config/*.env.example
+!/deploy/testnet/config/*.testnet.env.example
+
+# Generated local state
+/merchant-os/data/*.db
+/merchant-os/data/*.sqlite
+/facilitator/data/*.json
