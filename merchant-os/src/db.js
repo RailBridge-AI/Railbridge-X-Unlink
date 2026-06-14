@@ -19,6 +19,7 @@ const schemaPath = join(__dirname, "schema.sql");
 const PASSWORD_HASH_ITERATIONS = 210000;
 const PASSWORD_HASH_KEYLEN = 64;
 const PASSWORD_HASH_DIGEST = "sha512";
+const PAYMENT_CONTEXT_TTL_HOURS = 1;
 
 const TESTNET_CAIP2 = [
   "eip155:421614",
@@ -70,6 +71,17 @@ const normalizeEvmAddress = (value) => {
   }
   return text;
 };
+
+const normalizePaymentContextPayTo = (value) => {
+  const normalizedAddress = normalizeEvmAddress(value);
+  if (normalizedAddress) {
+    return normalizedAddress.toLowerCase();
+  }
+  return String(value || "").trim();
+};
+
+const normalizeTreasuryMode = (value) =>
+  String(value || "").trim().toLowerCase() === "private" ? "private" : "public";
 
 const CUSTODY_MASTER_KEY_ERROR =
   "MERCHANT_OS_CUSTODY_MASTER_KEY is required and must be a 32-byte hex string (64 hex chars, optional 0x prefix)";
@@ -219,6 +231,9 @@ const runSchemaMigrations = () => {
   ensureColumn("merchant_accounts", "status", "TEXT NOT NULL DEFAULT 'active'");
   ensureColumn("merchant_account_wallets", "signer_provider", "TEXT NOT NULL DEFAULT 'mpc'");
   ensureColumn("merchant_account_wallets", "signer_reference", "TEXT");
+  ensureColumn("treasury_policy", "treasury_mode", "TEXT NOT NULL DEFAULT 'public'");
+  ensureColumn("treasury_policy", "private_home_network", "TEXT");
+  ensureColumn("treasury_policy", "privacy_enabled_at", "TEXT");
   ensureColumn("treasury_settlement_events", "api_id", "TEXT");
   ensureColumn("treasury_settlement_events", "api_route", "TEXT");
   ensureColumn("treasury_settlement_events", "api_name", "TEXT");
@@ -255,6 +270,43 @@ const runSchemaMigrations = () => {
   run(`
     CREATE INDEX IF NOT EXISTS idx_treasury_consolidations_tenant_created
       ON treasury_consolidations(merchant_id, account_id, created_at DESC);
+  `);
+  run(`
+    CREATE TABLE IF NOT EXISTS payment_requirement_contexts (
+      id TEXT PRIMARY KEY,
+      payment_context_id TEXT NOT NULL UNIQUE,
+      merchant_id TEXT NOT NULL REFERENCES merchants(id),
+      account_id TEXT NOT NULL REFERENCES merchant_accounts(id),
+      api_product_id TEXT,
+      treasury_mode TEXT NOT NULL,
+      privacy_coverage_mode TEXT,
+      private_home_network TEXT,
+      scheme TEXT NOT NULL,
+      source_network TEXT NOT NULL,
+      destination_network TEXT,
+      asset TEXT NOT NULL,
+      amount TEXT NOT NULL,
+      public_pay_to TEXT NOT NULL,
+      settlement_id TEXT,
+      status TEXT NOT NULL,
+      issued_at TEXT NOT NULL,
+      expires_at TEXT NOT NULL,
+      settled_at TEXT,
+      consumed_at TEXT,
+      metadata_json TEXT
+    );
+  `);
+  run(`
+    CREATE INDEX IF NOT EXISTS idx_payment_requirement_contexts_tenant_issued
+      ON payment_requirement_contexts(merchant_id, account_id, issued_at DESC);
+  `);
+  run(`
+    CREATE INDEX IF NOT EXISTS idx_payment_requirement_contexts_status_expires
+      ON payment_requirement_contexts(status, expires_at);
+  `);
+  run(`
+    CREATE INDEX IF NOT EXISTS idx_payment_requirement_contexts_settlement
+      ON payment_requirement_contexts(settlement_id);
   `);
   run(`
     CREATE TABLE IF NOT EXISTS chain_catalog (
@@ -2089,6 +2141,9 @@ export const getPolicy = (merchantId, accountId) => {
     SELECT
       preferred_network AS preferredNetwork,
       preferred_asset AS preferredAsset,
+      treasury_mode AS treasuryMode,
+      private_home_network AS privateHomeNetwork,
+      privacy_enabled_at AS privacyEnabledAt,
       auto_bridge_enabled AS autoBridgeEnabled,
       updated_at AS updatedAt
     FROM treasury_policy
@@ -2103,18 +2158,29 @@ export const getPolicy = (merchantId, accountId) => {
 
   return {
     ...row,
+    treasuryMode: normalizeTreasuryMode(row.treasuryMode),
     autoBridgeEnabled: Boolean(row.autoBridgeEnabled)
   };
 };
 
 export const upsertPolicy = (merchantId, accountId, policy) => {
   const updatedAt = nowIso();
+  const treasuryMode = normalizeTreasuryMode(policy.treasuryMode);
+  const privateHomeNetwork =
+    treasuryMode === "private" && String(policy.privateHomeNetwork || "").trim()
+      ? String(policy.privateHomeNetwork).trim()
+      : null;
+  const privacyEnabledAt =
+    treasuryMode === "private" ? String(policy.privacyEnabledAt || updatedAt).trim() || updatedAt : null;
   run(`
     INSERT OR REPLACE INTO treasury_policy (
       merchant_id,
       account_id,
       preferred_network,
       preferred_asset,
+      treasury_mode,
+      private_home_network,
+      privacy_enabled_at,
       auto_bridge_enabled,
       updated_at
     ) VALUES (
@@ -2122,11 +2188,225 @@ export const upsertPolicy = (merchantId, accountId, policy) => {
       ${sqlLiteral(accountId)},
       ${sqlLiteral(policy.preferredNetwork)},
       'USDC',
+      ${sqlLiteral(treasuryMode)},
+      ${sqlLiteral(privateHomeNetwork)},
+      ${sqlLiteral(privacyEnabledAt)},
       ${policy.autoBridgeEnabled ? 1 : 0},
       ${sqlLiteral(updatedAt)}
     );
   `);
   return getPolicy(merchantId, accountId);
+};
+
+export const getPaymentRequirementContext = (paymentContextId) => {
+  const row = one(`
+    SELECT
+      id,
+      payment_context_id AS paymentContextId,
+      merchant_id AS merchantId,
+      account_id AS accountId,
+      api_product_id AS apiProductId,
+      treasury_mode AS treasuryMode,
+      privacy_coverage_mode AS privacyCoverageMode,
+      private_home_network AS privateHomeNetwork,
+      scheme,
+      source_network AS sourceNetwork,
+      destination_network AS destinationNetwork,
+      asset,
+      amount,
+      public_pay_to AS publicPayTo,
+      settlement_id AS settlementId,
+      status,
+      issued_at AS issuedAt,
+      expires_at AS expiresAt,
+      settled_at AS settledAt,
+      consumed_at AS consumedAt,
+      metadata_json AS metadataJson
+    FROM payment_requirement_contexts
+    WHERE payment_context_id = ${sqlLiteral(String(paymentContextId || "").trim())}
+    LIMIT 1;
+  `);
+
+  if (!row) {
+    return null;
+  }
+
+  let metadata = null;
+  if (row.metadataJson) {
+    try {
+      metadata = JSON.parse(String(row.metadataJson));
+    } catch {
+      metadata = null;
+    }
+  }
+
+  return {
+    ...row,
+    treasuryMode: normalizeTreasuryMode(row.treasuryMode),
+    metadata
+  };
+};
+
+export const createPaymentRequirementContext = (input) => {
+  const id = newId();
+  const paymentContextId =
+    String(input.paymentContextId || "").trim() || `pctx_${randomBytes(16).toString("hex")}`;
+  const issuedAt = String(input.issuedAt || nowIso()).trim();
+  const expiresAt = String(input.expiresAt || addHoursIso(PAYMENT_CONTEXT_TTL_HOURS)).trim();
+  const metadataJson =
+    input.metadata && typeof input.metadata === "object" ? JSON.stringify(input.metadata) : null;
+
+  run(`
+    INSERT INTO payment_requirement_contexts (
+      id,
+      payment_context_id,
+      merchant_id,
+      account_id,
+      api_product_id,
+      treasury_mode,
+      privacy_coverage_mode,
+      private_home_network,
+      scheme,
+      source_network,
+      destination_network,
+      asset,
+      amount,
+      public_pay_to,
+      settlement_id,
+      status,
+      issued_at,
+      expires_at,
+      settled_at,
+      consumed_at,
+      metadata_json
+    ) VALUES (
+      ${sqlLiteral(id)},
+      ${sqlLiteral(paymentContextId)},
+      ${sqlLiteral(input.merchantId)},
+      ${sqlLiteral(input.accountId)},
+      ${sqlLiteral(input.apiProductId || null)},
+      ${sqlLiteral(normalizeTreasuryMode(input.treasuryMode))},
+      ${sqlLiteral(input.privacyCoverageMode || null)},
+      ${sqlLiteral(input.privateHomeNetwork || null)},
+      ${sqlLiteral(input.scheme)},
+      ${sqlLiteral(input.sourceNetwork)},
+      ${sqlLiteral(input.destinationNetwork || null)},
+      ${sqlLiteral(input.asset)},
+      ${sqlLiteral(input.amount)},
+      ${sqlLiteral(normalizePaymentContextPayTo(input.publicPayTo))},
+      NULL,
+      'issued',
+      ${sqlLiteral(issuedAt)},
+      ${sqlLiteral(expiresAt)},
+      NULL,
+      NULL,
+      ${sqlLiteral(metadataJson)}
+    );
+  `);
+
+  return getPaymentRequirementContext(paymentContextId);
+};
+
+export const resolvePaymentRequirementContextForSettlement = ({
+  paymentContextId,
+  settlementId,
+  scheme,
+  sourceNetwork,
+  asset,
+  amount,
+  publicPayTo
+}) => {
+  const context = getPaymentRequirementContext(paymentContextId);
+  if (!context) {
+    return {
+      ok: false,
+      code: "not_found",
+      error: "paymentContextId was not found"
+    };
+  }
+
+  if (
+    context.status === "expired" ||
+    context.status === "failed" ||
+    (context.status === "consumed" && context.settlementId !== settlementId)
+  ) {
+    return {
+      ok: false,
+      code: "unusable",
+      error: `paymentContextId is not usable in status=${context.status}`
+    };
+  }
+
+  const expiresAtMs = new Date(context.expiresAt).getTime();
+  if (Number.isFinite(expiresAtMs) && expiresAtMs < Date.now() && !context.settlementId) {
+    run(`
+      UPDATE payment_requirement_contexts
+      SET status = 'expired'
+      WHERE payment_context_id = ${sqlLiteral(context.paymentContextId)};
+    `);
+    return {
+      ok: false,
+      code: "expired",
+      error: "paymentContextId has expired"
+    };
+  }
+
+  if (context.settlementId && context.settlementId === settlementId) {
+    return {
+      ok: true,
+      context
+    };
+  }
+
+  const expectedValues = {
+    scheme: String(context.scheme || "").trim(),
+    sourceNetwork: String(context.sourceNetwork || "").trim(),
+    asset: String(context.asset || "").trim().toLowerCase(),
+    amount: String(context.amount || "").trim(),
+    publicPayTo: normalizePaymentContextPayTo(context.publicPayTo)
+  };
+  const actualValues = {
+    scheme: String(scheme || "").trim(),
+    sourceNetwork: String(sourceNetwork || "").trim(),
+    asset: String(asset || "").trim().toLowerCase(),
+    amount: String(amount || "").trim(),
+    publicPayTo: normalizePaymentContextPayTo(publicPayTo)
+  };
+
+  for (const field of Object.keys(expectedValues)) {
+    if (expectedValues[field] !== actualValues[field]) {
+      return {
+        ok: false,
+        code: "mismatch",
+        error: `paymentContextId did not match field=${field}`
+      };
+    }
+  }
+
+  if (context.settlementId && context.settlementId !== settlementId) {
+    return {
+      ok: false,
+      code: "reused",
+      error: "paymentContextId is already bound to another settlement"
+    };
+  }
+
+  const settledAt = nowIso();
+  run(`
+    UPDATE payment_requirement_contexts
+    SET settlement_id = ${sqlLiteral(settlementId)},
+        status = CASE
+          WHEN status = 'consumed' THEN 'consumed'
+          ELSE 'settled'
+        END,
+        settled_at = COALESCE(settled_at, ${sqlLiteral(settledAt)})
+    WHERE payment_context_id = ${sqlLiteral(context.paymentContextId)};
+  `);
+
+  return {
+    ok: true,
+    context: getPaymentRequirementContext(context.paymentContextId)
+  };
 };
 
 export const hasSettlementEvent = (eventId) =>

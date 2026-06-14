@@ -48,6 +48,7 @@ import {
   getPolicy,
   getSession,
   queryTimeline,
+  resolvePaymentRequirementContextForSettlement,
   getTimeline,
   getWalletByNetwork,
   getWallets,
@@ -129,6 +130,8 @@ const MIME_TYPES = {
 };
 
 const normalizeHttpMethod = (method) => String(method || "").trim().toUpperCase();
+const normalizeTreasuryMode = (value) =>
+  String(value || "").trim().toLowerCase() === "private" ? "private" : "public";
 
 const normalizeRoutePath = (path) => {
   const value = String(path || "").trim();
@@ -2000,9 +2003,40 @@ const server = createServer(async (req, res) => {
         body.autoBridgeEnabled !== undefined
           ? Boolean(body.autoBridgeEnabled)
           : Boolean(currentPolicy?.autoBridgeEnabled ?? true);
+      const nextTreasuryMode =
+        body.treasuryMode !== undefined
+          ? normalizeTreasuryMode(body.treasuryMode)
+          : normalizeTreasuryMode(currentPolicy?.treasuryMode);
+      const nextPrivateHomeNetwork =
+        body.privateHomeNetwork !== undefined
+          ? String(body.privateHomeNetwork || "").trim()
+          : String(currentPolicy?.privateHomeNetwork || "").trim();
+
+      if (nextTreasuryMode === "private" && !nextPrivateHomeNetwork) {
+        return sendJson(res, 400, { error: "privateHomeNetwork is required when treasuryMode=private" });
+      }
+
+      if (nextTreasuryMode === "private" && nextPrivateHomeNetwork) {
+        const privateHomeChain = getChainCatalogByNetwork(nextPrivateHomeNetwork);
+        if (!privateHomeChain) {
+          return sendJson(res, 400, { error: "privateHomeNetwork is not in the active chain catalog" });
+        }
+        if (privateHomeChain.status === "paused") {
+          return sendJson(res, 400, { error: "privateHomeNetwork is paused by operations" });
+        }
+      }
+
+      const nextPrivacyEnabledAt =
+        nextTreasuryMode === "private"
+          ? String(currentPolicy?.privacyEnabledAt || nowIso())
+          : null;
+
       const updatedPolicy = upsertPolicy(session.merchantId, session.accountId, {
         preferredNetwork: nextPreferredNetwork,
-        autoBridgeEnabled: nextAutoBridgeEnabled
+        autoBridgeEnabled: nextAutoBridgeEnabled,
+        treasuryMode: nextTreasuryMode,
+        privateHomeNetwork: nextTreasuryMode === "private" ? nextPrivateHomeNetwork : null,
+        privacyEnabledAt: nextPrivacyEnabledAt
       });
 
       return sendJson(res, 200, {
@@ -2379,11 +2413,14 @@ const server = createServer(async (req, res) => {
       const body = await parseJsonBody(req);
       const merchantId = String(body.merchantId || "").trim();
       const accountId = String(body.accountId || "").trim();
+      const paymentContextId = body.paymentContextId ? String(body.paymentContextId).trim() : "";
       const sourceNetwork = String(body.sourceNetwork || "").trim();
       const destinationNetwork = body.destinationNetwork ? String(body.destinationNetwork).trim() : null;
+      const scheme = body.scheme ? String(body.scheme).trim() : "exact";
       const status = String(body.status || "").trim();
       const txHash = String(body.txHash || "").trim();
       const amount = String(body.amount || "").trim();
+      const publicPayTo = body.publicPayTo ? String(body.publicPayTo).trim() : "";
       const failReason = body.failReason ? sanitizeFailReason(String(body.failReason).trim()) : null;
       const eventId = String(body.eventId || newId()).trim();
       const settlementId = String(body.settlementId || txHash || eventId).trim();
@@ -2407,14 +2444,24 @@ const server = createServer(async (req, res) => {
           ? 0
           : Number.parseInt(String(body.confirmations), 10);
 
+      let resolvedMerchantId = merchantId;
+      let resolvedAccountId = accountId;
+      let resolvedPaymentContext = null;
+
       const acceptedStatuses = new Set(["settled_source", "bridge_pending", "bridge_confirmed", "failed"]);
-      if (!merchantId || !accountId || !sourceNetwork || !txHash || !amount) {
-        return sendJson(res, 400, { error: "merchantId, accountId, sourceNetwork, amount, txHash are required" });
+      if ((!resolvedMerchantId || !resolvedAccountId) && !paymentContextId) {
+        return sendJson(res, 400, {
+          error: "merchantId/accountId or paymentContextId are required"
+        });
+      }
+      if (!sourceNetwork || !txHash || !amount) {
+        return sendJson(res, 400, { error: "sourceNetwork, amount, txHash are required" });
       }
       if (!acceptedStatuses.has(status)) {
         return sendJson(res, 400, { error: "invalid status" });
       }
-      if (!normalizeUsdcAsset(body.asset)) {
+      const normalizedAsset = normalizeUsdcAsset(body.asset);
+      if (!normalizedAsset) {
         return sendJson(res, 400, { error: "USDC-only: unsupported asset" });
       }
       if (!/^[0-9]+$/.test(amount) || BigInt(amount) <= 0n) {
@@ -2429,18 +2476,49 @@ const server = createServer(async (req, res) => {
       if (Number.isNaN(confirmations) || confirmations < 0) {
         return sendJson(res, 400, { error: "confirmations must be a non-negative integer" });
       }
-      if (!ensureAccountExists(res, merchantId, accountId)) {
+
+      if (paymentContextId) {
+        if (!publicPayTo) {
+          return sendJson(res, 400, { error: "publicPayTo is required when paymentContextId is provided" });
+        }
+        const resolved = resolvePaymentRequirementContextForSettlement({
+          paymentContextId,
+          settlementId,
+          scheme,
+          sourceNetwork,
+          asset: normalizedAsset,
+          amount,
+          publicPayTo
+        });
+        if (!resolved.ok) {
+          return sendJson(res, 400, {
+            error: resolved.error,
+            code: resolved.code,
+            paymentContextId
+          });
+        }
+        resolvedPaymentContext = resolved.context;
+        resolvedMerchantId = resolved.context.merchantId;
+        resolvedAccountId = resolved.context.accountId;
+      }
+
+      if (!ensureAccountExists(res, resolvedMerchantId, resolvedAccountId)) {
         return;
       }
 
       const duplicate = hasSettlementEvent(eventId);
-      const duplicateLifecycle = hasSettlementLifecycleEvent(merchantId, accountId, settlementId, status);
+      const duplicateLifecycle = hasSettlementLifecycleEvent(
+        resolvedMerchantId,
+        resolvedAccountId,
+        settlementId,
+        status
+      );
       if (!duplicate && !duplicateLifecycle) {
         insertSettlementEvent({
           eventId,
           settlementId,
-          merchantId,
-          accountId,
+          merchantId: resolvedMerchantId,
+          accountId: resolvedAccountId,
           sourceNetwork,
           destinationNetwork,
           apiId,
@@ -2458,7 +2536,7 @@ const server = createServer(async (req, res) => {
           confirmations,
           createdAt
         });
-        recomputeBalances(merchantId, accountId);
+        recomputeBalances(resolvedMerchantId, resolvedAccountId);
 
         const eventTypeByStatus = {
           settled_source: "payment.settled_source",
@@ -2468,15 +2546,18 @@ const server = createServer(async (req, res) => {
         };
         const webhookEventType = eventTypeByStatus[status] || "payment.updated";
         await publishTenantWebhookEvent({
-          merchantId,
-          accountId,
+          merchantId: resolvedMerchantId,
+          accountId: resolvedAccountId,
           eventType: webhookEventType,
           eventId: `evt_${eventId}_${status}`,
           data: {
             eventId,
             settlementId,
-            merchantId,
-            accountId,
+            merchantId: resolvedMerchantId,
+            accountId: resolvedAccountId,
+            paymentContextId: paymentContextId || null,
+            treasuryMode: resolvedPaymentContext?.treasuryMode || null,
+            privacyCoverageMode: resolvedPaymentContext?.privacyCoverageMode || null,
             sourceNetwork,
             destinationNetwork,
             asset: "USDC",
@@ -2496,7 +2577,10 @@ const server = createServer(async (req, res) => {
         success: true,
         duplicate: duplicate || duplicateLifecycle,
         eventId,
-        settlementId
+        settlementId,
+        paymentContextId: paymentContextId || null,
+        merchantId: resolvedMerchantId || null,
+        accountId: resolvedAccountId || null
       });
     }
 

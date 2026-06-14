@@ -71,10 +71,46 @@ CREATE TABLE IF NOT EXISTS treasury_policy (
   account_id TEXT NOT NULL REFERENCES merchant_accounts(id),
   preferred_network TEXT NOT NULL,
   preferred_asset TEXT NOT NULL,
+  treasury_mode TEXT NOT NULL DEFAULT 'public' CHECK (treasury_mode IN ('public', 'private')),
+  private_home_network TEXT,
+  privacy_enabled_at TEXT,
   auto_bridge_enabled INTEGER NOT NULL DEFAULT 1,
   updated_at TEXT NOT NULL,
   PRIMARY KEY (merchant_id, account_id)
 );
+
+CREATE TABLE IF NOT EXISTS payment_requirement_contexts (
+  id TEXT PRIMARY KEY,
+  payment_context_id TEXT NOT NULL UNIQUE,
+  merchant_id TEXT NOT NULL REFERENCES merchants(id),
+  account_id TEXT NOT NULL REFERENCES merchant_accounts(id),
+  api_product_id TEXT,
+  treasury_mode TEXT NOT NULL,
+  privacy_coverage_mode TEXT,
+  private_home_network TEXT,
+  scheme TEXT NOT NULL,
+  source_network TEXT NOT NULL,
+  destination_network TEXT,
+  asset TEXT NOT NULL,
+  amount TEXT NOT NULL,
+  public_pay_to TEXT NOT NULL,
+  settlement_id TEXT,
+  status TEXT NOT NULL,
+  issued_at TEXT NOT NULL,
+  expires_at TEXT NOT NULL,
+  settled_at TEXT,
+  consumed_at TEXT,
+  metadata_json TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_payment_requirement_contexts_tenant_issued
+  ON payment_requirement_contexts(merchant_id, account_id, issued_at DESC);
+
+CREATE INDEX IF NOT EXISTS idx_payment_requirement_contexts_status_expires
+  ON payment_requirement_contexts(status, expires_at);
+
+CREATE INDEX IF NOT EXISTS idx_payment_requirement_contexts_settlement
+  ON payment_requirement_contexts(settlement_id);
 
 CREATE TABLE IF NOT EXISTS api_products (
   id TEXT PRIMARY KEY,

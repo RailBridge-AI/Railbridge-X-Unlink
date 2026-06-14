@@ -16,12 +16,17 @@ interface SettlementEventInput {
   eventId?: string;
   merchantId?: string;
   accountId?: string;
+  paymentContextId?: string;
+  treasuryMode?: string;
+  privacyCoverageMode?: string;
   merchantAddress: string;
   sourceNetwork: string;
   destinationNetwork?: string;
   apiId?: string;
   apiRoute?: string;
   apiName?: string;
+  scheme?: string;
+  publicPayTo?: string;
   asset: string;
   amount: string;
   status: "settled_source" | "bridge_pending" | "bridge_confirmed" | "failed";
@@ -76,7 +81,15 @@ export class MerchantOsPublisher {
     this.merchantContextMap = parseMerchantContextMap(config.merchantContextMapJson);
   }
 
-  private resolveContext(input: { merchantAddress: string; merchantId?: string; accountId?: string }): MerchantContext | null {
+  private resolveContext(input: {
+    merchantAddress: string;
+    merchantId?: string;
+    accountId?: string;
+    paymentContextId?: string;
+  }): MerchantContext | null {
+    if (input.paymentContextId) {
+      return null;
+    }
     if (input.merchantId && input.accountId) {
       return {
         merchantId: input.merchantId,
@@ -95,11 +108,11 @@ export class MerchantOsPublisher {
     }
 
     const context = this.resolveContext(input);
-    if (!context) {
+    if (!context && !input.paymentContextId) {
       console.warn("[merchant-os] Missing merchant context for address, skipping event publish", {
         merchantAddress: input.merchantAddress,
         hint:
-          "Set merchantOsDefaultMerchantId + merchantOsDefaultAccountId or merchantContextMapJson in facilitator runtime config",
+          "Set merchantOsDefaultMerchantId + merchantOsDefaultAccountId, merchantContextMapJson, or send paymentContextId in the settlement payload",
       });
       return;
     }
@@ -107,18 +120,25 @@ export class MerchantOsPublisher {
     const sourceTxHash = input.sourceTxHash || input.txHash;
     const deterministicEventId =
       input.eventId ||
-      `${context.merchantId}:${context.accountId}:${input.sourceNetwork}:${input.settlementId || sourceTxHash}:${input.status}`;
+      (context
+        ? `${context.merchantId}:${context.accountId}:${input.sourceNetwork}:${input.settlementId || sourceTxHash}:${input.status}`
+        : `${input.paymentContextId}:${input.sourceNetwork}:${input.settlementId || sourceTxHash}:${input.status}`);
 
     const payload = {
       eventId: deterministicEventId || randomUUID(),
       settlementId: input.settlementId || sourceTxHash,
-      merchantId: context.merchantId,
-      accountId: context.accountId,
+      merchantId: context?.merchantId || null,
+      accountId: context?.accountId || null,
+      paymentContextId: input.paymentContextId || null,
+      treasuryMode: input.treasuryMode || null,
+      privacyCoverageMode: input.privacyCoverageMode || null,
       sourceNetwork: input.sourceNetwork,
       destinationNetwork: input.destinationNetwork || null,
       apiId: input.apiId || null,
       apiRoute: input.apiRoute || null,
       apiName: input.apiName || null,
+      scheme: input.scheme || null,
+      publicPayTo: input.publicPayTo || null,
       asset: input.asset,
       amount: input.amount,
       status: input.status,

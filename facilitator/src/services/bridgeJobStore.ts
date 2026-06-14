@@ -10,9 +10,14 @@ export interface BridgeJob {
   merchantAddress: string;
   merchantId?: string;
   accountId?: string;
+  paymentContextId?: string;
+  treasuryMode?: string;
+  privacyCoverageMode?: string;
   apiId?: string;
   apiRoute?: string;
   apiName?: string;
+  scheme?: string;
+  publicPayTo?: string;
   sourceNetwork: Network;
   destinationNetwork: Network;
   destinationAsset: string;
