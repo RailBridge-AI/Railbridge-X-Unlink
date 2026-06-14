@@ -368,6 +368,60 @@ const runSchemaMigrations = () => {
       ON private_ledger_entries(reference_type, reference_id);
   `);
   run(`
+    CREATE TABLE IF NOT EXISTS omnibus_sweeps (
+      id TEXT PRIMARY KEY,
+      merchant_id TEXT NOT NULL REFERENCES merchants(id),
+      account_id TEXT NOT NULL REFERENCES merchant_accounts(id),
+      provider TEXT NOT NULL,
+      environment TEXT NOT NULL,
+      network TEXT NOT NULL,
+      asset TEXT NOT NULL,
+      settlement_id TEXT NOT NULL,
+      payment_context_id TEXT,
+      amount TEXT NOT NULL,
+      omnibus_account_id TEXT,
+      provider_tx_id TEXT,
+      provider_tx_hash TEXT,
+      status TEXT NOT NULL,
+      fail_reason TEXT,
+      idempotency_key TEXT NOT NULL UNIQUE,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+  `);
+  run(`
+    CREATE INDEX IF NOT EXISTS idx_omnibus_sweeps_tenant_created
+      ON omnibus_sweeps(merchant_id, account_id, created_at DESC);
+  `);
+  run(`
+    CREATE TABLE IF NOT EXISTS private_transfers (
+      id TEXT PRIMARY KEY,
+      merchant_id TEXT NOT NULL REFERENCES merchants(id),
+      account_id TEXT NOT NULL REFERENCES merchant_accounts(id),
+      provider TEXT NOT NULL,
+      environment TEXT NOT NULL,
+      network TEXT NOT NULL,
+      asset TEXT NOT NULL,
+      settlement_id TEXT NOT NULL,
+      payment_context_id TEXT,
+      amount TEXT NOT NULL,
+      from_account_id TEXT,
+      to_account_id TEXT,
+      to_unlink_address TEXT,
+      provider_tx_id TEXT,
+      provider_tx_hash TEXT,
+      status TEXT NOT NULL,
+      fail_reason TEXT,
+      idempotency_key TEXT NOT NULL UNIQUE,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+  `);
+  run(`
+    CREATE INDEX IF NOT EXISTS idx_private_transfers_tenant_created
+      ON private_transfers(merchant_id, account_id, created_at DESC);
+  `);
+  run(`
     CREATE TABLE IF NOT EXISTS private_balance_snapshots (
       id TEXT PRIMARY KEY,
       merchant_id TEXT NOT NULL REFERENCES merchants(id),
@@ -2504,6 +2558,27 @@ export const resolvePaymentRequirementContextForSettlement = ({
   };
 };
 
+export const markPaymentRequirementContextConsumed = (paymentContextId, settlementId) => {
+  const context = getPaymentRequirementContext(paymentContextId);
+  if (!context) {
+    return null;
+  }
+  const consumedAt = nowIso();
+  run(`
+    UPDATE payment_requirement_contexts
+    SET status = 'consumed',
+        consumed_at = COALESCE(consumed_at, ${sqlLiteral(consumedAt)}),
+        settled_at = COALESCE(settled_at, ${sqlLiteral(consumedAt)}),
+        settlement_id = COALESCE(settlement_id, ${sqlLiteral(settlementId || null)})
+    WHERE payment_context_id = ${sqlLiteral(context.paymentContextId)}
+      AND (
+        settlement_id IS NULL
+        OR settlement_id = ${sqlLiteral(settlementId || null)}
+      );
+  `);
+  return getPaymentRequirementContext(paymentContextId);
+};
+
 export const getPrivateAccount = ({
   merchantId,
   accountId,
@@ -2737,6 +2812,246 @@ export const getPrivateLedgerWorkflowBalances = (merchantId, accountId) => {
       pendingWithdrawalAmount: row.pendingWithdrawalAmount.toString()
     }))
     .sort((left, right) => left.network.localeCompare(right.network));
+};
+
+export const getPrivateIntakeCommittedBalances = (merchantId, accountId) => {
+  const rows = all(`
+    SELECT
+      network,
+      amount
+    FROM private_ledger_entries
+    WHERE merchant_id = ${sqlLiteral(merchantId)}
+      AND account_id = ${sqlLiteral(accountId)}
+      AND asset = 'USDC'
+      AND entry_type = 'payment.settled_public_intake'
+    ORDER BY created_at ASC;
+  `);
+
+  const totals = new Map();
+  rows.forEach((row) => {
+    const network = String(row.network || "").trim();
+    if (!network) {
+      return;
+    }
+    try {
+      const amount = BigInt(String(row.amount || "0"));
+      totals.set(network, (totals.get(network) || 0n) + amount);
+    } catch {
+      // ignore invalid historical row
+    }
+  });
+
+  return [...totals.entries()]
+    .map(([network, totalAmount]) => ({
+      network,
+      totalAmount: totalAmount.toString()
+    }))
+    .sort((left, right) => left.network.localeCompare(right.network));
+};
+
+export const listPendingPrivateSweepCandidates = (limit = 20) => {
+  const safeLimit = Number.isFinite(limit) ? Math.max(1, Math.min(Number(limit), 200)) : 20;
+  return all(`
+    SELECT
+      id,
+      merchant_id AS merchantId,
+      account_id AS accountId,
+      provider,
+      environment,
+      network,
+      asset,
+      entry_type AS entryType,
+      direction,
+      amount,
+      available_delta AS availableDelta,
+      pending_sweep_delta AS pendingSweepDelta,
+      pending_withdrawal_delta AS pendingWithdrawalDelta,
+      reference_type AS referenceType,
+      reference_id AS referenceId,
+      idempotency_key AS idempotencyKey,
+      metadata_json AS metadataJson,
+      created_at AS createdAt
+    FROM private_ledger_entries entry
+    WHERE entry.entry_type = 'payment.settled_public_intake'
+      AND entry.asset = 'USDC'
+      AND NOT EXISTS (
+        SELECT 1
+        FROM private_ledger_entries credit
+        WHERE credit.reference_type = entry.reference_type
+          AND credit.reference_id = entry.reference_id
+          AND credit.entry_type = 'merchant.private_credit'
+      )
+    ORDER BY entry.created_at ASC
+    LIMIT ${safeLimit};
+  `).map((row) => parsePrivateLedgerEntryRow(row));
+};
+
+const getOmnibusSweepByIdempotencyKey = (idempotencyKey) =>
+  one(`
+    SELECT
+      id,
+      merchant_id AS merchantId,
+      account_id AS accountId,
+      provider,
+      environment,
+      network,
+      asset,
+      settlement_id AS settlementId,
+      payment_context_id AS paymentContextId,
+      amount,
+      omnibus_account_id AS omnibusAccountId,
+      provider_tx_id AS providerTxId,
+      provider_tx_hash AS providerTxHash,
+      status,
+      fail_reason AS failReason,
+      idempotency_key AS idempotencyKey,
+      created_at AS createdAt,
+      updated_at AS updatedAt
+    FROM omnibus_sweeps
+    WHERE idempotency_key = ${sqlLiteral(String(idempotencyKey || "").trim())}
+    LIMIT 1;
+  `);
+
+export const upsertOmnibusSweep = (input) => {
+  const idempotencyKey = String(input.idempotencyKey || "").trim();
+  if (!idempotencyKey) {
+    throw new Error("idempotencyKey is required");
+  }
+  const existing = getOmnibusSweepByIdempotencyKey(idempotencyKey);
+  const id = existing?.id || String(input.id || newId()).trim();
+  const createdAt = existing?.createdAt || String(input.createdAt || nowIso()).trim();
+  const updatedAt = nowIso();
+
+  run(`
+    INSERT OR REPLACE INTO omnibus_sweeps (
+      id,
+      merchant_id,
+      account_id,
+      provider,
+      environment,
+      network,
+      asset,
+      settlement_id,
+      payment_context_id,
+      amount,
+      omnibus_account_id,
+      provider_tx_id,
+      provider_tx_hash,
+      status,
+      fail_reason,
+      idempotency_key,
+      created_at,
+      updated_at
+    ) VALUES (
+      ${sqlLiteral(id)},
+      ${sqlLiteral(input.merchantId)},
+      ${sqlLiteral(input.accountId)},
+      ${sqlLiteral(input.provider || "unlink")},
+      ${sqlLiteral(input.environment)},
+      ${sqlLiteral(input.network)},
+      ${sqlLiteral(input.asset || "USDC")},
+      ${sqlLiteral(input.settlementId)},
+      ${sqlLiteral(input.paymentContextId || null)},
+      ${sqlLiteral(input.amount)},
+      ${sqlLiteral(input.omnibusAccountId || null)},
+      ${sqlLiteral(input.providerTxId || null)},
+      ${sqlLiteral(input.providerTxHash || null)},
+      ${sqlLiteral(input.status || "submitted")},
+      ${sqlLiteral(input.failReason || null)},
+      ${sqlLiteral(idempotencyKey)},
+      ${sqlLiteral(createdAt)},
+      ${sqlLiteral(updatedAt)}
+    );
+  `);
+
+  return getOmnibusSweepByIdempotencyKey(idempotencyKey);
+};
+
+const getPrivateTransferByIdempotencyKey = (idempotencyKey) =>
+  one(`
+    SELECT
+      id,
+      merchant_id AS merchantId,
+      account_id AS accountId,
+      provider,
+      environment,
+      network,
+      asset,
+      settlement_id AS settlementId,
+      payment_context_id AS paymentContextId,
+      amount,
+      from_account_id AS fromAccountId,
+      to_account_id AS toAccountId,
+      to_unlink_address AS toUnlinkAddress,
+      provider_tx_id AS providerTxId,
+      provider_tx_hash AS providerTxHash,
+      status,
+      fail_reason AS failReason,
+      idempotency_key AS idempotencyKey,
+      created_at AS createdAt,
+      updated_at AS updatedAt
+    FROM private_transfers
+    WHERE idempotency_key = ${sqlLiteral(String(idempotencyKey || "").trim())}
+    LIMIT 1;
+  `);
+
+export const upsertPrivateTransfer = (input) => {
+  const idempotencyKey = String(input.idempotencyKey || "").trim();
+  if (!idempotencyKey) {
+    throw new Error("idempotencyKey is required");
+  }
+  const existing = getPrivateTransferByIdempotencyKey(idempotencyKey);
+  const id = existing?.id || String(input.id || newId()).trim();
+  const createdAt = existing?.createdAt || String(input.createdAt || nowIso()).trim();
+  const updatedAt = nowIso();
+
+  run(`
+    INSERT OR REPLACE INTO private_transfers (
+      id,
+      merchant_id,
+      account_id,
+      provider,
+      environment,
+      network,
+      asset,
+      settlement_id,
+      payment_context_id,
+      amount,
+      from_account_id,
+      to_account_id,
+      to_unlink_address,
+      provider_tx_id,
+      provider_tx_hash,
+      status,
+      fail_reason,
+      idempotency_key,
+      created_at,
+      updated_at
+    ) VALUES (
+      ${sqlLiteral(id)},
+      ${sqlLiteral(input.merchantId)},
+      ${sqlLiteral(input.accountId)},
+      ${sqlLiteral(input.provider || "unlink")},
+      ${sqlLiteral(input.environment)},
+      ${sqlLiteral(input.network)},
+      ${sqlLiteral(input.asset || "USDC")},
+      ${sqlLiteral(input.settlementId)},
+      ${sqlLiteral(input.paymentContextId || null)},
+      ${sqlLiteral(input.amount)},
+      ${sqlLiteral(input.fromAccountId || null)},
+      ${sqlLiteral(input.toAccountId || null)},
+      ${sqlLiteral(input.toUnlinkAddress || null)},
+      ${sqlLiteral(input.providerTxId || null)},
+      ${sqlLiteral(input.providerTxHash || null)},
+      ${sqlLiteral(input.status || "submitted")},
+      ${sqlLiteral(input.failReason || null)},
+      ${sqlLiteral(idempotencyKey)},
+      ${sqlLiteral(createdAt)},
+      ${sqlLiteral(updatedAt)}
+    );
+  `);
+
+  return getPrivateTransferByIdempotencyKey(idempotencyKey);
 };
 
 export const getLatestPrivateBalanceSnapshot = ({

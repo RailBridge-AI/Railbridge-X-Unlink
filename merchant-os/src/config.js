@@ -214,6 +214,9 @@ const runtimeConfigDefaults = {
   onchainReadTimeoutMs: 7000,
   onchainReadTotalBudgetMs: 2200,
   chainCatalogSyncMs: 300000,
+  privacySweepWorkerEnabled: false,
+  privacySweepIntervalMs: 30000,
+  privacySweepBatchSize: 20,
   chainStatusOverrides: {},
   rpcOverridesByNetwork: {}
 };
@@ -371,6 +374,12 @@ export const config = {
   ),
 
   chainCatalogSyncMs: parseIntValue(runtimeConfig.chainCatalogSyncMs, 300000),
+  privacySweepWorkerEnabled: parseBooleanValue(
+    runtimeConfig.privacySweepWorkerEnabled,
+    parseBooleanValue(runtimeConfig.privacySweepWorkerEnabled, false)
+  ),
+  privacySweepIntervalMs: parseIntValue(runtimeConfig.privacySweepIntervalMs, 30000),
+  privacySweepBatchSize: parseIntValue(runtimeConfig.privacySweepBatchSize, 20),
   chainStatusOverrides,
 
   onboardingAllowlistDomains,

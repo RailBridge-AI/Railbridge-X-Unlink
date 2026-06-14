@@ -1,11 +1,16 @@
+import { createHash } from "node:crypto";
 import { config } from "./config.js";
 import {
   getLatestPrivateBalanceSnapshot,
   getPrivateAccount,
-  insertPrivateBalanceSnapshot
+  insertPrivateBalanceSnapshot,
+  upsertPrivateAccount
 } from "./db.js";
 
 const DEFAULT_PROVIDER = "unlink";
+const DEFAULT_TOKEN = "USDC";
+
+const simulationEnabled = () => Boolean(config.allowSimulatedLedgerMutations);
 
 const loadUnlinkSdk = async () => {
   try {
@@ -24,6 +29,27 @@ const resolveEnvironmentForNetwork = (network) => {
   }
   return config.unlinkDefaultEnvironment || null;
 };
+
+const hashSuffix = (value) =>
+  createHash("sha256")
+    .update(String(value || ""))
+    .digest("hex")
+    .slice(0, 24);
+
+const buildSimulatedUnlinkAddress = (seed) => `unlink_sim_${hashSuffix(seed)}`;
+
+const buildSimulatedTxHash = (prefix, idempotencyKey) => `0x${hashSuffix(`${prefix}:${idempotencyKey}`).padEnd(64, "0")}`;
+
+const buildMutationFailure = ({ environment, code, message }) => ({
+  provider: DEFAULT_PROVIDER,
+  environment: environment || null,
+  txId: null,
+  txHash: null,
+  status: "failed",
+  errorCode: code,
+  errorMessage: message,
+  raw: {}
+});
 
 const parseProviderAmount = (balances, token) => {
   if (!Array.isArray(balances)) {
@@ -68,12 +94,138 @@ const buildFallbackResult = ({ environment, network, snapshot, reason }) => ({
   amount: snapshot?.amount || "0",
   freshness: snapshot ? "cached" : "degraded",
   lastProviderSyncAt: snapshot?.sourceUpdatedAt || snapshot?.recordedAt || null,
-  readStatus: reason || (snapshot ? "snapshot_fallback" : "provider_unavailable")
+  readStatus: snapshot ? "snapshot_fallback" : reason || "provider_unavailable"
 });
 
 export const privacyVaultService = {
   getEnvironmentForNetwork(network) {
     return resolveEnvironmentForNetwork(network);
+  },
+
+  async ensureOmnibusAccount({ environment, network }) {
+    const normalizedEnvironment = String(environment || "").trim() || null;
+    if (!normalizedEnvironment) {
+      throw new Error("environment is required");
+    }
+
+    const existing = getPrivateAccount({
+      merchantId: null,
+      accountId: null,
+      provider: DEFAULT_PROVIDER,
+      environment: normalizedEnvironment,
+      role: "omnibus"
+    });
+    if (existing) {
+      return existing;
+    }
+
+    if (!simulationEnabled()) {
+      throw new Error("unlink omnibus account creation is not configured");
+    }
+
+    return upsertPrivateAccount({
+      merchantId: null,
+      accountId: null,
+      provider: DEFAULT_PROVIDER,
+      environment: normalizedEnvironment,
+      network: String(network || "").trim() || normalizedEnvironment,
+      role: "omnibus",
+      unlinkAddress: buildSimulatedUnlinkAddress(`omnibus:${normalizedEnvironment}`),
+      keyReference: `simulated:omnibus:${normalizedEnvironment}`,
+      status: "active"
+    });
+  },
+
+  async getOrCreateMerchantAccount({ merchantId, accountId, environment, network }) {
+    const normalizedEnvironment = String(environment || "").trim() || null;
+    if (!merchantId || !accountId || !normalizedEnvironment) {
+      throw new Error("merchantId, accountId, and environment are required");
+    }
+
+    const existing = getPrivateAccount({
+      merchantId,
+      accountId,
+      provider: DEFAULT_PROVIDER,
+      environment: normalizedEnvironment,
+      role: "merchant"
+    });
+    if (existing) {
+      return existing;
+    }
+
+    if (!simulationEnabled()) {
+      throw new Error("unlink merchant account creation is not configured");
+    }
+
+    return upsertPrivateAccount({
+      merchantId,
+      accountId,
+      provider: DEFAULT_PROVIDER,
+      environment: normalizedEnvironment,
+      network: String(network || "").trim() || normalizedEnvironment,
+      role: "merchant",
+      unlinkAddress: buildSimulatedUnlinkAddress(`merchant:${merchantId}:${accountId}:${normalizedEnvironment}`),
+      keyReference: `simulated:merchant:${merchantId}:${accountId}:${normalizedEnvironment}`,
+      status: "active"
+    });
+  },
+
+  async depositFromIntake({ environment, amount, idempotencyKey }) {
+    const normalizedEnvironment = String(environment || "").trim() || null;
+    if (!normalizedEnvironment || !idempotencyKey) {
+      throw new Error("environment and idempotencyKey are required");
+    }
+
+    if (simulationEnabled()) {
+      return {
+        provider: DEFAULT_PROVIDER,
+        environment: normalizedEnvironment,
+        txId: `sim_deposit_${hashSuffix(idempotencyKey)}`,
+        txHash: buildSimulatedTxHash("deposit", idempotencyKey),
+        status: "processed",
+        errorCode: null,
+        errorMessage: null,
+        raw: {
+          simulated: true,
+          amount: String(amount || "0")
+        }
+      };
+    }
+
+    return buildMutationFailure({
+      environment: normalizedEnvironment,
+      code: "provider_write_not_configured",
+      message: "Unlink deposit mutations are not configured yet"
+    });
+  },
+
+  async transferPrivately({ environment, amount, idempotencyKey }) {
+    const normalizedEnvironment = String(environment || "").trim() || null;
+    if (!normalizedEnvironment || !idempotencyKey) {
+      throw new Error("environment and idempotencyKey are required");
+    }
+
+    if (simulationEnabled()) {
+      return {
+        provider: DEFAULT_PROVIDER,
+        environment: normalizedEnvironment,
+        txId: `sim_transfer_${hashSuffix(idempotencyKey)}`,
+        txHash: buildSimulatedTxHash("transfer", idempotencyKey),
+        status: "processed",
+        errorCode: null,
+        errorMessage: null,
+        raw: {
+          simulated: true,
+          amount: String(amount || "0")
+        }
+      };
+    }
+
+    return buildMutationFailure({
+      environment: normalizedEnvironment,
+      code: "provider_write_not_configured",
+      message: "Unlink private transfers are not configured yet"
+    });
   },
 
   async getPrivateBalance({ merchantId, accountId, network, token }) {
@@ -174,7 +326,7 @@ export const privacyVaultService = {
         provider: DEFAULT_PROVIDER,
         environment,
         network,
-        asset: "USDC",
+        asset: DEFAULT_TOKEN,
         amount,
         freshness: "live",
         sourceUpdatedAt

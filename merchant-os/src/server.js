@@ -15,6 +15,7 @@ import { ConsolidationBridgeError, ConsolidationBridgeService } from "./consolid
 import { GasSponsorService } from "./gasSponsorService.js";
 import { transferUsdcOnchain, UsdcTransferError } from "./usdcTransferService.js";
 import { privacyVaultService } from "./privacyVaultService.js";
+import { PrivacySweepWorker } from "./privacySweepWorker.js";
 import {
   acquireTenantMutationDbLock,
   authenticatePlatformUser,
@@ -44,9 +45,10 @@ import {
   getCustodyPrivateKeyByReference,
   getPayoutAddressBookEntryById,
   getWebhookEndpointById,
+  getPrivateIntakeCommittedBalances,
+  getPrivateLedgerWorkflowBalances,
   hasSettlementLifecycleEvent,
   getPayoutRequest,
-  getPendingPrivateIntakeBalances,
   getPolicy,
   getSession,
   insertPrivateLedgerEntry,
@@ -621,25 +623,44 @@ const buildOverviewResponse = async (merchantId, accountId, options = {}) => {
           lastProviderSyncAt: null,
           readStatus: "private_home_network_missing"
         };
-    const pendingRows = getPendingPrivateIntakeBalances(merchantId, accountId);
-    const pendingByNetwork = new Map(
-      pendingRows.map((row) => [row.network, BigInt(String(row.totalAmount || "0"))])
+    const workflowRows = getPrivateLedgerWorkflowBalances(merchantId, accountId);
+    const workflowByNetwork = new Map(
+      workflowRows.map((row) => [
+        row.network,
+        {
+          availableAmount: BigInt(String(row.availableAmount || "0")),
+          pendingSweepAmount: BigInt(String(row.pendingSweepAmount || "0")),
+          pendingWithdrawalAmount: BigInt(String(row.pendingWithdrawalAmount || "0"))
+        }
+      ])
+    );
+    const committedRows = getPrivateIntakeCommittedBalances(merchantId, accountId);
+    const committedByNetwork = new Map(
+      committedRows.map((row) => [row.network, BigInt(String(row.totalAmount || "0"))])
     );
     const networks = new Set([
       ...projectedPublicByNetwork.keys(),
-      ...pendingByNetwork.keys(),
+      ...workflowByNetwork.keys(),
       ...(privateHomeNetwork ? [privateHomeNetwork] : [])
     ]);
     const balances = [...networks]
       .filter(Boolean)
       .map((network) => {
+        const workflow = workflowByNetwork.get(network) || {
+          availableAmount: 0n,
+          pendingSweepAmount: 0n,
+          pendingWithdrawalAmount: 0n
+        };
         const privateAvailable =
           network === privateHomeNetwork ? BigInt(String(liveBalance.amount || "0")) : 0n;
         const projectedPublicAmount = projectedPublicByNetwork.get(network) || 0n;
-        const pendingSweepAmount = pendingByNetwork.get(network) || 0n;
+        const committedPrivateIntakeAmount = committedByNetwork.get(network) || 0n;
+        const pendingSweepAmount = workflow.pendingSweepAmount;
         const publicFallbackAmount =
-          projectedPublicAmount > pendingSweepAmount ? projectedPublicAmount - pendingSweepAmount : 0n;
-        const pendingWithdrawalAmount = 0n;
+          projectedPublicAmount > committedPrivateIntakeAmount
+            ? projectedPublicAmount - committedPrivateIntakeAmount
+            : 0n;
+        const pendingWithdrawalAmount = workflow.pendingWithdrawalAmount;
         const availableAmount = privateAvailable + publicFallbackAmount;
         const projectedAmount = availableAmount + pendingSweepAmount;
         const hasPendingOnly =
@@ -849,6 +870,10 @@ const gasSponsorService = new GasSponsorService({
   rpcUrlsByNetwork: config.rpcUrlsByNetwork
 });
 const chainCatalogService = new ChainCatalogService();
+const privacySweepWorker = new PrivacySweepWorker({
+  privacyVaultService,
+  intervalMs: config.privacySweepIntervalMs
+});
 
 if (config.realConsolidationBridgeEnabled) {
   console.info(
@@ -870,6 +895,11 @@ if (config.realPayoutsEnabled) {
   console.info("[merchant-os] Real payout execution enabled.");
 } else {
   console.warn("[merchant-os] Real payout execution disabled. Payouts will be ledger-simulated.");
+}
+if (config.privacySweepWorkerEnabled) {
+  console.info("[merchant-os] Privacy sweep worker enabled.", {
+    intervalMs: config.privacySweepIntervalMs
+  });
 }
 
 const sanitizeFailReason = (value) => {
@@ -2863,6 +2893,24 @@ const server = createServer(async (req, res) => {
       });
     }
 
+    if (method === "POST" && pathname === "/v1/internal/privacy/sweeps/run") {
+      if (!validateInternalToken(req)) {
+        return sendJson(res, 401, { error: "Unauthorized internal token" });
+      }
+
+      const body = await parseJsonBody(req);
+      const limit =
+        body.limit === undefined || body.limit === null || body.limit === ""
+          ? config.privacySweepBatchSize
+          : Number.parseInt(String(body.limit), 10);
+      if (Number.isNaN(limit) || limit <= 0) {
+        return sendJson(res, 400, { error: "limit must be a positive integer" });
+      }
+
+      const result = await privacySweepWorker.runOnce({ limit });
+      return sendJson(res, 200, result);
+    }
+
     const merchantItemProductMatch = pathname.match(MERCHANT_PRODUCTS_ITEM_ROUTE);
     if (merchantItemProductMatch && (method === "PUT" || method === "DELETE")) {
       const merchantId = decodeURIComponent(merchantItemProductMatch[1]);
@@ -3780,6 +3828,9 @@ const server = createServer(async (req, res) => {
 
 initializeDatabase();
 chainCatalogService.start();
+if (config.privacySweepWorkerEnabled) {
+  privacySweepWorker.start();
+}
 
 server.listen(config.port, () => {
   console.log(`Merchant OS listening on http://localhost:${config.port}`);

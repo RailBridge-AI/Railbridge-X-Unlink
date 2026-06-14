@@ -697,5 +697,37 @@ describe("Merchant OS core integration flows", () => {
     assert.equal(privateBalance.publicFallbackAmount, "0");
     assert.equal(privateBalance.privateAvailableAmount, "0");
     assert.equal(privateBalance.readStatus, "ledger_pending_private_intake");
+
+    const sweepRun = await call({
+      path: "/v1/internal/privacy/sweeps/run",
+      method: "POST",
+      headers: {
+        "x-merchant-os-internal-token": "test-internal-token"
+      },
+      body: {
+        limit: 10
+      }
+    });
+    assert.equal(sweepRun.status, 200);
+    assert.equal(sweepRun.body.processedCount, 1);
+
+    const balancesAfterSweep = await call({
+      path: `/v1/merchants/${privateMerchantId}/balances`,
+      headers: {
+        "x-railbridge-api-key": privateApiKey
+      }
+    });
+    assert.equal(balancesAfterSweep.status, 200);
+    assert.equal(balancesAfterSweep.body.availableUsd, "0.02");
+    assert.equal(balancesAfterSweep.body.projectedUsd, "0.02");
+    assert.equal(balancesAfterSweep.body.pendingSweepUsd, "0");
+    const privateBalanceAfterSweep = balancesAfterSweep.body.balances.find(
+      (item) => item.network === "eip155:84532"
+    );
+    assert.ok(privateBalanceAfterSweep);
+    assert.equal(privateBalanceAfterSweep.pendingSweepAmount, "0");
+    assert.equal(privateBalanceAfterSweep.publicFallbackAmount, "0");
+    assert.equal(privateBalanceAfterSweep.privateAvailableAmount, "20000");
+    assert.equal(privateBalanceAfterSweep.readStatus, "snapshot_fallback");
   });
 });
