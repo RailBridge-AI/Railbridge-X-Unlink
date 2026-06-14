@@ -260,9 +260,19 @@ const extractMerchantContextMeta = (requirements: PaymentRequirements) => {
   const reqAny = requirements as any;
   const reqExtra = reqAny.extra || {};
   const priceExtra = reqAny.price?.extra || {};
-  const merchantId = pickString(reqExtra.merchantId, priceExtra.merchantId, reqAny.merchantId);
-  const accountId = pickString(reqExtra.accountId, priceExtra.accountId, reqAny.accountId);
-  return { merchantId, accountId };
+  const rbPrivacy =
+    (reqExtra.rbPrivacy && typeof reqExtra.rbPrivacy === "object" ? reqExtra.rbPrivacy : null) ||
+    (priceExtra.rbPrivacy && typeof priceExtra.rbPrivacy === "object" ? priceExtra.rbPrivacy : null);
+  const paymentContextId = pickString(rbPrivacy?.paymentContextId);
+  const merchantId = paymentContextId
+    ? undefined
+    : pickString(reqExtra.merchantId, priceExtra.merchantId, reqAny.merchantId);
+  const accountId = paymentContextId
+    ? undefined
+    : pickString(reqExtra.accountId, priceExtra.accountId, reqAny.accountId);
+  const treasuryMode = pickString(rbPrivacy?.treasuryMode);
+  const privacyCoverageMode = pickString(rbPrivacy?.privacyCoverageMode);
+  return { merchantId, accountId, paymentContextId, treasuryMode, privacyCoverageMode };
 };
 
 // ============================================================================
@@ -421,6 +431,8 @@ const facilitator = new x402Facilitator()
         destinationNetwork: crossChainInfo?.destinationNetwork,
         ...apiMeta,
         ...merchantContextMeta,
+        scheme: context.requirements.scheme,
+        publicPayTo: context.requirements.payTo,
         asset: context.requirements.asset,
         amount: context.requirements.amount,
         status: initialStatus,
@@ -444,9 +456,14 @@ const facilitator = new x402Facilitator()
         merchantAddress: crossChainInfo.destinationPayTo,
         merchantId: merchantContextMeta.merchantId,
         accountId: merchantContextMeta.accountId,
+        paymentContextId: merchantContextMeta.paymentContextId,
+        treasuryMode: merchantContextMeta.treasuryMode,
+        privacyCoverageMode: merchantContextMeta.privacyCoverageMode,
         apiId: apiMeta.apiId,
         apiRoute: apiMeta.apiRoute,
         apiName: apiMeta.apiName,
+        scheme: context.requirements.scheme,
+        publicPayTo: context.requirements.payTo,
         sourceNetwork: context.result.network as Network,
         destinationNetwork: crossChainInfo.destinationNetwork as Network,
         destinationAsset: crossChainInfo.destinationAsset,

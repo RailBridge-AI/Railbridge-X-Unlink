@@ -1,4 +1,4 @@
-import { createPublicClient, createWalletClient, erc20Abi, fallback, http } from "viem";
+// Public-mode ERC-20 payout execution. Private-mode payouts use privatePayoutService.
 import { privateKeyToAccount } from "viem/accounts";
 
 const normalizeEvmAddress = (value) => {

@@ -392,15 +392,22 @@ export const createRailbridgePaymentGuard = async (config) => {
       const truncatedRequirements = prioritizedRequirements.slice(0, maxRequirementOptions);
 
       const nextRoute = {
-        accepts: truncatedRequirements.map((requirement) => ({
-          scheme: requirement.scheme,
-          network: requirement.network,
-          price: requirement.price,
-          payTo: requirement.payTo,
-          merchantId: resolved.merchantId,
-          accountId: resolved.accountId,
-          extra: requirement.extra,
-        })),
+        accepts: truncatedRequirements.map((requirement) => {
+          const paymentContextId = requirement?.extra?.rbPrivacy?.paymentContextId;
+          return {
+            scheme: requirement.scheme,
+            network: requirement.network,
+            price: requirement.price,
+            payTo: requirement.payTo,
+            ...(paymentContextId
+              ? {}
+              : {
+                  merchantId: resolved.merchantId,
+                  accountId: resolved.accountId,
+                }),
+            extra: requirement.extra,
+          };
+        }),
         description:
           resolved.requirement?.extra?.description ||
           resolved.apiProduct?.description ||

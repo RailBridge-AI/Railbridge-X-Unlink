@@ -11,6 +11,7 @@ import {
   generateCustodyWallet,
   isValidCustodyMasterKey
 } from "./custodyKeyManager.js";
+import { normalizeUsdcAsset } from "./services/usdcRoutingService.js";
 import { addHoursIso, newId, nowIso, statusPrecedence, toDecimalUsdcString } from "./utils.js";
 
 const __filename = fileURLToPath(import.meta.url);
@@ -19,6 +20,7 @@ const schemaPath = join(__dirname, "schema.sql");
 const PASSWORD_HASH_ITERATIONS = 210000;
 const PASSWORD_HASH_KEYLEN = 64;
 const PASSWORD_HASH_DIGEST = "sha512";
+const PAYMENT_CONTEXT_TTL_HOURS = 1;
 
 const TESTNET_CAIP2 = [
   "eip155:421614",
@@ -69,6 +71,25 @@ const normalizeEvmAddress = (value) => {
     return null;
   }
   return text;
+};
+
+const normalizePaymentContextPayTo = (value) => {
+  const normalizedAddress = normalizeEvmAddress(value);
+  if (normalizedAddress) {
+    return normalizedAddress.toLowerCase();
+  }
+  return String(value || "").trim();
+};
+
+const normalizeTreasuryMode = (value) =>
+  String(value || "").trim().toLowerCase() === "private" ? "private" : "public";
+
+const normalizePaymentContextAsset = (value) => {
+  const normalizedUsdc = normalizeUsdcAsset(value);
+  if (normalizedUsdc) {
+    return normalizedUsdc;
+  }
+  return String(value || "").trim().toLowerCase();
 };
 
 const CUSTODY_MASTER_KEY_ERROR =
@@ -219,6 +240,9 @@ const runSchemaMigrations = () => {
   ensureColumn("merchant_accounts", "status", "TEXT NOT NULL DEFAULT 'active'");
   ensureColumn("merchant_account_wallets", "signer_provider", "TEXT NOT NULL DEFAULT 'mpc'");
   ensureColumn("merchant_account_wallets", "signer_reference", "TEXT");
+  ensureColumn("treasury_policy", "treasury_mode", "TEXT NOT NULL DEFAULT 'public'");
+  ensureColumn("treasury_policy", "private_home_network", "TEXT");
+  ensureColumn("treasury_policy", "privacy_enabled_at", "TEXT");
   ensureColumn("treasury_settlement_events", "api_id", "TEXT");
   ensureColumn("treasury_settlement_events", "api_route", "TEXT");
   ensureColumn("treasury_settlement_events", "api_name", "TEXT");
@@ -255,6 +279,196 @@ const runSchemaMigrations = () => {
   run(`
     CREATE INDEX IF NOT EXISTS idx_treasury_consolidations_tenant_created
       ON treasury_consolidations(merchant_id, account_id, created_at DESC);
+  `);
+  run(`
+    CREATE TABLE IF NOT EXISTS payment_requirement_contexts (
+      id TEXT PRIMARY KEY,
+      payment_context_id TEXT NOT NULL UNIQUE,
+      merchant_id TEXT NOT NULL REFERENCES merchants(id),
+      account_id TEXT NOT NULL REFERENCES merchant_accounts(id),
+      api_product_id TEXT,
+      treasury_mode TEXT NOT NULL,
+      privacy_coverage_mode TEXT,
+      private_home_network TEXT,
+      scheme TEXT NOT NULL,
+      source_network TEXT NOT NULL,
+      destination_network TEXT,
+      asset TEXT NOT NULL,
+      amount TEXT NOT NULL,
+      public_pay_to TEXT NOT NULL,
+      settlement_id TEXT,
+      status TEXT NOT NULL,
+      issued_at TEXT NOT NULL,
+      expires_at TEXT NOT NULL,
+      settled_at TEXT,
+      consumed_at TEXT,
+      metadata_json TEXT
+    );
+  `);
+  run(`
+    CREATE INDEX IF NOT EXISTS idx_payment_requirement_contexts_tenant_issued
+      ON payment_requirement_contexts(merchant_id, account_id, issued_at DESC);
+  `);
+  run(`
+    CREATE INDEX IF NOT EXISTS idx_payment_requirement_contexts_status_expires
+      ON payment_requirement_contexts(status, expires_at);
+  `);
+  run(`
+    CREATE INDEX IF NOT EXISTS idx_payment_requirement_contexts_settlement
+      ON payment_requirement_contexts(settlement_id);
+  `);
+  run(`
+    CREATE TABLE IF NOT EXISTS private_accounts (
+      id TEXT PRIMARY KEY,
+      merchant_id TEXT REFERENCES merchants(id),
+      account_id TEXT REFERENCES merchant_accounts(id),
+      provider TEXT NOT NULL,
+      environment TEXT NOT NULL,
+      network TEXT NOT NULL,
+      role TEXT NOT NULL,
+      unlink_address TEXT,
+      key_reference TEXT,
+      status TEXT NOT NULL DEFAULT 'active',
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+  `);
+  run(`
+    CREATE INDEX IF NOT EXISTS idx_private_accounts_tenant
+      ON private_accounts(merchant_id, account_id, provider, environment, role);
+  `);
+  run(`
+    CREATE TABLE IF NOT EXISTS private_ledger_entries (
+      id TEXT PRIMARY KEY,
+      merchant_id TEXT NOT NULL REFERENCES merchants(id),
+      account_id TEXT NOT NULL REFERENCES merchant_accounts(id),
+      provider TEXT NOT NULL,
+      environment TEXT NOT NULL,
+      network TEXT NOT NULL,
+      asset TEXT NOT NULL,
+      entry_type TEXT NOT NULL,
+      direction TEXT NOT NULL,
+      amount TEXT NOT NULL,
+      available_delta TEXT NOT NULL,
+      pending_sweep_delta TEXT NOT NULL,
+      pending_withdrawal_delta TEXT NOT NULL,
+      reference_type TEXT NOT NULL,
+      reference_id TEXT NOT NULL,
+      idempotency_key TEXT NOT NULL UNIQUE,
+      metadata_json TEXT,
+      created_at TEXT NOT NULL
+    );
+  `);
+  run(`
+    CREATE INDEX IF NOT EXISTS idx_private_ledger_entries_tenant_created
+      ON private_ledger_entries(merchant_id, account_id, network, created_at DESC);
+  `);
+  run(`
+    CREATE INDEX IF NOT EXISTS idx_private_ledger_entries_reference
+      ON private_ledger_entries(reference_type, reference_id);
+  `);
+  run(`
+    CREATE TABLE IF NOT EXISTS omnibus_sweeps (
+      id TEXT PRIMARY KEY,
+      merchant_id TEXT NOT NULL REFERENCES merchants(id),
+      account_id TEXT NOT NULL REFERENCES merchant_accounts(id),
+      provider TEXT NOT NULL,
+      environment TEXT NOT NULL,
+      network TEXT NOT NULL,
+      asset TEXT NOT NULL,
+      settlement_id TEXT NOT NULL,
+      payment_context_id TEXT,
+      amount TEXT NOT NULL,
+      omnibus_account_id TEXT,
+      provider_tx_id TEXT,
+      provider_tx_hash TEXT,
+      status TEXT NOT NULL,
+      fail_reason TEXT,
+      idempotency_key TEXT NOT NULL UNIQUE,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+  `);
+  run(`
+    CREATE INDEX IF NOT EXISTS idx_omnibus_sweeps_tenant_created
+      ON omnibus_sweeps(merchant_id, account_id, created_at DESC);
+  `);
+  run(`
+    CREATE TABLE IF NOT EXISTS private_transfers (
+      id TEXT PRIMARY KEY,
+      merchant_id TEXT NOT NULL REFERENCES merchants(id),
+      account_id TEXT NOT NULL REFERENCES merchant_accounts(id),
+      provider TEXT NOT NULL,
+      environment TEXT NOT NULL,
+      network TEXT NOT NULL,
+      asset TEXT NOT NULL,
+      settlement_id TEXT NOT NULL,
+      payment_context_id TEXT,
+      amount TEXT NOT NULL,
+      from_account_id TEXT,
+      to_account_id TEXT,
+      to_unlink_address TEXT,
+      provider_tx_id TEXT,
+      provider_tx_hash TEXT,
+      status TEXT NOT NULL,
+      fail_reason TEXT,
+      idempotency_key TEXT NOT NULL UNIQUE,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+  `);
+  run(`
+    CREATE INDEX IF NOT EXISTS idx_private_transfers_tenant_created
+      ON private_transfers(merchant_id, account_id, created_at DESC);
+  `);
+  run(`
+    CREATE TABLE IF NOT EXISTS withdrawal_batches (
+      id TEXT PRIMARY KEY,
+      merchant_id TEXT NOT NULL REFERENCES merchants(id),
+      account_id TEXT NOT NULL REFERENCES merchant_accounts(id),
+      provider TEXT NOT NULL,
+      environment TEXT NOT NULL,
+      network TEXT NOT NULL,
+      asset TEXT NOT NULL,
+      payout_id TEXT NOT NULL,
+      destination_address TEXT NOT NULL,
+      amount TEXT NOT NULL,
+      from_account_id TEXT,
+      provider_tx_id TEXT,
+      provider_tx_hash TEXT,
+      status TEXT NOT NULL,
+      fail_reason TEXT,
+      idempotency_key TEXT NOT NULL UNIQUE,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+  `);
+  run(`
+    CREATE INDEX IF NOT EXISTS idx_withdrawal_batches_tenant_created
+      ON withdrawal_batches(merchant_id, account_id, created_at DESC);
+  `);
+  run(`
+    CREATE INDEX IF NOT EXISTS idx_withdrawal_batches_payout
+      ON withdrawal_batches(payout_id);
+  `);
+  run(`
+    CREATE TABLE IF NOT EXISTS private_balance_snapshots (
+      id TEXT PRIMARY KEY,
+      merchant_id TEXT NOT NULL REFERENCES merchants(id),
+      account_id TEXT NOT NULL REFERENCES merchant_accounts(id),
+      provider TEXT NOT NULL,
+      environment TEXT NOT NULL,
+      network TEXT NOT NULL,
+      asset TEXT NOT NULL,
+      amount TEXT NOT NULL,
+      freshness TEXT NOT NULL,
+      recorded_at TEXT NOT NULL,
+      source_updated_at TEXT
+    );
+  `);
+  run(`
+    CREATE INDEX IF NOT EXISTS idx_private_balance_snapshots_tenant_recorded
+      ON private_balance_snapshots(merchant_id, account_id, network, recorded_at DESC);
   `);
   run(`
     CREATE TABLE IF NOT EXISTS chain_catalog (
@@ -2089,6 +2303,9 @@ export const getPolicy = (merchantId, accountId) => {
     SELECT
       preferred_network AS preferredNetwork,
       preferred_asset AS preferredAsset,
+      treasury_mode AS treasuryMode,
+      private_home_network AS privateHomeNetwork,
+      privacy_enabled_at AS privacyEnabledAt,
       auto_bridge_enabled AS autoBridgeEnabled,
       updated_at AS updatedAt
     FROM treasury_policy
@@ -2103,18 +2320,29 @@ export const getPolicy = (merchantId, accountId) => {
 
   return {
     ...row,
+    treasuryMode: normalizeTreasuryMode(row.treasuryMode),
     autoBridgeEnabled: Boolean(row.autoBridgeEnabled)
   };
 };
 
 export const upsertPolicy = (merchantId, accountId, policy) => {
   const updatedAt = nowIso();
+  const treasuryMode = normalizeTreasuryMode(policy.treasuryMode);
+  const privateHomeNetwork =
+    treasuryMode === "private" && String(policy.privateHomeNetwork || "").trim()
+      ? String(policy.privateHomeNetwork).trim()
+      : null;
+  const privacyEnabledAt =
+    treasuryMode === "private" ? String(policy.privacyEnabledAt || updatedAt).trim() || updatedAt : null;
   run(`
     INSERT OR REPLACE INTO treasury_policy (
       merchant_id,
       account_id,
       preferred_network,
       preferred_asset,
+      treasury_mode,
+      private_home_network,
+      privacy_enabled_at,
       auto_bridge_enabled,
       updated_at
     ) VALUES (
@@ -2122,11 +2350,938 @@ export const upsertPolicy = (merchantId, accountId, policy) => {
       ${sqlLiteral(accountId)},
       ${sqlLiteral(policy.preferredNetwork)},
       'USDC',
+      ${sqlLiteral(treasuryMode)},
+      ${sqlLiteral(privateHomeNetwork)},
+      ${sqlLiteral(privacyEnabledAt)},
       ${policy.autoBridgeEnabled ? 1 : 0},
       ${sqlLiteral(updatedAt)}
     );
   `);
   return getPolicy(merchantId, accountId);
+};
+
+export const getPaymentRequirementContext = (paymentContextId) => {
+  const row = one(`
+    SELECT
+      id,
+      payment_context_id AS paymentContextId,
+      merchant_id AS merchantId,
+      account_id AS accountId,
+      api_product_id AS apiProductId,
+      treasury_mode AS treasuryMode,
+      privacy_coverage_mode AS privacyCoverageMode,
+      private_home_network AS privateHomeNetwork,
+      scheme,
+      source_network AS sourceNetwork,
+      destination_network AS destinationNetwork,
+      asset,
+      amount,
+      public_pay_to AS publicPayTo,
+      settlement_id AS settlementId,
+      status,
+      issued_at AS issuedAt,
+      expires_at AS expiresAt,
+      settled_at AS settledAt,
+      consumed_at AS consumedAt,
+      metadata_json AS metadataJson
+    FROM payment_requirement_contexts
+    WHERE payment_context_id = ${sqlLiteral(String(paymentContextId || "").trim())}
+    LIMIT 1;
+  `);
+
+  if (!row) {
+    return null;
+  }
+
+  let metadata = null;
+  if (row.metadataJson) {
+    try {
+      metadata = JSON.parse(String(row.metadataJson));
+    } catch {
+      metadata = null;
+    }
+  }
+
+  return {
+    ...row,
+    treasuryMode: normalizeTreasuryMode(row.treasuryMode),
+    metadata
+  };
+};
+
+export const createPaymentRequirementContext = (input) => {
+  const id = newId();
+  const paymentContextId =
+    String(input.paymentContextId || "").trim() || `pctx_${randomBytes(16).toString("hex")}`;
+  const issuedAt = String(input.issuedAt || nowIso()).trim();
+  const expiresAt = String(input.expiresAt || addHoursIso(PAYMENT_CONTEXT_TTL_HOURS)).trim();
+  const metadataJson =
+    input.metadata && typeof input.metadata === "object" ? JSON.stringify(input.metadata) : null;
+
+  run(`
+    INSERT INTO payment_requirement_contexts (
+      id,
+      payment_context_id,
+      merchant_id,
+      account_id,
+      api_product_id,
+      treasury_mode,
+      privacy_coverage_mode,
+      private_home_network,
+      scheme,
+      source_network,
+      destination_network,
+      asset,
+      amount,
+      public_pay_to,
+      settlement_id,
+      status,
+      issued_at,
+      expires_at,
+      settled_at,
+      consumed_at,
+      metadata_json
+    ) VALUES (
+      ${sqlLiteral(id)},
+      ${sqlLiteral(paymentContextId)},
+      ${sqlLiteral(input.merchantId)},
+      ${sqlLiteral(input.accountId)},
+      ${sqlLiteral(input.apiProductId || null)},
+      ${sqlLiteral(normalizeTreasuryMode(input.treasuryMode))},
+      ${sqlLiteral(input.privacyCoverageMode || null)},
+      ${sqlLiteral(input.privateHomeNetwork || null)},
+      ${sqlLiteral(input.scheme)},
+      ${sqlLiteral(input.sourceNetwork)},
+      ${sqlLiteral(input.destinationNetwork || null)},
+      ${sqlLiteral(input.asset)},
+      ${sqlLiteral(input.amount)},
+      ${sqlLiteral(normalizePaymentContextPayTo(input.publicPayTo))},
+      NULL,
+      'issued',
+      ${sqlLiteral(issuedAt)},
+      ${sqlLiteral(expiresAt)},
+      NULL,
+      NULL,
+      ${sqlLiteral(metadataJson)}
+    );
+  `);
+
+  return getPaymentRequirementContext(paymentContextId);
+};
+
+export const resolvePaymentRequirementContextForSettlement = ({
+  paymentContextId,
+  settlementId,
+  scheme,
+  sourceNetwork,
+  asset,
+  amount,
+  publicPayTo
+}) => {
+  const context = getPaymentRequirementContext(paymentContextId);
+  if (!context) {
+    return {
+      ok: false,
+      code: "not_found",
+      error: "paymentContextId was not found"
+    };
+  }
+
+  if (
+    context.status === "expired" ||
+    context.status === "failed" ||
+    (context.status === "consumed" && context.settlementId !== settlementId)
+  ) {
+    return {
+      ok: false,
+      code: "unusable",
+      error: `paymentContextId is not usable in status=${context.status}`
+    };
+  }
+
+  const expiresAtMs = new Date(context.expiresAt).getTime();
+  if (Number.isFinite(expiresAtMs) && expiresAtMs < Date.now() && !context.settlementId) {
+    run(`
+      UPDATE payment_requirement_contexts
+      SET status = 'expired'
+      WHERE payment_context_id = ${sqlLiteral(context.paymentContextId)};
+    `);
+    return {
+      ok: false,
+      code: "expired",
+      error: "paymentContextId has expired"
+    };
+  }
+
+  if (context.settlementId && context.settlementId === settlementId) {
+    return {
+      ok: true,
+      context
+    };
+  }
+
+  const expectedValues = {
+    scheme: String(context.scheme || "").trim(),
+    sourceNetwork: String(context.sourceNetwork || "").trim(),
+    asset: normalizePaymentContextAsset(context.asset),
+    amount: String(context.amount || "").trim(),
+    publicPayTo: normalizePaymentContextPayTo(context.publicPayTo)
+  };
+  const actualValues = {
+    scheme: String(scheme || "").trim(),
+    sourceNetwork: String(sourceNetwork || "").trim(),
+    asset: normalizePaymentContextAsset(asset),
+    amount: String(amount || "").trim(),
+    publicPayTo: normalizePaymentContextPayTo(publicPayTo)
+  };
+
+  for (const field of Object.keys(expectedValues)) {
+    if (expectedValues[field] !== actualValues[field]) {
+      return {
+        ok: false,
+        code: "mismatch",
+        error: `paymentContextId did not match field=${field}`
+      };
+    }
+  }
+
+  if (context.settlementId && context.settlementId !== settlementId) {
+    return {
+      ok: false,
+      code: "reused",
+      error: "paymentContextId is already bound to another settlement"
+    };
+  }
+
+  const settledAt = nowIso();
+  run(`
+    UPDATE payment_requirement_contexts
+    SET settlement_id = ${sqlLiteral(settlementId)},
+        status = CASE
+          WHEN status = 'consumed' THEN 'consumed'
+          ELSE 'settled'
+        END,
+        settled_at = COALESCE(settled_at, ${sqlLiteral(settledAt)})
+    WHERE payment_context_id = ${sqlLiteral(context.paymentContextId)}
+      AND (settlement_id IS NULL OR settlement_id = ${sqlLiteral(settlementId)});
+  `);
+
+  const resolvedContext = getPaymentRequirementContext(context.paymentContextId);
+  if (!resolvedContext) {
+    return {
+      ok: false,
+      code: "not_found",
+      error: "paymentContextId was not found after settlement binding"
+    };
+  }
+  if (resolvedContext.settlementId && resolvedContext.settlementId !== settlementId) {
+    return {
+      ok: false,
+      code: "reused",
+      error: "paymentContextId is already bound to another settlement"
+    };
+  }
+
+  return {
+    ok: true,
+    context: resolvedContext
+  };
+};
+
+export const markPaymentRequirementContextConsumed = (paymentContextId, settlementId) => {
+  const context = getPaymentRequirementContext(paymentContextId);
+  if (!context) {
+    return null;
+  }
+  const consumedAt = nowIso();
+  run(`
+    UPDATE payment_requirement_contexts
+    SET status = 'consumed',
+        consumed_at = COALESCE(consumed_at, ${sqlLiteral(consumedAt)}),
+        settled_at = COALESCE(settled_at, ${sqlLiteral(consumedAt)}),
+        settlement_id = COALESCE(settlement_id, ${sqlLiteral(settlementId || null)})
+    WHERE payment_context_id = ${sqlLiteral(context.paymentContextId)}
+      AND (
+        settlement_id IS NULL
+        OR settlement_id = ${sqlLiteral(settlementId || null)}
+      );
+  `);
+  return getPaymentRequirementContext(paymentContextId);
+};
+
+export const getPrivateAccount = ({
+  merchantId,
+  accountId,
+  provider = "unlink",
+  environment,
+  role = "merchant"
+}) =>
+  one(`
+    SELECT
+      id,
+      merchant_id AS merchantId,
+      account_id AS accountId,
+      provider,
+      environment,
+      network,
+      role,
+      unlink_address AS unlinkAddress,
+      key_reference AS keyReference,
+      status,
+      created_at AS createdAt,
+      updated_at AS updatedAt
+    FROM private_accounts
+    WHERE merchant_id ${merchantId ? `= ${sqlLiteral(merchantId)}` : "IS NULL"}
+      AND account_id ${accountId ? `= ${sqlLiteral(accountId)}` : "IS NULL"}
+      AND provider = ${sqlLiteral(provider)}
+      AND environment = ${sqlLiteral(environment)}
+      AND role = ${sqlLiteral(role)}
+    ORDER BY updated_at DESC
+    LIMIT 1;
+  `);
+
+export const upsertPrivateAccount = (input) => {
+  const existing = getPrivateAccount(input) || null;
+  const id = existing?.id || newId();
+  const createdAt = existing?.createdAt || nowIso();
+  const updatedAt = nowIso();
+
+  run(`
+    INSERT OR REPLACE INTO private_accounts (
+      id,
+      merchant_id,
+      account_id,
+      provider,
+      environment,
+      network,
+      role,
+      unlink_address,
+      key_reference,
+      status,
+      created_at,
+      updated_at
+    ) VALUES (
+      ${sqlLiteral(id)},
+      ${sqlLiteral(input.merchantId || null)},
+      ${sqlLiteral(input.accountId || null)},
+      ${sqlLiteral(input.provider || "unlink")},
+      ${sqlLiteral(input.environment)},
+      ${sqlLiteral(input.network)},
+      ${sqlLiteral(input.role || "merchant")},
+      ${sqlLiteral(input.unlinkAddress || null)},
+      ${sqlLiteral(input.keyReference || null)},
+      ${sqlLiteral(input.status || "active")},
+      ${sqlLiteral(createdAt)},
+      ${sqlLiteral(updatedAt)}
+    );
+  `);
+
+  return getPrivateAccount({
+    merchantId: input.merchantId || null,
+    accountId: input.accountId || null,
+    provider: input.provider || "unlink",
+    environment: input.environment,
+    role: input.role || "merchant"
+  });
+};
+
+const parsePrivateLedgerEntryRow = (row) => {
+  if (!row) {
+    return null;
+  }
+
+  let metadata = null;
+  if (row.metadataJson) {
+    try {
+      metadata = JSON.parse(String(row.metadataJson));
+    } catch {
+      metadata = null;
+    }
+  }
+
+  return {
+    ...row,
+    metadata
+  };
+};
+
+export const getPrivateLedgerEntryByIdempotencyKey = (idempotencyKey) =>
+  parsePrivateLedgerEntryRow(
+    one(`
+      SELECT
+        id,
+        merchant_id AS merchantId,
+        account_id AS accountId,
+        provider,
+        environment,
+        network,
+        asset,
+        entry_type AS entryType,
+        direction,
+        amount,
+        available_delta AS availableDelta,
+        pending_sweep_delta AS pendingSweepDelta,
+        pending_withdrawal_delta AS pendingWithdrawalDelta,
+        reference_type AS referenceType,
+        reference_id AS referenceId,
+        idempotency_key AS idempotencyKey,
+        metadata_json AS metadataJson,
+        created_at AS createdAt
+      FROM private_ledger_entries
+      WHERE idempotency_key = ${sqlLiteral(String(idempotencyKey || "").trim())}
+      LIMIT 1;
+    `)
+  );
+
+export const insertPrivateLedgerEntry = (input) => {
+  const idempotencyKey = String(input.idempotencyKey || "").trim();
+  if (!idempotencyKey) {
+    throw new Error("idempotencyKey is required");
+  }
+
+  const existing = getPrivateLedgerEntryByIdempotencyKey(idempotencyKey);
+  if (existing) {
+    return existing;
+  }
+
+  const id = String(input.id || newId()).trim();
+  const createdAt = String(input.createdAt || nowIso()).trim();
+  const metadataJson =
+    input.metadata && typeof input.metadata === "object" ? JSON.stringify(input.metadata) : null;
+
+  run(`
+    INSERT OR IGNORE INTO private_ledger_entries (
+      id,
+      merchant_id,
+      account_id,
+      provider,
+      environment,
+      network,
+      asset,
+      entry_type,
+      direction,
+      amount,
+      available_delta,
+      pending_sweep_delta,
+      pending_withdrawal_delta,
+      reference_type,
+      reference_id,
+      idempotency_key,
+      metadata_json,
+      created_at
+    ) VALUES (
+      ${sqlLiteral(id)},
+      ${sqlLiteral(input.merchantId)},
+      ${sqlLiteral(input.accountId)},
+      ${sqlLiteral(input.provider || "unlink")},
+      ${sqlLiteral(input.environment)},
+      ${sqlLiteral(input.network)},
+      ${sqlLiteral(input.asset || "USDC")},
+      ${sqlLiteral(input.entryType)},
+      ${sqlLiteral(input.direction)},
+      ${sqlLiteral(input.amount)},
+      ${sqlLiteral(input.availableDelta || "0")},
+      ${sqlLiteral(input.pendingSweepDelta || "0")},
+      ${sqlLiteral(input.pendingWithdrawalDelta || "0")},
+      ${sqlLiteral(input.referenceType)},
+      ${sqlLiteral(input.referenceId)},
+      ${sqlLiteral(idempotencyKey)},
+      ${sqlLiteral(metadataJson)},
+      ${sqlLiteral(createdAt)}
+    );
+  `);
+
+  return getPrivateLedgerEntryByIdempotencyKey(idempotencyKey);
+};
+
+export const getPrivateLedgerWorkflowBalances = (merchantId, accountId) => {
+  const rows = all(`
+    SELECT
+      network,
+      available_delta AS availableDelta,
+      pending_sweep_delta AS pendingSweepDelta,
+      pending_withdrawal_delta AS pendingWithdrawalDelta
+    FROM private_ledger_entries
+    WHERE merchant_id = ${sqlLiteral(merchantId)}
+      AND account_id = ${sqlLiteral(accountId)}
+      AND asset = 'USDC'
+    ORDER BY created_at ASC;
+  `);
+
+  const parseAmount = (value) => {
+    try {
+      return BigInt(String(value || "0"));
+    } catch {
+      return 0n;
+    }
+  };
+
+  const totals = new Map();
+  rows.forEach((row) => {
+    const network = String(row.network || "").trim();
+    if (!network) {
+      return;
+    }
+    const current = totals.get(network) || {
+      network,
+      availableAmount: 0n,
+      pendingSweepAmount: 0n,
+      pendingWithdrawalAmount: 0n
+    };
+    current.availableAmount += parseAmount(row.availableDelta);
+    current.pendingSweepAmount += parseAmount(row.pendingSweepDelta);
+    current.pendingWithdrawalAmount += parseAmount(row.pendingWithdrawalDelta);
+    totals.set(network, current);
+  });
+
+  return [...totals.values()]
+    .map((row) => ({
+      network: row.network,
+      availableAmount: row.availableAmount.toString(),
+      pendingSweepAmount: row.pendingSweepAmount.toString(),
+      pendingWithdrawalAmount: row.pendingWithdrawalAmount.toString()
+    }))
+    .sort((left, right) => left.network.localeCompare(right.network));
+};
+
+export const getPrivateIntakeCommittedBalances = (merchantId, accountId) => {
+  const rows = all(`
+    SELECT
+      network,
+      amount
+    FROM private_ledger_entries
+    WHERE merchant_id = ${sqlLiteral(merchantId)}
+      AND account_id = ${sqlLiteral(accountId)}
+      AND asset = 'USDC'
+      AND entry_type = 'payment.settled_public_intake'
+    ORDER BY created_at ASC;
+  `);
+
+  const totals = new Map();
+  rows.forEach((row) => {
+    const network = String(row.network || "").trim();
+    if (!network) {
+      return;
+    }
+    try {
+      const amount = BigInt(String(row.amount || "0"));
+      totals.set(network, (totals.get(network) || 0n) + amount);
+    } catch {
+      // ignore invalid historical row
+    }
+  });
+
+  return [...totals.entries()]
+    .map(([network, totalAmount]) => ({
+      network,
+      totalAmount: totalAmount.toString()
+    }))
+    .sort((left, right) => left.network.localeCompare(right.network));
+};
+
+export const listPendingPrivateSweepCandidates = (limit = 20) => {
+  const safeLimit = Number.isFinite(limit) ? Math.max(1, Math.min(Number(limit), 200)) : 20;
+  return all(`
+    SELECT
+      id,
+      merchant_id AS merchantId,
+      account_id AS accountId,
+      provider,
+      environment,
+      network,
+      asset,
+      entry_type AS entryType,
+      direction,
+      amount,
+      available_delta AS availableDelta,
+      pending_sweep_delta AS pendingSweepDelta,
+      pending_withdrawal_delta AS pendingWithdrawalDelta,
+      reference_type AS referenceType,
+      reference_id AS referenceId,
+      idempotency_key AS idempotencyKey,
+      metadata_json AS metadataJson,
+      created_at AS createdAt
+    FROM private_ledger_entries entry
+    WHERE entry.entry_type = 'payment.settled_public_intake'
+      AND entry.asset = 'USDC'
+      AND NOT EXISTS (
+        SELECT 1
+        FROM private_ledger_entries credit
+        WHERE credit.reference_type = entry.reference_type
+          AND credit.reference_id = entry.reference_id
+          AND credit.entry_type = 'merchant.private_credit'
+      )
+    ORDER BY entry.created_at ASC
+    LIMIT ${safeLimit};
+  `).map((row) => parsePrivateLedgerEntryRow(row));
+};
+
+const getOmnibusSweepByIdempotencyKey = (idempotencyKey) =>
+  one(`
+    SELECT
+      id,
+      merchant_id AS merchantId,
+      account_id AS accountId,
+      provider,
+      environment,
+      network,
+      asset,
+      settlement_id AS settlementId,
+      payment_context_id AS paymentContextId,
+      amount,
+      omnibus_account_id AS omnibusAccountId,
+      provider_tx_id AS providerTxId,
+      provider_tx_hash AS providerTxHash,
+      status,
+      fail_reason AS failReason,
+      idempotency_key AS idempotencyKey,
+      created_at AS createdAt,
+      updated_at AS updatedAt
+    FROM omnibus_sweeps
+    WHERE idempotency_key = ${sqlLiteral(String(idempotencyKey || "").trim())}
+    LIMIT 1;
+  `);
+
+export const upsertOmnibusSweep = (input) => {
+  const idempotencyKey = String(input.idempotencyKey || "").trim();
+  if (!idempotencyKey) {
+    throw new Error("idempotencyKey is required");
+  }
+  const existing = getOmnibusSweepByIdempotencyKey(idempotencyKey);
+  const id = existing?.id || String(input.id || newId()).trim();
+  const createdAt = existing?.createdAt || String(input.createdAt || nowIso()).trim();
+  const updatedAt = nowIso();
+
+  run(`
+    INSERT OR REPLACE INTO omnibus_sweeps (
+      id,
+      merchant_id,
+      account_id,
+      provider,
+      environment,
+      network,
+      asset,
+      settlement_id,
+      payment_context_id,
+      amount,
+      omnibus_account_id,
+      provider_tx_id,
+      provider_tx_hash,
+      status,
+      fail_reason,
+      idempotency_key,
+      created_at,
+      updated_at
+    ) VALUES (
+      ${sqlLiteral(id)},
+      ${sqlLiteral(input.merchantId)},
+      ${sqlLiteral(input.accountId)},
+      ${sqlLiteral(input.provider || "unlink")},
+      ${sqlLiteral(input.environment)},
+      ${sqlLiteral(input.network)},
+      ${sqlLiteral(input.asset || "USDC")},
+      ${sqlLiteral(input.settlementId)},
+      ${sqlLiteral(input.paymentContextId || null)},
+      ${sqlLiteral(input.amount)},
+      ${sqlLiteral(input.omnibusAccountId || null)},
+      ${sqlLiteral(input.providerTxId || null)},
+      ${sqlLiteral(input.providerTxHash || null)},
+      ${sqlLiteral(input.status || "submitted")},
+      ${sqlLiteral(input.failReason || null)},
+      ${sqlLiteral(idempotencyKey)},
+      ${sqlLiteral(createdAt)},
+      ${sqlLiteral(updatedAt)}
+    );
+  `);
+
+  return getOmnibusSweepByIdempotencyKey(idempotencyKey);
+};
+
+const getPrivateTransferByIdempotencyKey = (idempotencyKey) =>
+  one(`
+    SELECT
+      id,
+      merchant_id AS merchantId,
+      account_id AS accountId,
+      provider,
+      environment,
+      network,
+      asset,
+      settlement_id AS settlementId,
+      payment_context_id AS paymentContextId,
+      amount,
+      from_account_id AS fromAccountId,
+      to_account_id AS toAccountId,
+      to_unlink_address AS toUnlinkAddress,
+      provider_tx_id AS providerTxId,
+      provider_tx_hash AS providerTxHash,
+      status,
+      fail_reason AS failReason,
+      idempotency_key AS idempotencyKey,
+      created_at AS createdAt,
+      updated_at AS updatedAt
+    FROM private_transfers
+    WHERE idempotency_key = ${sqlLiteral(String(idempotencyKey || "").trim())}
+    LIMIT 1;
+  `);
+
+export const upsertPrivateTransfer = (input) => {
+  const idempotencyKey = String(input.idempotencyKey || "").trim();
+  if (!idempotencyKey) {
+    throw new Error("idempotencyKey is required");
+  }
+  const existing = getPrivateTransferByIdempotencyKey(idempotencyKey);
+  const id = existing?.id || String(input.id || newId()).trim();
+  const createdAt = existing?.createdAt || String(input.createdAt || nowIso()).trim();
+  const updatedAt = nowIso();
+
+  run(`
+    INSERT OR REPLACE INTO private_transfers (
+      id,
+      merchant_id,
+      account_id,
+      provider,
+      environment,
+      network,
+      asset,
+      settlement_id,
+      payment_context_id,
+      amount,
+      from_account_id,
+      to_account_id,
+      to_unlink_address,
+      provider_tx_id,
+      provider_tx_hash,
+      status,
+      fail_reason,
+      idempotency_key,
+      created_at,
+      updated_at
+    ) VALUES (
+      ${sqlLiteral(id)},
+      ${sqlLiteral(input.merchantId)},
+      ${sqlLiteral(input.accountId)},
+      ${sqlLiteral(input.provider || "unlink")},
+      ${sqlLiteral(input.environment)},
+      ${sqlLiteral(input.network)},
+      ${sqlLiteral(input.asset || "USDC")},
+      ${sqlLiteral(input.settlementId)},
+      ${sqlLiteral(input.paymentContextId || null)},
+      ${sqlLiteral(input.amount)},
+      ${sqlLiteral(input.fromAccountId || null)},
+      ${sqlLiteral(input.toAccountId || null)},
+      ${sqlLiteral(input.toUnlinkAddress || null)},
+      ${sqlLiteral(input.providerTxId || null)},
+      ${sqlLiteral(input.providerTxHash || null)},
+      ${sqlLiteral(input.status || "submitted")},
+      ${sqlLiteral(input.failReason || null)},
+      ${sqlLiteral(idempotencyKey)},
+      ${sqlLiteral(createdAt)},
+      ${sqlLiteral(updatedAt)}
+    );
+  `);
+
+  return getPrivateTransferByIdempotencyKey(idempotencyKey);
+};
+
+const getWithdrawalBatchByIdempotencyKey = (idempotencyKey) =>
+  one(`
+    SELECT
+      id,
+      merchant_id AS merchantId,
+      account_id AS accountId,
+      provider,
+      environment,
+      network,
+      asset,
+      payout_id AS payoutId,
+      destination_address AS destinationAddress,
+      amount,
+      from_account_id AS fromAccountId,
+      provider_tx_id AS providerTxId,
+      provider_tx_hash AS providerTxHash,
+      status,
+      fail_reason AS failReason,
+      idempotency_key AS idempotencyKey,
+      created_at AS createdAt,
+      updated_at AS updatedAt
+    FROM withdrawal_batches
+    WHERE idempotency_key = ${sqlLiteral(String(idempotencyKey || "").trim())}
+    LIMIT 1;
+  `);
+
+export const getWithdrawalBatchByPayoutId = (payoutId) =>
+  one(`
+    SELECT
+      id,
+      merchant_id AS merchantId,
+      account_id AS accountId,
+      provider,
+      environment,
+      network,
+      asset,
+      payout_id AS payoutId,
+      destination_address AS destinationAddress,
+      amount,
+      from_account_id AS fromAccountId,
+      provider_tx_id AS providerTxId,
+      provider_tx_hash AS providerTxHash,
+      status,
+      fail_reason AS failReason,
+      idempotency_key AS idempotencyKey,
+      created_at AS createdAt,
+      updated_at AS updatedAt
+    FROM withdrawal_batches
+    WHERE payout_id = ${sqlLiteral(String(payoutId || "").trim())}
+    ORDER BY updated_at DESC
+    LIMIT 1;
+  `);
+
+export const upsertWithdrawalBatch = (input) => {
+  const idempotencyKey = String(input.idempotencyKey || "").trim();
+  if (!idempotencyKey) {
+    throw new Error("idempotencyKey is required");
+  }
+  const existing = getWithdrawalBatchByIdempotencyKey(idempotencyKey);
+  const id = existing?.id || String(input.id || newId()).trim();
+  const createdAt = existing?.createdAt || String(input.createdAt || nowIso()).trim();
+  const updatedAt = nowIso();
+
+  run(`
+    INSERT OR REPLACE INTO withdrawal_batches (
+      id,
+      merchant_id,
+      account_id,
+      provider,
+      environment,
+      network,
+      asset,
+      payout_id,
+      destination_address,
+      amount,
+      from_account_id,
+      provider_tx_id,
+      provider_tx_hash,
+      status,
+      fail_reason,
+      idempotency_key,
+      created_at,
+      updated_at
+    ) VALUES (
+      ${sqlLiteral(id)},
+      ${sqlLiteral(input.merchantId)},
+      ${sqlLiteral(input.accountId)},
+      ${sqlLiteral(input.provider || "unlink")},
+      ${sqlLiteral(input.environment)},
+      ${sqlLiteral(input.network)},
+      ${sqlLiteral(input.asset || "USDC")},
+      ${sqlLiteral(input.payoutId)},
+      ${sqlLiteral(input.destinationAddress)},
+      ${sqlLiteral(input.amount)},
+      ${sqlLiteral(input.fromAccountId || null)},
+      ${sqlLiteral(input.providerTxId || null)},
+      ${sqlLiteral(input.providerTxHash || null)},
+      ${sqlLiteral(input.status || "submitted")},
+      ${sqlLiteral(input.failReason || null)},
+      ${sqlLiteral(idempotencyKey)},
+      ${sqlLiteral(createdAt)},
+      ${sqlLiteral(updatedAt)}
+    );
+  `);
+
+  return getWithdrawalBatchByIdempotencyKey(idempotencyKey);
+};
+
+export const getLatestPrivateBalanceSnapshot = ({
+  merchantId,
+  accountId,
+  network,
+  asset = "USDC",
+  provider = "unlink"
+}) =>
+  one(`
+    SELECT
+      id,
+      merchant_id AS merchantId,
+      account_id AS accountId,
+      provider,
+      environment,
+      network,
+      asset,
+      amount,
+      freshness,
+      recorded_at AS recordedAt,
+      source_updated_at AS sourceUpdatedAt
+    FROM private_balance_snapshots
+    WHERE merchant_id = ${sqlLiteral(merchantId)}
+      AND account_id = ${sqlLiteral(accountId)}
+      AND network = ${sqlLiteral(network)}
+      AND asset = ${sqlLiteral(asset)}
+      AND provider = ${sqlLiteral(provider)}
+    ORDER BY recorded_at DESC
+    LIMIT 1;
+  `);
+
+export const insertPrivateBalanceSnapshot = (input) => {
+  const id = newId();
+  const recordedAt = String(input.recordedAt || nowIso()).trim();
+  run(`
+    INSERT INTO private_balance_snapshots (
+      id,
+      merchant_id,
+      account_id,
+      provider,
+      environment,
+      network,
+      asset,
+      amount,
+      freshness,
+      recorded_at,
+      source_updated_at
+    ) VALUES (
+      ${sqlLiteral(id)},
+      ${sqlLiteral(input.merchantId)},
+      ${sqlLiteral(input.accountId)},
+      ${sqlLiteral(input.provider || "unlink")},
+      ${sqlLiteral(input.environment)},
+      ${sqlLiteral(input.network)},
+      ${sqlLiteral(input.asset || "USDC")},
+      ${sqlLiteral(input.amount)},
+      ${sqlLiteral(input.freshness || "cached")},
+      ${sqlLiteral(recordedAt)},
+      ${sqlLiteral(input.sourceUpdatedAt || null)}
+    );
+  `);
+
+  return getLatestPrivateBalanceSnapshot({
+    merchantId: input.merchantId,
+    accountId: input.accountId,
+    network: input.network,
+    asset: input.asset || "USDC",
+    provider: input.provider || "unlink"
+  });
+};
+
+export const getPendingPrivateIntakeBalances = (merchantId, accountId) => {
+  return getPrivateLedgerWorkflowBalances(merchantId, accountId)
+    .map((row) => {
+      try {
+        return {
+          network: row.network,
+          totalAmount: BigInt(String(row.pendingSweepAmount || "0"))
+        };
+      } catch {
+        return {
+          network: row.network,
+          totalAmount: 0n
+        };
+      }
+    })
+    .filter((row) => row.totalAmount > 0n)
+    .map((row) => ({
+      network: row.network,
+      totalAmount: row.totalAmount.toString()
+    }));
 };
 
 export const hasSettlementEvent = (eventId) =>
@@ -2693,6 +3848,8 @@ const buildTimelineUnionSql = (merchantId, accountId) => `
     block_number AS blockNumber,
     log_index AS logIndex,
     confirmations,
+    NULL AS providerTxId,
+    NULL AS privacyStage,
     created_at AS createdAt
   FROM treasury_settlement_events
   WHERE merchant_id = ${sqlLiteral(merchantId)}
@@ -2721,6 +3878,8 @@ const buildTimelineUnionSql = (merchantId, accountId) => `
     NULL AS blockNumber,
     NULL AS logIndex,
     NULL AS confirmations,
+    NULL AS providerTxId,
+    NULL AS privacyStage,
     created_at AS createdAt
   FROM treasury_consolidations
   WHERE merchant_id = ${sqlLiteral(merchantId)}
@@ -2749,11 +3908,182 @@ const buildTimelineUnionSql = (merchantId, accountId) => `
     NULL AS blockNumber,
     NULL AS logIndex,
     NULL AS confirmations,
+    NULL AS providerTxId,
+    NULL AS privacyStage,
     created_at AS createdAt
   FROM treasury_payout_requests
   WHERE merchant_id = ${sqlLiteral(merchantId)}
     AND account_id = ${sqlLiteral(accountId)}
+
+  UNION ALL
+
+  SELECT
+    'private_sweep' AS itemType,
+    id,
+    settlement_id AS settlementId,
+    NULL AS apiId,
+    NULL AS apiRoute,
+    NULL AS apiName,
+    network AS sourceNetwork,
+    NULL AS destinationNetwork,
+    NULL AS destinationAddress,
+    asset,
+    amount,
+    status,
+    fail_reason AS failReason,
+    provider_tx_hash AS txHash,
+    provider_tx_hash AS sourceTxHash,
+    NULL AS bridgeTxHash,
+    NULL AS destinationTxHash,
+    NULL AS blockNumber,
+    NULL AS logIndex,
+    NULL AS confirmations,
+    provider_tx_id AS providerTxId,
+    'private_sweep' AS privacyStage,
+    created_at AS createdAt
+  FROM omnibus_sweeps
+  WHERE merchant_id = ${sqlLiteral(merchantId)}
+    AND account_id = ${sqlLiteral(accountId)}
+
+  UNION ALL
+
+  SELECT
+    'private_transfer' AS itemType,
+    id,
+    settlement_id AS settlementId,
+    NULL AS apiId,
+    NULL AS apiRoute,
+    NULL AS apiName,
+    network AS sourceNetwork,
+    NULL AS destinationNetwork,
+    to_unlink_address AS destinationAddress,
+    asset,
+    amount,
+    status,
+    fail_reason AS failReason,
+    provider_tx_hash AS txHash,
+    provider_tx_hash AS sourceTxHash,
+    NULL AS bridgeTxHash,
+    NULL AS destinationTxHash,
+    NULL AS blockNumber,
+    NULL AS logIndex,
+    NULL AS confirmations,
+    provider_tx_id AS providerTxId,
+    'private_transfer' AS privacyStage,
+    created_at AS createdAt
+  FROM private_transfers
+  WHERE merchant_id = ${sqlLiteral(merchantId)}
+    AND account_id = ${sqlLiteral(accountId)}
+
+  UNION ALL
+
+  SELECT
+    'private_withdrawal' AS itemType,
+    id,
+    payout_id AS settlementId,
+    NULL AS apiId,
+    NULL AS apiRoute,
+    NULL AS apiName,
+    network AS sourceNetwork,
+    NULL AS destinationNetwork,
+    destination_address AS destinationAddress,
+    asset,
+    amount,
+    status,
+    fail_reason AS failReason,
+    provider_tx_hash AS txHash,
+    provider_tx_hash AS sourceTxHash,
+    NULL AS bridgeTxHash,
+    NULL AS destinationTxHash,
+    NULL AS blockNumber,
+    NULL AS logIndex,
+    NULL AS confirmations,
+    provider_tx_id AS providerTxId,
+    'private_withdrawal' AS privacyStage,
+    created_at AS createdAt
+  FROM withdrawal_batches
+  WHERE merchant_id = ${sqlLiteral(merchantId)}
+    AND account_id = ${sqlLiteral(accountId)}
 `;
+
+const enrichTimelinePrivacyStages = (merchantId, accountId, items) => {
+  if (!Array.isArray(items) || items.length === 0) {
+    return items;
+  }
+
+  const settlementIds = [
+    ...new Set(
+      items
+        .map((item) => String(item?.settlementId || "").trim())
+        .filter(Boolean)
+    )
+  ];
+  if (!settlementIds.length) {
+    return items;
+  }
+
+  const intakeRows = all(`
+    SELECT reference_id AS settlementId
+    FROM private_ledger_entries
+    WHERE merchant_id = ${sqlLiteral(merchantId)}
+      AND account_id = ${sqlLiteral(accountId)}
+      AND entry_type = 'payment.settled_public_intake'
+      AND reference_id IN (${settlementIds.map((value) => sqlLiteral(value)).join(", ")});
+  `);
+  const intakeSettlementIds = new Set(
+    intakeRows.map((row) => String(row.settlementId || "").trim()).filter(Boolean)
+  );
+
+  const payoutIds = [
+    ...new Set(
+      items
+        .filter((item) => item.itemType === "payout")
+        .map((item) => String(item?.settlementId || item?.id || "").trim())
+        .filter(Boolean)
+    )
+  ];
+  const withdrawalByPayoutId = new Map();
+  if (payoutIds.length > 0) {
+    const withdrawalRows = all(`
+      SELECT
+        payout_id AS payoutId,
+        provider_tx_id AS providerTxId,
+        provider_tx_hash AS providerTxHash,
+        status
+      FROM withdrawal_batches
+      WHERE merchant_id = ${sqlLiteral(merchantId)}
+        AND account_id = ${sqlLiteral(accountId)}
+        AND payout_id IN (${payoutIds.map((value) => sqlLiteral(value)).join(", ")});
+    `);
+    withdrawalRows.forEach((row) => {
+      withdrawalByPayoutId.set(String(row.payoutId || "").trim(), row);
+    });
+  }
+
+  return items.map((item) => {
+    if (item.itemType === "settlement" && intakeSettlementIds.has(String(item.settlementId || "").trim())) {
+      return {
+        ...item,
+        privacyStage: "public_intake"
+      };
+    }
+    if (item.itemType === "payout") {
+      const payoutId = String(item.settlementId || item.id || "").trim();
+      const withdrawal = withdrawalByPayoutId.get(payoutId);
+      if (!withdrawal) {
+        return item;
+      }
+      return {
+        ...item,
+        privacyStage: "private_withdrawal",
+        providerTxId: withdrawal.providerTxId || item.providerTxId || null,
+        providerTxHash: withdrawal.providerTxHash || null,
+        withdrawalStatus: withdrawal.status || null
+      };
+    }
+    return item;
+  });
+};
 
 export const queryTimeline = (
   merchantId,
@@ -2764,7 +4094,14 @@ export const queryTimeline = (
   const safePage = Number.isFinite(page) ? Math.max(1, Math.floor(page)) : 1;
   const offset = (safePage - 1) * safePageSize;
 
-  const allowedItemTypes = new Set(["settlement", "consolidation", "payout"]);
+  const allowedItemTypes = new Set([
+    "settlement",
+    "consolidation",
+    "payout",
+    "private_sweep",
+    "private_transfer",
+    "private_withdrawal"
+  ]);
   const normalizedItemTypes = Array.isArray(itemTypes)
     ? itemTypes
         .map((value) => String(value || "").trim().toLowerCase())
@@ -2813,7 +4150,7 @@ export const queryTimeline = (
   const totalPages = Math.max(1, Math.ceil(total / safePageSize));
 
   return {
-    items,
+    items: enrichTimelinePrivacyStages(merchantId, accountId, items),
     page: safePage,
     pageSize: safePageSize,
     total,

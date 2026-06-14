@@ -16,7 +16,7 @@ The goal is not perfect anonymity. The goal is to make it materially harder for 
 Today RailBridge is public by construction:
 
 - merchant balances are derived from public RPC reads against merchant custody wallets
-- settlement timelines store and display tx hashes
+- settlement timelines over-emphasize public tx hashes as the main audit surface
 - payouts are plain ERC-20 transfers to public destination addresses
 - cross-chain consolidation uses public bridge transactions
 
@@ -61,6 +61,28 @@ It should frame privacy mode as:
 This is the core architecture distinction:
 
 `public payment rail -> private treasury rail`
+
+## What Unlink changes and what it does not
+
+Unlink is a strong fit for RailBridge private treasury mode, but it should be described precisely.
+
+Unlink can give RailBridge:
+
+- private balances on supported Unlink environments
+- private transfers between Unlink accounts
+- a private internal allocation layer between RailBridge and merchants
+
+Unlink does not give RailBridge:
+
+- a private x402 settlement leg
+- a private cross-chain bridge
+- automatic buyer privacy in a direct merchant API flow
+
+So the product should be framed as:
+
+- public x402 settlement
+- optional private merchant treasury after settlement on supported Unlink environments
+- optional payer-privacy flows later, as a separate feature
 
 ## What privacy RailBridge can and cannot provide
 
@@ -205,7 +227,10 @@ Unlink is promising, but it is not magic.
 - deposits into the Unlink contract are public
 - withdrawals from the Unlink contract are public
 - private transfers between Unlink accounts are private
+- private transfers and withdrawals may still return provider transaction references such as `txId` and `txHash`
 - `execute()` hides the funding private account, but the external call and amount are still public
+
+Those transaction references should be treated as operational and audit handles, not as evidence that merchant-level sender, recipient, and amount attribution is public.
 
 That means Unlink is strongest when it is used as a private internal balance layer, not when every payment deposits or withdraws directly into a merchant-specific public flow.
 
@@ -300,10 +325,11 @@ flowchart LR
 
 Unlink support coverage is a first-order design constraint for RailBridge.
 
-RailBridge already supports many source and destination chains, while Unlink currently supports only a smaller set of hosted environments. As of June 13, 2026, the published Unlink environments in the docs are:
+RailBridge already supports many source and destination chains, while Unlink currently supports only a smaller set of hosted environments. As of June 13, 2026, the published available Unlink environments in the docs are:
 
 - `arc-testnet`
 - `base-sepolia`
+- `bsc-testnet`
 - `ethereum-sepolia`
 - `monad-testnet`
 
@@ -452,6 +478,13 @@ Example:
 
 This is a more realistic near-term product than trying to make every supported RailBridge chain private immediately.
 
+In practice, this also means RailBridge should model private accounts per environment, not as one global private identity:
+
+- one platform omnibus Unlink account per supported environment
+- one merchant private Unlink account per merchant treasury account per supported environment
+
+That keeps the account model aligned with how Unlink environments work in the SDK and avoids implying one cross-chain private account.
+
 ## Bridge service changes
 
 RailBridge's bridge service should become privacy-aware, not privacy-assuming.
@@ -465,6 +498,11 @@ It should understand at least three bridge intents:
 The key behavior change is that bridges should operate between platform omnibus wallets, not merchant-specific wallets, whenever the route touches private treasury mode.
 
 That keeps public bridge traces platform-level rather than merchant-level.
+
+This should be treated as a hard invariant:
+
+- Unlink can make custody and allocation private inside one supported environment
+- the moment funds move between environments, RailBridge is back in a public bridge domain until funds re-enter a supported private zone
 
 ## Policy engine changes
 
@@ -655,7 +693,8 @@ The dashboard should expose:
 - private available balance
 - pending sweep balance
 - scheduled withdrawal balance
-- settlement activity without mandatory public tx hash exposure for private legs
+- settlement activity without making public explorer links the default UX for private legs
+- provider transaction references for private steps when they exist, as audit detail rather than the main merchant-facing primitive
 
 Public explorer links become optional audit details, not the default UX contract.
 
@@ -688,6 +727,24 @@ For cross-chain privacy, the recommended model is:
 
 This keeps cross-chain movements visible at the platform level while avoiding merchant-specific public bridge traces.
 
+## 6. Operational note: gas, relayers, and sweeps
+
+Unlink changes privacy properties and operator ergonomics at the same time.
+
+Operationally:
+
+- deposits into Unlink are still public on-chain transactions
+- private transfers are relayed privately inside the Unlink system
+- withdrawals are public on-chain exits, even if the funding private account stays hidden
+- `execute()` is useful for private contract interaction inside one environment, but it does not create a private cross-chain bridge
+
+For RailBridge this means:
+
+- public intake wallets still need enough gas and operational health for deposit sweeps
+- private merchant allocations should prefer private transfers inside the same supported environment
+- bridge liquidity and payout liquidity still need explicit platform operations playbooks
+- Arc-specific payer privacy flows should not be confused with the general merchant treasury architecture
+
 ## Architecture components
 
 ## A. Privacy Vault Service
@@ -695,11 +752,13 @@ This keeps cross-chain movements visible at the platform level while avoiding me
 A new service layer should manage Unlink integration for custodial server mode:
 
 - create platform omnibus private accounts per chain
-- create merchant private accounts
+- create merchant private accounts per supported environment
 - manage auth tokens and account registration
 - execute private transfers
 - execute withdrawals
 - read private balances and transaction status
+
+In the current Unlink SDK docs, balance reads are done through `getBalances()`, with optional token filtering, so the vault service should treat provider balance reads as a first-class primitive rather than infer balances only from transaction history.
 
 Suggested file location:
 
@@ -749,6 +808,7 @@ The facilitator should publish richer lifecycle events for privacy-mode merchant
 - public intake tx hash
 - sweep batch id
 - private credit id
+- provider `txId` and `txHash` for private sweep, transfer, or withdrawal steps when available
 - optional eventual withdrawal batch id
 
 The merchant-facing API should not default to returning every internal public trace as a user-visible explorer link.
@@ -820,6 +880,14 @@ Once merchant privacy is working, RailBridge can optionally add payer privacy pa
 - payer uses that EOA for x402 settlement
 
 This improves payer privacy, but it is separate from merchant treasury privacy.
+
+It should also be described as a route-specific flow, not the default RailBridge treasury architecture. Today the clearest documented example is the Arc Testnet tutorial pattern:
+
+- private balance on Unlink
+- withdraw a smaller amount to a payer EOA
+- pay the x402 resource from that EOA
+
+That is useful for demo and future product direction, but it should not blur the core message that private merchant treasury is the first architectural goal.
 
 ## Risks and open questions
 

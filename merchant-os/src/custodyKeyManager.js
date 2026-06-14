@@ -97,3 +97,56 @@ export const decryptCustodyPrivateKey = (record, masterKeyHex) => {
   }
   return privateKey;
 };
+
+export const encryptSecretValue = (plaintext, masterKeyHex) => {
+  if (!plaintext || typeof plaintext !== "string" || !String(plaintext).trim()) {
+    throw new Error("Secret value is required");
+  }
+
+  const key = parseMasterKey(masterKeyHex);
+  if (!key || key.length !== KEY_BYTES) {
+    throw new Error(
+      "MERCHANT_OS_CUSTODY_MASTER_KEY must be a 32-byte hex string (64 hex chars, optional 0x prefix)"
+    );
+  }
+
+  const iv = randomBytes(IV_BYTES);
+  const cipher = createCipheriv(ENCRYPTION_ALGORITHM, key, iv);
+  const ciphertext = Buffer.concat([
+    cipher.update(Buffer.from(String(plaintext).trim(), "utf8")),
+    cipher.final()
+  ]);
+  const authTag = cipher.getAuthTag();
+
+  return {
+    algorithm: ENCRYPTION_ALGORITHM,
+    iv: iv.toString("base64"),
+    encryptedValue: ciphertext.toString("base64"),
+    authTag: authTag.toString("base64")
+  };
+};
+
+export const decryptSecretValue = (record, masterKeyHex) => {
+  const key = parseMasterKey(masterKeyHex);
+  if (!key || key.length !== KEY_BYTES) {
+    throw new Error(
+      "MERCHANT_OS_CUSTODY_MASTER_KEY must be a 32-byte hex string (64 hex chars, optional 0x prefix)"
+    );
+  }
+
+  if (!record || record.algorithm !== ENCRYPTION_ALGORITHM) {
+    throw new Error("Unsupported secret encryption record");
+  }
+
+  const iv = Buffer.from(String(record.iv || ""), "base64");
+  const ciphertext = Buffer.from(String(record.encryptedValue || ""), "base64");
+  const authTag = Buffer.from(String(record.authTag || ""), "base64");
+
+  if (!iv.length || !ciphertext.length || !authTag.length) {
+    throw new Error("Malformed secret encryption payload");
+  }
+
+  const decipher = createDecipheriv(ENCRYPTION_ALGORITHM, key, iv);
+  decipher.setAuthTag(authTag);
+  return Buffer.concat([decipher.update(ciphertext), decipher.final()]).toString("utf8");
+};

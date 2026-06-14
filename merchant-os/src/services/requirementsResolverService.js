@@ -1,5 +1,6 @@
 import { config } from "../config.js";
 import {
+  createPaymentRequirementContext,
   getApiProductByApiId,
   getApiProductById,
   getApiProductByMethodPath,
@@ -14,6 +15,41 @@ import {
   isUsdcAsset,
   resolveUsdcDomainProfile
 } from "./usdcRoutingService.js";
+
+const PRIVATE_TREASURY_MVP_NETWORK = "eip155:84532";
+
+const normalizeTreasuryMode = (value) =>
+  String(value || "").trim().toLowerCase() === "private" ? "private" : "public";
+
+const isValidPlatformAddress = (value) =>
+  typeof value === "string" && /^0x[a-fA-F0-9]{40}$/.test(value.trim());
+
+const computePrivacyRouting = ({
+  treasuryMode,
+  privateHomeNetwork,
+  sourceNetwork,
+  effectiveSettlementMode
+}) => {
+  if (treasuryMode !== "private") {
+    return {
+      treasuryMode: "public",
+      privacyCoverageMode: null,
+      privateRoutingEnabled: false
+    };
+  }
+
+  const fullPrivate =
+    effectiveSettlementMode === "same_chain" &&
+    privateHomeNetwork === PRIVATE_TREASURY_MVP_NETWORK &&
+    sourceNetwork === PRIVATE_TREASURY_MVP_NETWORK &&
+    isValidPlatformAddress(config.facilitatorAddress);
+
+  return {
+    treasuryMode: "private",
+    privacyCoverageMode: fullPrivate ? "full_private" : "public_fallback",
+    privateRoutingEnabled: fullPrivate
+  };
+};
 
 export const resolvePaymentRequirementsForTenant = ({
   merchantId,
@@ -121,7 +157,10 @@ export const resolvePaymentRequirementsForTenant = ({
 
   let payTo = null;
   let crossChain = null;
-  const policyPreferredNetwork = String(getPolicy(merchantId, accountId)?.preferredNetwork || "").trim();
+  const policy = getPolicy(merchantId, accountId);
+  const treasuryMode = normalizeTreasuryMode(policy?.treasuryMode);
+  const privateHomeNetwork = String(policy?.privateHomeNetwork || "").trim() || null;
+  const policyPreferredNetwork = String(policy?.preferredNetwork || "").trim();
   const usePolicySameChainDefault =
     effectiveSettlementMode === "cross_chain" &&
     !apiProduct.destinationNetwork &&
@@ -187,6 +226,78 @@ export const resolvePaymentRequirementsForTenant = ({
     const preferredSourceAsset = String(candidate.chain?.usdcAddress || apiProduct.sourceAsset || "USDC").trim();
     const sourceAsset = isUsdcAsset(preferredSourceAsset) ? preferredSourceAsset : "USDC";
     const sourceDomain = resolveUsdcDomainProfile(candidate.network);
+    const privacyRouting = computePrivacyRouting({
+      treasuryMode,
+      privateHomeNetwork,
+      sourceNetwork: candidate.network,
+      effectiveSettlementMode
+    });
+    const resolvedPayTo =
+      privacyRouting.privateRoutingEnabled
+        ? config.facilitatorAddress
+        : shouldRouteViaFacilitator
+          ? payTo
+          : candidate.wallet.address;
+    const priceExtra = {
+      name: sourceDomain.name,
+      version: sourceDomain.version,
+      apiId: apiProduct.apiId,
+      apiName: apiProduct.apiName,
+      method: apiProduct.method,
+      route: apiProduct.path
+    };
+    const requirementExtra = {
+      apiId: apiProduct.apiId,
+      apiName: apiProduct.apiName,
+      method: apiProduct.method,
+      route: apiProduct.path,
+      description
+    };
+
+    if (privacyRouting.treasuryMode === "private") {
+      const paymentContext = createPaymentRequirementContext({
+        merchantId,
+        accountId,
+        apiProductId: apiProduct.id,
+        treasuryMode: privacyRouting.treasuryMode,
+        privacyCoverageMode: privacyRouting.privacyCoverageMode,
+        privateHomeNetwork,
+        scheme: "exact",
+        sourceNetwork: candidate.network,
+        destinationNetwork: crossChain?.destinationNetwork || null,
+        asset: sourceAsset,
+        amount: apiProduct.amount,
+        publicPayTo: resolvedPayTo,
+        metadata: {
+          apiId: apiProduct.apiId,
+          apiName: apiProduct.apiName,
+          routeMethod: apiProduct.method,
+          routePath: apiProduct.path,
+          settlementMode: privacyRouting.privateRoutingEnabled ? "private_intake" : "public_fallback"
+        }
+      });
+
+      return {
+        scheme: "exact",
+        network: candidate.network,
+        price: {
+          asset: sourceAsset,
+          amount: apiProduct.amount,
+          extra: priceExtra
+        },
+        payTo: resolvedPayTo,
+        extra: {
+          ...requirementExtra,
+          rbPrivacy: {
+            treasuryMode: privacyRouting.treasuryMode,
+            privacyCoverageMode: privacyRouting.privacyCoverageMode,
+            paymentContextId: paymentContext.paymentContextId,
+            privateHomeNetwork
+          }
+        }
+      };
+    }
+
     return {
       scheme: "exact",
       network: candidate.network,
@@ -194,25 +305,16 @@ export const resolvePaymentRequirementsForTenant = ({
         asset: sourceAsset,
         amount: apiProduct.amount,
         extra: {
-          name: sourceDomain.name,
-          version: sourceDomain.version,
-          apiId: apiProduct.apiId,
-          apiName: apiProduct.apiName,
-          method: apiProduct.method,
-          route: apiProduct.path,
+          ...priceExtra,
           merchantId,
           accountId
         }
       },
-      payTo: shouldRouteViaFacilitator ? payTo : candidate.wallet.address,
+      payTo: resolvedPayTo,
       extra: {
-        apiId: apiProduct.apiId,
-        apiName: apiProduct.apiName,
-        method: apiProduct.method,
-        route: apiProduct.path,
+        ...requirementExtra,
         merchantId,
-        accountId,
-        description
+        accountId
       }
     };
   });

@@ -106,6 +106,18 @@ const parseStringList = (value) => {
   return [];
 };
 
+const parseJsonObjectEnv = (value, fallback = {}) => {
+  if (value === undefined || value === null || String(value).trim() === "") {
+    return fallback;
+  }
+  try {
+    const parsed = JSON.parse(String(value));
+    return toPlainObject(parsed);
+  } catch {
+    return fallback;
+  }
+};
+
 const parseBooleanValue = (value, fallback) => {
   if (value === undefined || value === null) {
     return fallback;
@@ -202,6 +214,9 @@ const runtimeConfigDefaults = {
   onchainReadTimeoutMs: 7000,
   onchainReadTotalBudgetMs: 2200,
   chainCatalogSyncMs: 300000,
+  privacySweepWorkerEnabled: false,
+  privacySweepIntervalMs: 30000,
+  privacySweepBatchSize: 20,
   chainStatusOverrides: {},
   rpcOverridesByNetwork: {}
 };
@@ -304,6 +319,28 @@ export const config = {
   custodyMasterKey: process.env.MERCHANT_OS_CUSTODY_MASTER_KEY || "",
   custodyAddress: String(runtimeConfig.custodyAddress ?? ""),
 
+  unlinkEnabled: parseBooleanValue(process.env.UNLINK_ENABLED, false),
+  unlinkApiKey: String(process.env.UNLINK_API_KEY || "").trim(),
+  unlinkEngineUrl: String(process.env.UNLINK_ENGINE_URL || "").trim(),
+  unlinkDefaultEnvironment: String(process.env.UNLINK_DEFAULT_ENVIRONMENT || "base-sepolia").trim(),
+  unlinkEnvironmentByNetwork: {
+    "eip155:84532": "base-sepolia",
+    "eip155:11155111": "ethereum-sepolia",
+    ...parseJsonObjectEnv(process.env.UNLINK_ENVIRONMENT_BY_NETWORK_JSON, {})
+  },
+  unlinkOmnibusMnemonicByEnvironment: {
+    "base-sepolia": String(process.env.UNLINK_OMNIBUS_MNEMONIC_BASE_SEPOLIA || "").trim(),
+    "ethereum-sepolia": String(process.env.UNLINK_OMNIBUS_MNEMONIC_ETHEREUM_SEPOLIA || "").trim(),
+    ...parseJsonObjectEnv(process.env.UNLINK_OMNIBUS_MNEMONIC_BY_ENVIRONMENT_JSON, {})
+  },
+  treasuryIntakePrivateKeyByEnvironment: {
+    "base-sepolia": String(process.env.TREASURY_INTAKE_PRIVATE_KEY_BASE_SEPOLIA || "").trim(),
+    "ethereum-sepolia": String(process.env.TREASURY_INTAKE_PRIVATE_KEY_ETHEREUM_SEPOLIA || "").trim(),
+    ...parseJsonObjectEnv(process.env.TREASURY_INTAKE_PRIVATE_KEY_BY_ENVIRONMENT_JSON, {})
+  },
+  unlinkMutationPollIntervalMs: 2000,
+  unlinkMutationPollTimeoutMs: 120000,
+
   realConsolidationBridgeEnabled: parseBooleanValue(
     runtimeConfig.realConsolidationBridgeEnabled,
     parseBooleanValue(runtimeConfig.realConsolidationBridgeEnabled, true)
@@ -349,6 +386,12 @@ export const config = {
   ),
 
   chainCatalogSyncMs: parseIntValue(runtimeConfig.chainCatalogSyncMs, 300000),
+  privacySweepWorkerEnabled: parseBooleanValue(
+    runtimeConfig.privacySweepWorkerEnabled,
+    parseBooleanValue(runtimeConfig.privacySweepWorkerEnabled, false)
+  ),
+  privacySweepIntervalMs: parseIntValue(runtimeConfig.privacySweepIntervalMs, 30000),
+  privacySweepBatchSize: parseIntValue(runtimeConfig.privacySweepBatchSize, 20),
   chainStatusOverrides,
 
   onboardingAllowlistDomains,

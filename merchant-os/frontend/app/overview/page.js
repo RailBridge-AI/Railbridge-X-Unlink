@@ -242,6 +242,8 @@ export default function OverviewPage() {
   const destinationDropdownRef = useRef(null);
   const refreshRequestIdRef = useRef(0);
   const balancesReady = balancesAreLive(data);
+  const isPrivateTreasury =
+    data?.treasuryMode === "private" || data?.onchainMode === "private";
 
   const balancesByNetwork = useMemo(
     () =>
@@ -823,7 +825,16 @@ export default function OverviewPage() {
             <div className="pointer-events-none absolute inset-0 bg-[repeating-linear-gradient(-38deg,rgba(255,255,255,0.06)_0,rgba(255,255,255,0.06)_2px,transparent_2px,transparent_34px)]"></div>
             <div className="relative z-10">
               <div className="flex items-start justify-between gap-3">
-                <p className="text-xs uppercase tracking-[0.14em] text-slate-200">Available Balance</p>
+                <div>
+                  <p className="text-xs uppercase tracking-[0.14em] text-slate-200">
+                    {isPrivateTreasury ? "Private treasury balance" : "Available Balance"}
+                  </p>
+                  {isPrivateTreasury ? (
+                    <span className="mt-1 inline-flex rounded-full border border-violet-300/40 bg-violet-500/20 px-2 py-0.5 text-[11px] font-medium text-violet-100">
+                      Private mode
+                    </span>
+                  ) : null}
+                </div>
                 <div className="flex items-center gap-2">
                   {!balancesReady ? (
                     <span className="rounded-full border border-white/20 bg-white/10 px-2 py-0.5 text-[11px] text-slate-100">
@@ -862,14 +873,33 @@ export default function OverviewPage() {
                 />
               </p>
               <p className="mt-1 text-sm text-slate-200/95">
-                Pending/reconciling:{" "}
+                {isPrivateTreasury ? "Pending sweep:" : "Pending/reconciling:"}{" "}
                 <UsdAmount
-                  value={data.pendingBridgeUsd}
+                  value={isPrivateTreasury ? data.pendingSweepUsd || data.pendingBridgeUsd : data.pendingBridgeUsd}
                   ready={balancesReady}
                   skeletonVariant="dark"
                   skeletonClassName="inline-block h-4 w-20 align-middle"
                 />
               </p>
+              {isPrivateTreasury ? (
+                <p className="mt-1 text-sm text-slate-200/95">
+                  Pending withdrawal:{" "}
+                  <UsdAmount
+                    value={data.pendingWithdrawalUsd}
+                    ready={balancesReady}
+                    skeletonVariant="dark"
+                    skeletonClassName="inline-block h-4 w-20 align-middle"
+                  />
+                </p>
+              ) : null}
+              {isPrivateTreasury && data.balanceFreshness ? (
+                <p className="mt-1 text-xs text-slate-300">
+                  Provider sync: {data.balanceFreshness}
+                  {data.lastProviderSyncAt
+                    ? ` · ${new Date(data.lastProviderSyncAt).toLocaleString()}`
+                    : ""}
+                </p>
+              ) : null}
             </div>
           </section>
 
@@ -934,6 +964,14 @@ export default function OverviewPage() {
                   sortedBalances.map((item) => {
                     const network = getNetworkInfo(item.network);
                     const token = getTokenInfo(item.asset);
+                    const displayAmount = isPrivateTreasury
+                      ? item.privateAvailableAmount ?? item.amount
+                      : item.amount;
+                    const hasPrivateBreakdown =
+                      isPrivateTreasury &&
+                      (parseBaseUnitsSafe(item.pendingSweepAmount) > 0n ||
+                        parseBaseUnitsSafe(item.pendingWithdrawalAmount) > 0n ||
+                        parseBaseUnitsSafe(item.privateAvailableAmount) > 0n);
                     return (
                       <article key={item.network} className="rounded-xl border border-slate-200 bg-white p-3">
                         <div className="flex items-start justify-between gap-3">
@@ -949,6 +987,9 @@ export default function OverviewPage() {
                             </div>
                             <div className="min-w-0">
                               <p className="truncate text-sm font-semibold">{network.name}</p>
+                              {isPrivateTreasury && item.source ? (
+                                <p className="truncate text-[11px] text-slate-500">{item.source.replaceAll("_", " ")}</p>
+                              ) : null}
                             </div>
                           </div>
                           <div className="text-right">
@@ -960,11 +1001,24 @@ export default function OverviewPage() {
                                 <img src={token.logo} alt={token.symbol} className="h-3.5 w-3.5 rounded-full object-contain" />
                               ) : null}
                               <UsdcAmount
-                                value={formatUsdcBaseUnits(item.amount)}
+                                value={formatUsdcBaseUnits(displayAmount)}
                                 ready={true}
                                 symbol={token.symbol}
                               />
                             </p>
+                            {hasPrivateBreakdown ? (
+                              <div className="mt-1 space-y-0.5 text-[11px] text-slate-500">
+                                {parseBaseUnitsSafe(item.privateAvailableAmount) > 0n ? (
+                                  <p>Private: {formatUsdcBaseUnits(item.privateAvailableAmount)} {token.symbol}</p>
+                                ) : null}
+                                {parseBaseUnitsSafe(item.pendingSweepAmount) > 0n ? (
+                                  <p>Sweep pending: {formatUsdcBaseUnits(item.pendingSweepAmount)} {token.symbol}</p>
+                                ) : null}
+                                {parseBaseUnitsSafe(item.pendingWithdrawalAmount) > 0n ? (
+                                  <p>Withdrawal pending: {formatUsdcBaseUnits(item.pendingWithdrawalAmount)} {token.symbol}</p>
+                                ) : null}
+                              </div>
+                            ) : null}
                           </div>
                         </div>
                       </article>
@@ -977,6 +1031,16 @@ export default function OverviewPage() {
             </div>
           </section>
 
+          {isPrivateTreasury ? (
+            <section className="rounded-2xl border border-violet-200 bg-violet-50 p-3.5 text-sm text-violet-900">
+              <p className="font-semibold">Private treasury active</p>
+              <p className="mt-1 text-xs text-violet-800">
+                Intake settles on public rails, sweeps into Unlink, and payouts withdraw privately to your
+                destination. Cross-chain bridging is disabled in this mode — use Settings to switch back to
+                public treasury.
+              </p>
+            </section>
+          ) : (
           <section className="rounded-2xl border border-slate-200 bg-slate-50 p-3.5">
             <h3 className="text-base font-semibold">Move funds between networks (advanced)</h3>
             <form className="mt-2 grid gap-2" onSubmit={submitConsolidation}>
@@ -1282,6 +1346,7 @@ export default function OverviewPage() {
               <p className="mt-2 text-xs text-slate-500">At least two networks are needed for consolidation.</p>
             ) : null}
           </section>
+          )}
         </div>
       ) : null}
     </PlatformShell>

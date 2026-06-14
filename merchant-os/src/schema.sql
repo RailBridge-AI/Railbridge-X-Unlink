@@ -71,10 +71,46 @@ CREATE TABLE IF NOT EXISTS treasury_policy (
   account_id TEXT NOT NULL REFERENCES merchant_accounts(id),
   preferred_network TEXT NOT NULL,
   preferred_asset TEXT NOT NULL,
+  treasury_mode TEXT NOT NULL DEFAULT 'public' CHECK (treasury_mode IN ('public', 'private')),
+  private_home_network TEXT,
+  privacy_enabled_at TEXT,
   auto_bridge_enabled INTEGER NOT NULL DEFAULT 1,
   updated_at TEXT NOT NULL,
   PRIMARY KEY (merchant_id, account_id)
 );
+
+CREATE TABLE IF NOT EXISTS payment_requirement_contexts (
+  id TEXT PRIMARY KEY,
+  payment_context_id TEXT NOT NULL UNIQUE,
+  merchant_id TEXT NOT NULL REFERENCES merchants(id),
+  account_id TEXT NOT NULL REFERENCES merchant_accounts(id),
+  api_product_id TEXT,
+  treasury_mode TEXT NOT NULL,
+  privacy_coverage_mode TEXT,
+  private_home_network TEXT,
+  scheme TEXT NOT NULL,
+  source_network TEXT NOT NULL,
+  destination_network TEXT,
+  asset TEXT NOT NULL,
+  amount TEXT NOT NULL,
+  public_pay_to TEXT NOT NULL,
+  settlement_id TEXT,
+  status TEXT NOT NULL,
+  issued_at TEXT NOT NULL,
+  expires_at TEXT NOT NULL,
+  settled_at TEXT,
+  consumed_at TEXT,
+  metadata_json TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_payment_requirement_contexts_tenant_issued
+  ON payment_requirement_contexts(merchant_id, account_id, issued_at DESC);
+
+CREATE INDEX IF NOT EXISTS idx_payment_requirement_contexts_status_expires
+  ON payment_requirement_contexts(status, expires_at);
+
+CREATE INDEX IF NOT EXISTS idx_payment_requirement_contexts_settlement
+  ON payment_requirement_contexts(settlement_id);
 
 CREATE TABLE IF NOT EXISTS api_products (
   id TEXT PRIMARY KEY,
@@ -173,6 +209,145 @@ CREATE TABLE IF NOT EXISTS treasury_payout_requests (
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS private_accounts (
+  id TEXT PRIMARY KEY,
+  merchant_id TEXT REFERENCES merchants(id),
+  account_id TEXT REFERENCES merchant_accounts(id),
+  provider TEXT NOT NULL,
+  environment TEXT NOT NULL,
+  network TEXT NOT NULL,
+  role TEXT NOT NULL,
+  unlink_address TEXT,
+  key_reference TEXT,
+  status TEXT NOT NULL DEFAULT 'active',
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_private_accounts_tenant
+  ON private_accounts(merchant_id, account_id, provider, environment, role);
+
+CREATE TABLE IF NOT EXISTS private_ledger_entries (
+  id TEXT PRIMARY KEY,
+  merchant_id TEXT NOT NULL REFERENCES merchants(id),
+  account_id TEXT NOT NULL REFERENCES merchant_accounts(id),
+  provider TEXT NOT NULL,
+  environment TEXT NOT NULL,
+  network TEXT NOT NULL,
+  asset TEXT NOT NULL,
+  entry_type TEXT NOT NULL,
+  direction TEXT NOT NULL,
+  amount TEXT NOT NULL,
+  available_delta TEXT NOT NULL,
+  pending_sweep_delta TEXT NOT NULL,
+  pending_withdrawal_delta TEXT NOT NULL,
+  reference_type TEXT NOT NULL,
+  reference_id TEXT NOT NULL,
+  idempotency_key TEXT NOT NULL UNIQUE,
+  metadata_json TEXT,
+  created_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_private_ledger_entries_tenant_created
+  ON private_ledger_entries(merchant_id, account_id, network, created_at DESC);
+
+CREATE INDEX IF NOT EXISTS idx_private_ledger_entries_reference
+  ON private_ledger_entries(reference_type, reference_id);
+
+CREATE TABLE IF NOT EXISTS omnibus_sweeps (
+  id TEXT PRIMARY KEY,
+  merchant_id TEXT NOT NULL REFERENCES merchants(id),
+  account_id TEXT NOT NULL REFERENCES merchant_accounts(id),
+  provider TEXT NOT NULL,
+  environment TEXT NOT NULL,
+  network TEXT NOT NULL,
+  asset TEXT NOT NULL,
+  settlement_id TEXT NOT NULL,
+  payment_context_id TEXT,
+  amount TEXT NOT NULL,
+  omnibus_account_id TEXT,
+  provider_tx_id TEXT,
+  provider_tx_hash TEXT,
+  status TEXT NOT NULL,
+  fail_reason TEXT,
+  idempotency_key TEXT NOT NULL UNIQUE,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_omnibus_sweeps_tenant_created
+  ON omnibus_sweeps(merchant_id, account_id, created_at DESC);
+
+CREATE TABLE IF NOT EXISTS private_transfers (
+  id TEXT PRIMARY KEY,
+  merchant_id TEXT NOT NULL REFERENCES merchants(id),
+  account_id TEXT NOT NULL REFERENCES merchant_accounts(id),
+  provider TEXT NOT NULL,
+  environment TEXT NOT NULL,
+  network TEXT NOT NULL,
+  asset TEXT NOT NULL,
+  settlement_id TEXT NOT NULL,
+  payment_context_id TEXT,
+  amount TEXT NOT NULL,
+  from_account_id TEXT,
+  to_account_id TEXT,
+  to_unlink_address TEXT,
+  provider_tx_id TEXT,
+  provider_tx_hash TEXT,
+  status TEXT NOT NULL,
+  fail_reason TEXT,
+  idempotency_key TEXT NOT NULL UNIQUE,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_private_transfers_tenant_created
+  ON private_transfers(merchant_id, account_id, created_at DESC);
+
+CREATE TABLE IF NOT EXISTS withdrawal_batches (
+  id TEXT PRIMARY KEY,
+  merchant_id TEXT NOT NULL REFERENCES merchants(id),
+  account_id TEXT NOT NULL REFERENCES merchant_accounts(id),
+  provider TEXT NOT NULL,
+  environment TEXT NOT NULL,
+  network TEXT NOT NULL,
+  asset TEXT NOT NULL,
+  payout_id TEXT NOT NULL,
+  destination_address TEXT NOT NULL,
+  amount TEXT NOT NULL,
+  from_account_id TEXT,
+  provider_tx_id TEXT,
+  provider_tx_hash TEXT,
+  status TEXT NOT NULL,
+  fail_reason TEXT,
+  idempotency_key TEXT NOT NULL UNIQUE,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_withdrawal_batches_tenant_created
+  ON withdrawal_batches(merchant_id, account_id, created_at DESC);
+
+CREATE INDEX IF NOT EXISTS idx_withdrawal_batches_payout
+  ON withdrawal_batches(payout_id);
+
+CREATE TABLE IF NOT EXISTS private_balance_snapshots (
+  id TEXT PRIMARY KEY,
+  merchant_id TEXT NOT NULL REFERENCES merchants(id),
+  account_id TEXT NOT NULL REFERENCES merchant_accounts(id),
+  provider TEXT NOT NULL,
+  environment TEXT NOT NULL,
+  network TEXT NOT NULL,
+  asset TEXT NOT NULL,
+  amount TEXT NOT NULL,
+  freshness TEXT NOT NULL,
+  recorded_at TEXT NOT NULL,
+  source_updated_at TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_private_balance_snapshots_tenant_recorded
+  ON private_balance_snapshots(merchant_id, account_id, network, recorded_at DESC);
 
 CREATE TABLE IF NOT EXISTS payout_address_book_entries (
   id TEXT PRIMARY KEY,

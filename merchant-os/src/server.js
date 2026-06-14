@@ -14,6 +14,9 @@ import {
 import { ConsolidationBridgeError, ConsolidationBridgeService } from "./consolidationBridgeService.js";
 import { GasSponsorService } from "./gasSponsorService.js";
 import { transferUsdcOnchain, UsdcTransferError } from "./usdcTransferService.js";
+import { privacyVaultService } from "./privacyVaultService.js";
+import { PrivacySweepWorker } from "./privacySweepWorker.js";
+import { executePrivatePayout } from "./privatePayoutService.js";
 import {
   acquireTenantMutationDbLock,
   authenticatePlatformUser,
@@ -43,11 +46,15 @@ import {
   getCustodyPrivateKeyByReference,
   getPayoutAddressBookEntryById,
   getWebhookEndpointById,
+  getPrivateIntakeCommittedBalances,
+  getPrivateLedgerWorkflowBalances,
   hasSettlementLifecycleEvent,
   getPayoutRequest,
   getPolicy,
   getSession,
+  insertPrivateLedgerEntry,
   queryTimeline,
+  resolvePaymentRequirementContextForSettlement,
   getTimeline,
   getWalletByNetwork,
   getWallets,
@@ -66,6 +73,7 @@ import {
   touchApiKeyUsed,
   touchPayoutAddressBookEntryUsedByNetworkAddress,
   upsertPolicy,
+  upsertPrivateAccount,
   upsertPayoutAddressBookEntry,
   updateApiKeyMetadata,
   updateApiProduct,
@@ -129,6 +137,8 @@ const MIME_TYPES = {
 };
 
 const normalizeHttpMethod = (method) => String(method || "").trim().toUpperCase();
+const normalizeTreasuryMode = (value) =>
+  String(value || "").trim().toLowerCase() === "private" ? "private" : "public";
 
 const normalizeRoutePath = (path) => {
   const value = String(path || "").trim();
@@ -532,9 +542,9 @@ const ensureAccountExists = (res, merchantId, accountId) => {
 
 const BALANCES_ONCHAIN_MODES = new Set(["skip", "priority", "all"]);
 const TIMELINE_FILTER_TO_ITEM_TYPES = {
-  treasury: ["consolidation"],
-  payment: ["settlement"],
-  payouts: ["payout"]
+  treasury: ["consolidation", "private_sweep", "private_transfer"],
+  payment: ["settlement", "private_sweep", "private_transfer"],
+  payouts: ["payout", "private_withdrawal"]
 };
 
 const parseBalancesOnchainMode = (searchParams) => {
@@ -592,9 +602,145 @@ const buildOverviewResponse = async (merchantId, accountId, options = {}) => {
   const onchainMode = BALANCES_ONCHAIN_MODES.has(options.onchainMode)
     ? options.onchainMode
     : "priority";
+  const policy = getPolicy(merchantId, accountId);
+  if (policy?.treasuryMode === "private") {
+    const privateHomeNetwork = String(policy.privateHomeNetwork || "").trim() || String(policy.preferredNetwork || "").trim();
+    const projectedPublicBalances = getBalances(merchantId, accountId);
+    const projectedPublicByNetwork = new Map(
+      projectedPublicBalances.map((row) => [row.network, BigInt(String(row.amount || "0"))])
+    );
+    const liveBalance = privateHomeNetwork
+      ? await privacyVaultService.getPrivateBalance({
+          merchantId,
+          accountId,
+          network: privateHomeNetwork
+        })
+      : {
+          provider: "unlink",
+          environment: null,
+          network: null,
+          amount: "0",
+          freshness: "degraded",
+          lastProviderSyncAt: null,
+          readStatus: "private_home_network_missing"
+        };
+    const workflowRows = getPrivateLedgerWorkflowBalances(merchantId, accountId);
+    const workflowByNetwork = new Map(
+      workflowRows.map((row) => [
+        row.network,
+        {
+          availableAmount: BigInt(String(row.availableAmount || "0")),
+          pendingSweepAmount: BigInt(String(row.pendingSweepAmount || "0")),
+          pendingWithdrawalAmount: BigInt(String(row.pendingWithdrawalAmount || "0"))
+        }
+      ])
+    );
+    const committedRows = getPrivateIntakeCommittedBalances(merchantId, accountId);
+    const committedByNetwork = new Map(
+      committedRows.map((row) => [row.network, BigInt(String(row.totalAmount || "0"))])
+    );
+    const networks = new Set([
+      ...projectedPublicByNetwork.keys(),
+      ...workflowByNetwork.keys(),
+      ...(privateHomeNetwork ? [privateHomeNetwork] : [])
+    ]);
+    const balances = [...networks]
+      .filter(Boolean)
+      .map((network) => {
+        const workflow = workflowByNetwork.get(network) || {
+          availableAmount: 0n,
+          pendingSweepAmount: 0n,
+          pendingWithdrawalAmount: 0n
+        };
+        const privateAvailable =
+          network === privateHomeNetwork ? BigInt(String(liveBalance.amount || "0")) : 0n;
+        const projectedPublicAmount = projectedPublicByNetwork.get(network) || 0n;
+        const committedPrivateIntakeAmount = committedByNetwork.get(network) || 0n;
+        const pendingSweepAmount = workflow.pendingSweepAmount;
+        const publicFallbackAmount =
+          projectedPublicAmount > committedPrivateIntakeAmount
+            ? projectedPublicAmount - committedPrivateIntakeAmount
+            : 0n;
+        const pendingWithdrawalAmount = workflow.pendingWithdrawalAmount;
+        const availableAmount = privateAvailable + publicFallbackAmount;
+        const projectedAmount = availableAmount + pendingSweepAmount;
+        const hasPendingOnly =
+          pendingSweepAmount > 0n && privateAvailable === 0n && publicFallbackAmount === 0n;
+        return {
+          network,
+          asset: "USDC",
+          amount: availableAmount.toString(),
+          decimals: 6,
+          usdValue: toDecimalUsdcString(availableAmount),
+          projectedAmount: projectedAmount.toString(),
+          projectedUsdValue: toDecimalUsdcString(projectedAmount),
+          pendingAmount: pendingSweepAmount.toString(),
+          pendingUsdValue: toDecimalUsdcString(pendingSweepAmount),
+          privateAvailableAmount: privateAvailable.toString(),
+          privateAvailableUsdValue: toDecimalUsdcString(privateAvailable),
+          publicFallbackAmount: publicFallbackAmount.toString(),
+          publicFallbackUsdValue: toDecimalUsdcString(publicFallbackAmount),
+          pendingSweepAmount: pendingSweepAmount.toString(),
+          pendingSweepUsdValue: toDecimalUsdcString(pendingSweepAmount),
+          pendingWithdrawalAmount: pendingWithdrawalAmount.toString(),
+          pendingWithdrawalUsdValue: toDecimalUsdcString(pendingWithdrawalAmount),
+          onchainAmount: null,
+          source:
+            privateAvailable > 0n && publicFallbackAmount > 0n
+              ? "hybrid_private_public_fallback"
+              : privateAvailable > 0n
+                ? "private"
+                : publicFallbackAmount > 0n
+                  ? "public_fallback"
+                  : "private_pending",
+          readStatus:
+            hasPendingOnly
+              ? "ledger_pending_private_intake"
+              : network === privateHomeNetwork
+              ? liveBalance.readStatus
+              : publicFallbackAmount > 0n
+                ? "public_fallback_balance"
+                : "ledger_pending_private_intake",
+          balanceFreshness:
+            network === privateHomeNetwork ? liveBalance.freshness : "cached",
+          lastProviderSyncAt:
+            network === privateHomeNetwork ? liveBalance.lastProviderSyncAt : null,
+          updatedAt:
+            network === privateHomeNetwork && liveBalance.lastProviderSyncAt
+              ? liveBalance.lastProviderSyncAt
+              : nowIso()
+        };
+      })
+      .sort((left, right) => left.network.localeCompare(right.network));
+
+    const availableBaseUnits = balances.reduce((sum, row) => sum + BigInt(row.amount), 0n);
+    const projectedBaseUnits = balances.reduce((sum, row) => sum + BigInt(row.projectedAmount), 0n);
+    const pendingSweepBaseUnits = balances.reduce((sum, row) => sum + BigInt(row.pendingSweepAmount), 0n);
+    const pendingWithdrawalBaseUnits = balances.reduce(
+      (sum, row) => sum + BigInt(row.pendingWithdrawalAmount),
+      0n
+    );
+
+    return {
+      merchantId,
+      accountId,
+      asOf: nowIso(),
+      onchainMode: "private",
+      unifiedUsd: toDecimalUsdcString(availableBaseUnits),
+      availableUsd: toDecimalUsdcString(availableBaseUnits),
+      projectedUsd: toDecimalUsdcString(projectedBaseUnits),
+      pendingBridgeUsd: toDecimalUsdcString(pendingSweepBaseUnits),
+      pendingSweepUsd: toDecimalUsdcString(pendingSweepBaseUnits),
+      pendingWithdrawalUsd: toDecimalUsdcString(pendingWithdrawalBaseUnits),
+      balanceFreshness: liveBalance.freshness,
+      lastProviderSyncAt: liveBalance.lastProviderSyncAt,
+      policy,
+      balances
+    };
+  }
+
   const runtimeMaps = resolveRuntimeChainMaps();
   const projectedBalances = getBalances(merchantId, accountId);
-  const policy = getPolicy(merchantId, accountId);
   const wallets = getWallets(merchantId, accountId);
   const walletByNetwork = new Map(wallets.map((wallet) => [wallet.network, wallet]));
   const projectedByNetwork = new Map(
@@ -725,6 +871,10 @@ const gasSponsorService = new GasSponsorService({
   rpcUrlsByNetwork: config.rpcUrlsByNetwork
 });
 const chainCatalogService = new ChainCatalogService();
+const privacySweepWorker = new PrivacySweepWorker({
+  privacyVaultService,
+  intervalMs: config.privacySweepIntervalMs
+});
 
 if (config.realConsolidationBridgeEnabled) {
   console.info(
@@ -746,6 +896,11 @@ if (config.realPayoutsEnabled) {
   console.info("[merchant-os] Real payout execution enabled.");
 } else {
   console.warn("[merchant-os] Real payout execution disabled. Payouts will be ledger-simulated.");
+}
+if (config.privacySweepWorkerEnabled) {
+  console.info("[merchant-os] Privacy sweep worker enabled.", {
+    intervalMs: config.privacySweepIntervalMs
+  });
 }
 
 const sanitizeFailReason = (value) => {
@@ -1523,6 +1678,33 @@ const executePayout = async ({
   destinationAddress,
   amount
 }) => {
+  const policy = getPolicy(merchantId, accountId);
+  if (policy?.treasuryMode === "private") {
+    const chain = getChainCatalogByNetwork(network);
+    if (chain?.status === "paused") {
+      return {
+        ok: false,
+        statusCode: 400,
+        payload: {
+          error: "network is paused by RailBridge operations",
+          network
+        }
+      };
+    }
+    const result = await executePrivatePayout({
+      merchantId,
+      accountId,
+      network,
+      destinationAddress,
+      amount,
+      publishTenantWebhookEvent
+    });
+    if (result.ok) {
+      recomputeBalances(merchantId, accountId);
+    }
+    return result;
+  }
+
   const sourceWallet = getWalletByNetwork(merchantId, accountId, network);
   if (!sourceWallet) {
     return {
@@ -2000,9 +2182,40 @@ const server = createServer(async (req, res) => {
         body.autoBridgeEnabled !== undefined
           ? Boolean(body.autoBridgeEnabled)
           : Boolean(currentPolicy?.autoBridgeEnabled ?? true);
+      const nextTreasuryMode =
+        body.treasuryMode !== undefined
+          ? normalizeTreasuryMode(body.treasuryMode)
+          : normalizeTreasuryMode(currentPolicy?.treasuryMode);
+      const nextPrivateHomeNetwork =
+        body.privateHomeNetwork !== undefined
+          ? String(body.privateHomeNetwork || "").trim()
+          : String(currentPolicy?.privateHomeNetwork || "").trim();
+
+      if (nextTreasuryMode === "private" && !nextPrivateHomeNetwork) {
+        return sendJson(res, 400, { error: "privateHomeNetwork is required when treasuryMode=private" });
+      }
+
+      if (nextTreasuryMode === "private" && nextPrivateHomeNetwork) {
+        const privateHomeChain = getChainCatalogByNetwork(nextPrivateHomeNetwork);
+        if (!privateHomeChain) {
+          return sendJson(res, 400, { error: "privateHomeNetwork is not in the active chain catalog" });
+        }
+        if (privateHomeChain.status === "paused") {
+          return sendJson(res, 400, { error: "privateHomeNetwork is paused by operations" });
+        }
+      }
+
+      const nextPrivacyEnabledAt =
+        nextTreasuryMode === "private"
+          ? String(currentPolicy?.privacyEnabledAt || nowIso())
+          : null;
+
       const updatedPolicy = upsertPolicy(session.merchantId, session.accountId, {
         preferredNetwork: nextPreferredNetwork,
-        autoBridgeEnabled: nextAutoBridgeEnabled
+        autoBridgeEnabled: nextAutoBridgeEnabled,
+        treasuryMode: nextTreasuryMode,
+        privateHomeNetwork: nextTreasuryMode === "private" ? nextPrivateHomeNetwork : null,
+        privacyEnabledAt: nextPrivacyEnabledAt
       });
 
       return sendJson(res, 200, {
@@ -2379,11 +2592,14 @@ const server = createServer(async (req, res) => {
       const body = await parseJsonBody(req);
       const merchantId = String(body.merchantId || "").trim();
       const accountId = String(body.accountId || "").trim();
+      const paymentContextId = body.paymentContextId ? String(body.paymentContextId).trim() : "";
       const sourceNetwork = String(body.sourceNetwork || "").trim();
       const destinationNetwork = body.destinationNetwork ? String(body.destinationNetwork).trim() : null;
+      const scheme = body.scheme ? String(body.scheme).trim() : "exact";
       const status = String(body.status || "").trim();
       const txHash = String(body.txHash || "").trim();
       const amount = String(body.amount || "").trim();
+      const publicPayTo = body.publicPayTo ? String(body.publicPayTo).trim() : "";
       const failReason = body.failReason ? sanitizeFailReason(String(body.failReason).trim()) : null;
       const eventId = String(body.eventId || newId()).trim();
       const settlementId = String(body.settlementId || txHash || eventId).trim();
@@ -2407,14 +2623,24 @@ const server = createServer(async (req, res) => {
           ? 0
           : Number.parseInt(String(body.confirmations), 10);
 
+      let resolvedMerchantId = merchantId;
+      let resolvedAccountId = accountId;
+      let resolvedPaymentContext = null;
+
       const acceptedStatuses = new Set(["settled_source", "bridge_pending", "bridge_confirmed", "failed"]);
-      if (!merchantId || !accountId || !sourceNetwork || !txHash || !amount) {
-        return sendJson(res, 400, { error: "merchantId, accountId, sourceNetwork, amount, txHash are required" });
+      if ((!resolvedMerchantId || !resolvedAccountId) && !paymentContextId) {
+        return sendJson(res, 400, {
+          error: "merchantId/accountId or paymentContextId are required"
+        });
+      }
+      if (!sourceNetwork || !txHash || !amount) {
+        return sendJson(res, 400, { error: "sourceNetwork, amount, txHash are required" });
       }
       if (!acceptedStatuses.has(status)) {
         return sendJson(res, 400, { error: "invalid status" });
       }
-      if (!normalizeUsdcAsset(body.asset)) {
+      const normalizedAsset = normalizeUsdcAsset(body.asset);
+      if (!normalizedAsset) {
         return sendJson(res, 400, { error: "USDC-only: unsupported asset" });
       }
       if (!/^[0-9]+$/.test(amount) || BigInt(amount) <= 0n) {
@@ -2429,18 +2655,49 @@ const server = createServer(async (req, res) => {
       if (Number.isNaN(confirmations) || confirmations < 0) {
         return sendJson(res, 400, { error: "confirmations must be a non-negative integer" });
       }
-      if (!ensureAccountExists(res, merchantId, accountId)) {
+
+      if (paymentContextId) {
+        if (!publicPayTo) {
+          return sendJson(res, 400, { error: "publicPayTo is required when paymentContextId is provided" });
+        }
+        const resolved = resolvePaymentRequirementContextForSettlement({
+          paymentContextId,
+          settlementId,
+          scheme,
+          sourceNetwork,
+          asset: normalizedAsset,
+          amount,
+          publicPayTo
+        });
+        if (!resolved.ok) {
+          return sendJson(res, resolved.code === "reused" ? 409 : 400, {
+            error: resolved.error,
+            code: resolved.code,
+            paymentContextId
+          });
+        }
+        resolvedPaymentContext = resolved.context;
+        resolvedMerchantId = resolved.context.merchantId;
+        resolvedAccountId = resolved.context.accountId;
+      }
+
+      if (!ensureAccountExists(res, resolvedMerchantId, resolvedAccountId)) {
         return;
       }
 
       const duplicate = hasSettlementEvent(eventId);
-      const duplicateLifecycle = hasSettlementLifecycleEvent(merchantId, accountId, settlementId, status);
+      const duplicateLifecycle = hasSettlementLifecycleEvent(
+        resolvedMerchantId,
+        resolvedAccountId,
+        settlementId,
+        status
+      );
       if (!duplicate && !duplicateLifecycle) {
         insertSettlementEvent({
           eventId,
           settlementId,
-          merchantId,
-          accountId,
+          merchantId: resolvedMerchantId,
+          accountId: resolvedAccountId,
           sourceNetwork,
           destinationNetwork,
           apiId,
@@ -2458,7 +2715,7 @@ const server = createServer(async (req, res) => {
           confirmations,
           createdAt
         });
-        recomputeBalances(merchantId, accountId);
+        recomputeBalances(resolvedMerchantId, resolvedAccountId);
 
         const eventTypeByStatus = {
           settled_source: "payment.settled_source",
@@ -2468,15 +2725,18 @@ const server = createServer(async (req, res) => {
         };
         const webhookEventType = eventTypeByStatus[status] || "payment.updated";
         await publishTenantWebhookEvent({
-          merchantId,
-          accountId,
+          merchantId: resolvedMerchantId,
+          accountId: resolvedAccountId,
           eventType: webhookEventType,
           eventId: `evt_${eventId}_${status}`,
           data: {
             eventId,
             settlementId,
-            merchantId,
-            accountId,
+            merchantId: resolvedMerchantId,
+            accountId: resolvedAccountId,
+            paymentContextId: paymentContextId || null,
+            treasuryMode: resolvedPaymentContext?.treasuryMode || null,
+            privacyCoverageMode: resolvedPaymentContext?.privacyCoverageMode || null,
             sourceNetwork,
             destinationNetwork,
             asset: "USDC",
@@ -2492,11 +2752,51 @@ const server = createServer(async (req, res) => {
         });
       }
 
+      if (
+        paymentContextId &&
+        resolvedPaymentContext?.treasuryMode === "private" &&
+        resolvedPaymentContext?.privacyCoverageMode === "full_private" &&
+        status === "settled_source"
+      ) {
+        const privateLedgerNetwork =
+          String(resolvedPaymentContext.privateHomeNetwork || "").trim() || sourceNetwork;
+        const environment =
+          privacyVaultService.getEnvironmentForNetwork(privateLedgerNetwork) || config.unlinkDefaultEnvironment;
+        insertPrivateLedgerEntry({
+          merchantId: resolvedMerchantId,
+          accountId: resolvedAccountId,
+          provider: "unlink",
+          environment,
+          network: privateLedgerNetwork,
+          asset: "USDC",
+          entryType: "payment.settled_public_intake",
+          direction: "credit",
+          amount,
+          availableDelta: "0",
+          pendingSweepDelta: amount,
+          pendingWithdrawalDelta: "0",
+          referenceType: "settlement",
+          referenceId: settlementId,
+          idempotencyKey: `private:intake:${settlementId}`,
+          metadata: {
+            paymentContextId,
+            sourceNetwork,
+            privateHomeNetwork: resolvedPaymentContext.privateHomeNetwork || null,
+            txHash,
+            sourceTxHash,
+            publicPayTo: resolvedPaymentContext.publicPayTo || publicPayTo
+          }
+        });
+      }
+
       return sendJson(res, 200, {
         success: true,
         duplicate: duplicate || duplicateLifecycle,
         eventId,
-        settlementId
+        settlementId,
+        paymentContextId: paymentContextId || null,
+        merchantId: resolvedMerchantId || null,
+        accountId: resolvedAccountId || null
       });
     }
 
@@ -2575,6 +2875,68 @@ const server = createServer(async (req, res) => {
         settlementModeOverride
       });
       return sendJson(res, resolved.status, resolved.payload);
+    }
+
+    if (method === "POST" && pathname === "/v1/internal/private-accounts") {
+      if (!validateInternalToken(req)) {
+        return sendJson(res, 401, { error: "Unauthorized internal token" });
+      }
+
+      const body = await parseJsonBody(req);
+      const merchantId = String(body.merchantId || "").trim();
+      const accountId = String(body.accountId || "").trim();
+      const network = String(body.network || "").trim();
+      const provider = String(body.provider || "unlink").trim() || "unlink";
+      const environment =
+        String(body.environment || "").trim() ||
+        privacyVaultService.getEnvironmentForNetwork(network) ||
+        "";
+      const role = String(body.role || "merchant").trim() || "merchant";
+      const unlinkAddress = body.unlinkAddress ? String(body.unlinkAddress).trim() : "";
+      const keyReference = body.keyReference ? String(body.keyReference).trim() : null;
+
+      if (!merchantId || !accountId || !network || !environment) {
+        return sendJson(res, 400, {
+          error: "merchantId, accountId, network, and environment are required"
+        });
+      }
+      if (!ensureAccountExists(res, merchantId, accountId)) {
+        return;
+      }
+
+      const saved = upsertPrivateAccount({
+        merchantId,
+        accountId,
+        provider,
+        environment,
+        network,
+        role,
+        unlinkAddress: unlinkAddress || null,
+        keyReference
+      });
+
+      return sendJson(res, 200, {
+        success: true,
+        privateAccount: saved
+      });
+    }
+
+    if (method === "POST" && pathname === "/v1/internal/privacy/sweeps/run") {
+      if (!validateInternalToken(req)) {
+        return sendJson(res, 401, { error: "Unauthorized internal token" });
+      }
+
+      const body = await parseJsonBody(req);
+      const limit =
+        body.limit === undefined || body.limit === null || body.limit === ""
+          ? config.privacySweepBatchSize
+          : Number.parseInt(String(body.limit), 10);
+      if (Number.isNaN(limit) || limit <= 0) {
+        return sendJson(res, 400, { error: "limit must be a positive integer" });
+      }
+
+      const result = await privacySweepWorker.runOnce({ limit });
+      return sendJson(res, 200, result);
     }
 
     const merchantItemProductMatch = pathname.match(MERCHANT_PRODUCTS_ITEM_ROUTE);
@@ -2912,9 +3274,15 @@ const server = createServer(async (req, res) => {
           accountId: key.accountId,
           asOf: overview.asOf,
           onchainMode: overview.onchainMode,
+          treasuryMode: overview.policy?.treasuryMode || "public",
+          privateHomeNetwork: overview.policy?.privateHomeNetwork || null,
           availableUsd: overview.availableUsd,
           projectedUsd: overview.projectedUsd,
           pendingBridgeUsd: overview.pendingBridgeUsd,
+          pendingSweepUsd: overview.pendingSweepUsd || "0",
+          pendingWithdrawalUsd: overview.pendingWithdrawalUsd || "0",
+          balanceFreshness: overview.balanceFreshness || null,
+          lastProviderSyncAt: overview.lastProviderSyncAt || null,
           balances: overview.balances
         });
       }
@@ -3489,6 +3857,9 @@ const server = createServer(async (req, res) => {
 
 initializeDatabase();
 chainCatalogService.start();
+if (config.privacySweepWorkerEnabled) {
+  privacySweepWorker.start();
+}
 
 server.listen(config.port, () => {
   console.log(`Merchant OS listening on http://localhost:${config.port}`);
