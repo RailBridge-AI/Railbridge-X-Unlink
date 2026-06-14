@@ -328,6 +328,18 @@ export const config = {
     "eip155:11155111": "ethereum-sepolia",
     ...parseJsonObjectEnv(process.env.UNLINK_ENVIRONMENT_BY_NETWORK_JSON, {})
   },
+  unlinkOmnibusMnemonicByEnvironment: {
+    "base-sepolia": String(process.env.UNLINK_OMNIBUS_MNEMONIC_BASE_SEPOLIA || "").trim(),
+    "ethereum-sepolia": String(process.env.UNLINK_OMNIBUS_MNEMONIC_ETHEREUM_SEPOLIA || "").trim(),
+    ...parseJsonObjectEnv(process.env.UNLINK_OMNIBUS_MNEMONIC_BY_ENVIRONMENT_JSON, {})
+  },
+  treasuryIntakePrivateKeyByEnvironment: {
+    "base-sepolia": String(process.env.TREASURY_INTAKE_PRIVATE_KEY_BASE_SEPOLIA || "").trim(),
+    "ethereum-sepolia": String(process.env.TREASURY_INTAKE_PRIVATE_KEY_ETHEREUM_SEPOLIA || "").trim(),
+    ...parseJsonObjectEnv(process.env.TREASURY_INTAKE_PRIVATE_KEY_BY_ENVIRONMENT_JSON, {})
+  },
+  unlinkMutationPollIntervalMs: 2000,
+  unlinkMutationPollTimeoutMs: 120000,
 
   realConsolidationBridgeEnabled: parseBooleanValue(
     runtimeConfig.realConsolidationBridgeEnabled,
