@@ -69,6 +69,7 @@ import {
   touchApiKeyUsed,
   touchPayoutAddressBookEntryUsedByNetworkAddress,
   upsertPolicy,
+  upsertPrivateAccount,
   upsertPayoutAddressBookEntry,
   updateApiKeyMetadata,
   updateApiProduct,
@@ -2774,6 +2775,50 @@ const server = createServer(async (req, res) => {
         settlementModeOverride
       });
       return sendJson(res, resolved.status, resolved.payload);
+    }
+
+    if (method === "POST" && pathname === "/v1/internal/private-accounts") {
+      if (!validateInternalToken(req)) {
+        return sendJson(res, 401, { error: "Unauthorized internal token" });
+      }
+
+      const body = await parseJsonBody(req);
+      const merchantId = String(body.merchantId || "").trim();
+      const accountId = String(body.accountId || "").trim();
+      const network = String(body.network || "").trim();
+      const provider = String(body.provider || "unlink").trim() || "unlink";
+      const environment =
+        String(body.environment || "").trim() ||
+        privacyVaultService.getEnvironmentForNetwork(network) ||
+        "";
+      const role = String(body.role || "merchant").trim() || "merchant";
+      const unlinkAddress = body.unlinkAddress ? String(body.unlinkAddress).trim() : "";
+      const keyReference = body.keyReference ? String(body.keyReference).trim() : null;
+
+      if (!merchantId || !accountId || !network || !environment) {
+        return sendJson(res, 400, {
+          error: "merchantId, accountId, network, and environment are required"
+        });
+      }
+      if (!ensureAccountExists(res, merchantId, accountId)) {
+        return;
+      }
+
+      const saved = upsertPrivateAccount({
+        merchantId,
+        accountId,
+        provider,
+        environment,
+        network,
+        role,
+        unlinkAddress: unlinkAddress || null,
+        keyReference
+      });
+
+      return sendJson(res, 200, {
+        success: true,
+        privateAccount: saved
+      });
     }
 
     const merchantItemProductMatch = pathname.match(MERCHANT_PRODUCTS_ITEM_ROUTE);
